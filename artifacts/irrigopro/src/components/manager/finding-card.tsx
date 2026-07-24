@@ -59,13 +59,23 @@ export function FindingCard({
   }, [edits, customerLaborRate]);
 
   const [partPickerOpen, setPartPickerOpen] = useState(false);
+  // Task #1827 — tracks whether manager has manually typed a price override.
+  // When true, part re-selection does NOT clobber the typed value.
+  const [priceManuallySet, setPriceManuallySet] = useState(false);
 
   const choosePart = (p: Part | null) => {
+    // No-clobber: only pull price from catalog when the manager hasn't typed
+    // a manual override. A "clear part" (p=null) always clears the price.
+    const partPrice = p == null
+      ? null
+      : priceManuallySet
+        ? edits.partPrice
+        : String(p.price ?? "0");
     onChange({
       ...edits,
       partId: p?.id ?? null,
       partName: p?.name ?? null,
-      partPrice: p ? String(p.price ?? "0") : null,
+      partPrice,
     });
     setPartPickerOpen(false);
   };
@@ -207,8 +217,26 @@ export function FindingCard({
                     <Pencil className="w-3 h-3 mr-1" /> Change
                   </Button>
                 </div>
-                <div className="text-xs text-gray-500">
-                  Part price: ${parseFloat(edits.partPrice ?? "0").toFixed(2)}
+                <div className="text-xs space-y-1">
+                  <span className="text-gray-500 block">Unit price ($)</span>
+                  <Input
+                    type="number"
+                    min={0}
+                    step={0.01}
+                    value={parseFloat(edits.partPrice ?? "0").toFixed(2)}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      const val = parseFloat(raw || "0");
+                      setPriceManuallySet(true);
+                      onChange({
+                        ...edits,
+                        partPrice: isNaN(val) ? "0" : String(Math.max(0, val)),
+                      });
+                    }}
+                    className="h-9 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                    data-testid={`wizard-finding-${finding.id}-price`}
+                    aria-label="Unit price"
+                  />
                 </div>
               </div>
             )}

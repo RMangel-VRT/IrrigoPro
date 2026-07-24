@@ -40,6 +40,11 @@ export interface WizardLineItem {
   partId: number | null;
   partName: string;
   partPrice: number;
+  // Task #1827 — tracks whether the manager has manually typed a price
+  // override. When true, part re-selection via the picker does NOT clobber
+  // the typed value. False (default) means the price is still catalog-derived
+  // and a part re-select is safe to update it.
+  priceManuallySet?: boolean;
   quantity: number;
   // Task #657 — Per-row labor entry is gone from the estimate wizard;
   // labor is captured as a single flat "Total labor hours" value at the
@@ -146,10 +151,17 @@ export function EstimateWizardLineItemsStep({
 
   const handlePartPicked = (part: Part) => {
     if (pickerMode === "change" && changeRowId) {
+      const existing = items.find((it) => it.rowId === changeRowId);
+      // Task #1827 — no-clobber: only update price from catalog when the
+      // manager has NOT yet typed a manual override on this row.
+      const catalogPrice = parseFloat(String(part.price ?? "0")) || 0;
+      const priceUpdate = existing?.priceManuallySet
+        ? {}
+        : { partPrice: catalogPrice };
       updateItem(changeRowId, {
         partId: part.id,
         partName: part.name,
-        partPrice: parseFloat(String(part.price ?? "0")) || 0,
+        ...priceUpdate,
       });
       setChangeRowId(null);
     } else {
@@ -160,6 +172,7 @@ export function EstimateWizardLineItemsStep({
           partId: part.id,
           partName: part.name,
           partPrice: parseFloat(String(part.price ?? "0")) || 0,
+          priceManuallySet: false,
           quantity: 1,
           // Parts catalog has no per-part labor hours; tech enters labor inline.
           laborHours: 0,
@@ -462,7 +475,24 @@ export function EstimateWizardLineItemsStep({
                             </button>
                           </div>
                         </td>
-                        <td className="py-3 px-2 text-right text-gray-700">{fmt(it.partPrice)}</td>
+                        <td className="py-3 px-2 text-right">
+                          <Input
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            value={it.partPrice}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value || "0");
+                              updateItem(it.rowId, {
+                                partPrice: isNaN(val) ? 0 : Math.max(0, val),
+                                priceManuallySet: true,
+                              });
+                            }}
+                            className="h-8 w-24 text-right [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1 ml-auto"
+                            data-testid={`wizard-row-price-${it.rowId}`}
+                            aria-label="Unit price"
+                          />
+                        </td>
                         <td
                           className="py-3 px-2 text-right font-semibold text-gray-900"
                           data-testid={`wizard-row-total-${it.rowId}`}
@@ -578,9 +608,22 @@ export function EstimateWizardLineItemsStep({
                     </div>
                     <div>
                       <div className="text-[10px] text-gray-500 uppercase mb-1">Unit price</div>
-                      <div className="h-9 px-3 flex items-center text-sm text-gray-700 bg-gray-50 border rounded-md">
-                        {fmt(it.partPrice)}
-                      </div>
+                      <Input
+                        type="number"
+                        min={0}
+                        step={0.01}
+                        value={it.partPrice}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value || "0");
+                          updateItem(it.rowId, {
+                            partPrice: isNaN(val) ? 0 : Math.max(0, val),
+                            priceManuallySet: true,
+                          });
+                        }}
+                        className="h-9 text-sm [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                        data-testid={`wizard-card-price-${it.rowId}`}
+                        aria-label="Unit price"
+                      />
                     </div>
                     <div>
                       <div className="text-[10px] text-gray-500 uppercase mb-1">Line total</div>
