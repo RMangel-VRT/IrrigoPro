@@ -1,0 +1,66 @@
+# BUILD — Editable Line-Item Prices on Estimates & Wet Check Triage
+
+**What & Why**
+Billing sheets and work orders already let a manager edit the unit price on any line item. Estimates and wet-check triage findings don't — the part price is pinned to the catalog value and shown as read-only, so a manager who wants to discount or mark up a specific job has to bill it first and adjust afterward. This closes that gap: make the part price editable in the estimate wizard's line-items step and on the wet-check triage finding card, defaulting to the catalog price. Nothing else about pricing changes — no blanket markup, no customer tiers, no change to post-invoice locking, and field techs still never see pricing.
+
+The good news from tracing the code: this is smaller and lower-risk than it looks. **No schema changes are needed**, and two of the four original slices are almost certainly "verify with a test," not build.
+
+## Current state (confirmed in code)
+- **The storage columns already exist.** `estimate_items.part_price` (schema:558, `notNull`) and `wet_check_findings.part_price` (schema:1477, nullable) are both present. There is **no migration** in this ticket.
+- **Estimate wizard shows price as read-only text.** `estimate-wizard-line-items-step.tsx` keeps `partPrice` in row state (`:42`), pre-fills it from the catalog on part select (`:152`/`:162`), and computes the line total from it (`:397`) — but renders it as static text (`{fmt(it.partPrice)}`, `:465`/`:582`), so it can't be changed.
+- **The estimate API already accepts and persists a submitted price.** The item schema accepts `partPrice` (Zod union, `estimate-routes.ts:195`) and saves the submitted value (`:1645`) with no catalog re-derivation. So there's nothing to "un-override" on the server.
+- **The finding card already carries the price in edit state.** `finding-card.tsx` holds `edits.partPrice` (`:17`/`:56`/`:68`), pre-fills it from the catalog on part select (`:68`), and computes the line total from it (`:56–58`) — but displays it as static text ("Part price: $X.XX", `:211`).
+- **Wet-check billing already reads the finding's saved price.** The auto-bill parts total is `Σ (finding.quantity × finding.partPrice)` (`storage.ts:9005`), and the finding PATCH persists a client-supplied `partPrice` (`buildFindingPatchFromBody`, `routes.ts:17636`). So a saved override already flows into the billing sheet — the routing does **not** re-fetch the catalog price. (The one `catalogUnitPrice` re-fetch, `storage.ts:6077`, is an unrelated work-order price-repair migration.)
+
+## The change
+
+### Slice 1 — Estimate wizard: make the unit-price field editable
+In `estimate-wizard-line-items-step.tsx`, replace the read-only price text with a numeric `<Input>` (`step="0.01"`, `min="0"`) bound to the row's `partPrice`. Wire changes through the existing line-item state so the line total and the review-step subtotal recompute live. Default to the catalog price when a part is selected, **but preserve a value the user has already typed** — selecting/confirming a part must not clobber a manual override (see Safeguards).
+
+### Slice 2 — Estimate API: confirm it persists the override (verify, likely no change)
+The API already accepts `partPrice` per item and saves it as submitted. Confirm there is no path that re-writes `partPrice` from the catalog on save; if such an override exists, remove it. Expectation based on the code: **no change needed — add a round-trip test instead.**
+
+### Slice 3 — Wet-check triage finding card: make the price field editable
+In `finding-card.tsx`, replace the static "Part price" text with a numeric `<Input>` bound to the existing `edits.partPrice`. It already computes the line total from that value, so the total updates live. Default to the catalog price on part select, preserving a typed override (see Safeguards). The server already persists a submitted `partPrice`, so no server change is needed for the override to save.
+
+### Slice 4 — Wet-check → billing carry-through (verify, likely no change)
+Because the billing total is computed from `finding.partPrice` (`storage.ts:9005`), a saved override already carries into the generated billing sheet. Confirm the routed billing-sheet/WCB line item's unit price comes from `finding.partPrice` and not a fresh catalog lookup. Expectation: **no change needed — prove it with a test** (edit a finding's price → route to billing → the billing line shows the edited price).
+
+## Safeguards (the two things most likely to bite)
+- **Don't overwrite a typed override when a part is (re)selected.** Both the wizard and the finding card set `partPrice` from the catalog on part select. Selecting or re-confirming a part must default the price only when the user hasn't entered one — a manual edit must survive.
+- **Keep the editable input manager-only.** Making price editable is new surface, distinct from the existing display-strip logic. `finding-card.tsx` lives under `components/manager/`, but confirm no field-tech capture path renders the editable price input, so "field techs never see pricing" still holds. Server-side `applyPricingVisibility` stays as the enforcement backstop.
+
+## Out of scope
+- A ticket-level blanket markup % that recomputes all lines at once.
+- Customer-level pricing tiers or contract pricing.
+- Any change to price-locking after invoicing (existing lock behavior unchanged).
+- Billing sheets and work orders — they already support editable prices; leave them alone.
+
+## Done looks like
+- In the estimate wizard, each line item has an editable unit-price input (catalog-prefilled); changing it updates the line total and review subtotal live, and the override round-trips (re-opening the estimate shows the saved price, not the catalog price).
+- On the wet-check triage finding card, the part price is editable; the override persists on save and carries through to the billing sheet when the wet check is routed to billing.
+- A typed override is never wiped by selecting/confirming a part.
+- Field techs never see the editable price field; billing sheets and work orders are unchanged.
+
+## Tests
+- Estimate: edit a line's unit price → line total + subtotal update; save → reload → saved (overridden) price persists, not the catalog value.
+- Estimate: selecting a part after typing a price does not overwrite the typed price.
+- Finding card: edit the price → line total updates; save → the finding stores the override.
+- Wet-check → billing: edit a finding's price → route to billing → the billing-sheet line shows the edited price (proves Slice 4 with no re-fetch).
+- Field tech: no editable price input is rendered in any tech-facing path; `applyPricingVisibility` still strips prices server-side.
+- Regression: billing sheets and work orders' price editing is unchanged.
+
+## Definition of Done (attach proof — Rule 7)
+- [ ] `file:line` for the two UI inputs (wizard + finding card) and the override-preservation logic.
+- [ ] Confirmation (with `file:line`) that the estimate API persists the submitted price and the wet-check routing sources `finding.partPrice` — noting whether either needed a code change or was already correct.
+- [ ] Screenshots: an estimate line and a finding card with an edited (non-catalog) price, and the resulting billing sheet showing the carried-through price.
+- [ ] Test output for the persist / round-trip / no-clobber / carry-through cases.
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+- `artifacts/irrigopro/src/components/estimates/wizard/estimate-wizard-line-items-step.tsx` (Slice 1 — price input + no-clobber)
+- `artifacts/irrigopro/src/components/manager/finding-card.tsx` (Slice 3 — price input + no-clobber)
+- `artifacts/irrigopro/src/pages/wet-checks/ManagerWetCheckDetailPage.tsx` (finding-card host, if any prop wiring is needed)
+- `artifacts/api-server/src/routes/estimate-routes.ts` (Slice 2 — verify persistence)
+- `artifacts/api-server/src/routes/routes.ts` + `artifacts/api-server/src/storage.ts` (Slice 4 — verify `finding.partPrice` carry-through; `:9005`, `:17636`)
+- `lib/db/src/schema/schema.ts` (reference only — `estimate_items.part_price` `:558`, `wet_check_findings.part_price` `:1477`; **no change**)
