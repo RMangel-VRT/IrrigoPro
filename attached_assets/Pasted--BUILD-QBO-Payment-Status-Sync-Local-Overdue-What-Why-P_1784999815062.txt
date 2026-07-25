@@ -1,0 +1,89 @@
+# BUILD — QBO Payment-Status Sync + Local Overdue
+
+**What & Why**
+Payment happens in QuickBooks Online but never makes it back to IrrigoPro, so an invoice never actually shows as paid here — and the "paid invoice is locked" guards we already built (editability, correction, void) plus AR aging all depend on a paid status that nothing sets. This ticket reads payment state back from QBO and tracks a **3-tier payment status** on each invoice — **paid / partially paid / unpaid** — plus a locally-computed **overdue** overlay. Clean split of responsibility: **QBO owns how much is still owed (the `Balance` field); IrrigoPro owns whether it's late (due date vs today).**
+
+QBO has **no boolean "paid" flag** — the status shown in the QBO UI is derived from `Balance` (server-calculated; anything we send is overwritten). So we read `Balance`/`TotalAmt` and map it. Reading is one-directional: we never write payment status back to QBO.
+
+## The model
+For an invoice that's in QBO (`quickbooksInvoiceId` set):
+- `Balance == 0` (and `TotalAmt > 0`) → **paid**
+- `0 < Balance < TotalAmt` → **partially paid** (remaining owed = `Balance`)
+- `Balance == TotalAmt` → **unpaid**
+- **Overdue** (derived locally, not from QBO): `paymentStatus != 'paid'` AND the effective due date is in the past. It's an overlay on unpaid/partially-paid, not a fourth payment tier.
+
+## Current state (confirmed in code)
+- Invoices have lifecycle `status` (with `paid`/`overdue` among its values) and a `paidAt` timestamp and a nullable `dueDate` — but **nothing sets paid/overdue today**; the QB integration is push-only (create/update in QBO, never read back).
+- The QBO query plumbing exists: `makeQuickBooksRequest` + `/v3/company/{realm}/query?query=...` (qb-invoice-ops.ts:90, routes.ts:8636). Reads are token-free (no SyncToken needed).
+- Customers carry `paymentTerms` (e.g. `net_30`), and the monthly/standalone generators already set an invoice `dueDate` — both usable for the overdue calc.
+- **No recurring-job/cron infra exists** in the app — so the sync needs an explicit trigger (see Slice 3).
+
+## Slice 1 — Schema: payment status + balance
+Add to `invoices` (additive; ships cleanly once Auto-Apply-Schema lands, else `db push`):
+- `paymentStatus: text("payment_status").notNull().default("unpaid")` — `unpaid | partially_paid | paid`.
+- `balance: decimal("balance", { precision: 10, scale: 2 })` — remaining owed, from QBO (null until first sync).
+- `paymentSyncedAt: timestamp` — when Balance was last read from QBO (for staleness display).
+- Reuse existing `paidAt` (stamp when → paid) and `dueDate` (overdue basis). Keep lifecycle `status` as-is.
+
+## Slice 2 — Read Balance from QBO
+Add a read that, for a company's QBO-linked invoices, queries `SELECT Id, Balance, TotalAmt, DueDate FROM Invoice WHERE Id IN ('…','…')` via `makeQuickBooksRequest` (batch the ids; page if needed). Read-only — no SyncToken, no writes.
+- Map each result → `paymentStatus` + `balance` per the model; stamp `paymentSyncedAt`; set `paidAt` when it transitions to paid.
+- Only poll invoices worth polling: `quickbooksInvoiceId` set, not terminal (`cancelled/superseded/merged`), and not already `paid` (optionally re-check paid ones occasionally to catch refunds — note, not required).
+- Company-scoped (per-company QBO integration); handle a missing/expired QBO connection gracefully (skip + surface, don't crash).
+
+## Slice 3 — Trigger (on-demand now, scheduled when available)
+No scheduler exists today, so:
+- **On-demand endpoint** `POST /api/invoices/sync-payment-status` (billing access) that runs Slice 2 for the caller's company; and a **"Refresh payment status"** button in the Command Center / invoice list.
+- **Throttled auto-trigger** on Command Center / invoice-list load (e.g. at most once per N minutes per company) so it stays fresh without a manual click.
+- **Scheduled trigger (flagged):** if/when a scheduler is added (e.g. a Replit Scheduled Deployment or cron hitting the same endpoint), wire it to run this every few hours. Pick the cadence; the endpoint is the same either way.
+
+## Slice 4 — Overdue (local, derived — no QBO)
+Compute overdue from dates already on hand: an invoice is **overdue** when it isn't settled (`paymentStatus` is `unpaid` or `partially_paid`) AND `effectiveDueDate < now`. **Effective due date (decided): use the invoice's stored `dueDate` when present, otherwise `createdAt + customer.paymentTerms`** (net-30 fallback if the customer has no terms). Using the stored `dueDate` first keeps it consistent with what the customer sees on the invoice/PDF and what QBO was given; the createdAt+terms path only fills in for older invoices that never got a due date.
+- Prefer computing on read (cheap, always current) for display and AR; optionally also stamp lifecycle `status = 'overdue'` on the same sync pass for reporting. Don't let an `overdue` stamp overwrite payment info — overdue is an overlay, `paymentStatus` is the source of truth for money.
+
+## Slice 5 — Wire into existing guards + AR math
+- **Keep the paid-lock guards working**: when `paymentStatus` becomes `paid`, also set lifecycle `status = 'paid'` + `paidAt` so the existing `status === 'paid'` checks (editability, correction, void) fire unchanged.
+- **Partial-payment lock (decided)**: a **partially-paid invoice is locked the same as paid** — once any payment is applied, edit/void is blocked; use the correction/credit path. (The paid-lock guards key off "any payment applied," i.e. `paymentStatus` is `paid` **or** `partially_paid`.)
+- **AR aging uses `balance`, not the full total, for partials**: financial-pulse should count only the remaining `balance` of a partially-paid invoice as outstanding (a $1,000 invoice with $400 paid is $600 receivable), and drop fully-paid invoices from AR. Overdue buckets key off the effective due date.
+
+## Slice 6 — UI
+- Payment badge on the invoice list + Command Center: **Paid** (green), **Partially paid** (amber, showing remaining `balance`), **Unpaid** (neutral), with an **Overdue** treatment (red) layered on unpaid/partial past due.
+- Show `paymentSyncedAt` ("updated 2h ago") and the "Refresh payment status" control.
+
+## Never write payment to QBO
+This is read-only for payment. We never set Balance/paid in QBO (QBO calculates Balance and ignores supplied values); payments are recorded in QBO by the user/their bookkeeper.
+
+## Decisions
+- **Partial = locked** ✅ — partially-paid invoices lock edit/void the same as paid.
+- **Overdue basis** ✅ — stored `dueDate` when present, else `createdAt + customer terms` (net-30 fallback).
+- **Scheduler** (still open): on-demand + throttled-on-load ship now; add a scheduled trigger later once cron/Scheduled-Deployment infra exists (recommended). The sync endpoint is the same either way, so this can be added without rework.
+
+## Done looks like
+- Each QBO-linked invoice shows paid / partially paid / unpaid, synced from QBO `Balance`, with remaining balance on partials.
+- Overdue is computed locally from the due date and layered on unpaid/partial invoices.
+- Fully-paid invoices flip lifecycle `status` to `paid` (+ `paidAt`), so the existing paid-locks and AR aging work correctly; AR counts only outstanding balance.
+- A manual refresh works now; the same endpoint is ready for a scheduled trigger.
+- No payment data is ever written back to QBO.
+
+## Tests
+- Balance 0 → paid (+ `status: 'paid'`, `paidAt` set); Balance == total → unpaid; Balance between → partially_paid with correct `balance`.
+- Overdue: unpaid/partial past due → overdue; paid past due → not overdue; not-yet-due → not overdue.
+- AR: partially-paid invoice contributes only its `balance`; paid invoice drops out; overdue bucketed by due date.
+- Sync skips terminal/paid and handles a disconnected QBO gracefully; company isolation (only the caller's company's invoices).
+- Read path uses no SyncToken and writes nothing to QBO (assert no QBO write calls).
+- Edit/void locks fire for **both** `paid` and `partially_paid` (a partially-paid invoice cannot be edited or voided); an `unpaid` invoice remains editable.
+
+## Definition of Done (attach proof — Rule 7)
+- [ ] `file:line` for the schema fields, the Balance read/mapping, the trigger endpoint + UI control, the overdue derivation, and the AR/guard wiring.
+- [ ] Screenshot: invoices showing Paid / Partially paid (with balance) / Unpaid / Overdue badges after a sync.
+- [ ] Test output for the Balance→status mapping, overdue derivation, partial-AR, isolation, and read-only-to-QBO cases.
+- [ ] Confirmation the sync writes nothing to QBO and uses no SyncToken.
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+- `lib/db/src/schema/schema.ts` (`invoices` — add `payment_status`, `balance`, `payment_synced_at`; reuse `paid_at`, `due_date`)
+- `artifacts/api-server/src/routes/qb-invoice-ops.ts` (query helper pattern to reuse for the Balance read)
+- `artifacts/api-server/src/routes/routes.ts` (`makeQuickBooksRequest`; new sync endpoint; monthly/standalone `dueDate`)
+- `artifacts/api-server/src/financial-pulse-math.ts` (AR aging → use `balance` for partials, drop paid, overdue buckets)
+- `artifacts/api-server/src/routes/invoice-editability-routes.ts` + `invoice-correction-routes.ts` (paid/partial lock wiring)
+- `artifacts/irrigopro/src/pages/invoices.tsx` / `components/billing/invoice-list.tsx` / `pages/customer-billing.tsx` (payment + overdue badges, refresh control)
