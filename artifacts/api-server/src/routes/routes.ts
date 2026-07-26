@@ -394,6 +394,11 @@ import {
 import { registerInvoiceMarkSentRoutes } from "./invoice-mark-sent-routes";
 import { registerInvoiceCorrectionRoutes } from "./invoice-correction-routes";
 import { registerInvoiceEditabilityRoutes } from "./invoice-editability-routes";
+import {
+  registerQbPaymentSyncRoutes,
+  computeEffectiveDueDate,
+  isInvoiceOverdue,
+} from "./qb-payment-sync";
 import { registerAdminMigrationsRoutes } from "./admin-migrations-routes";
 import { registerWcLaborBackfillRoutes } from "./admin-wc-labor-backfill-routes";
 import { registerInspectionZoneBackfillRoutes } from "./admin-inspection-zone-backfill-routes";
@@ -7559,6 +7564,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
     requireBillingAccess,
     syncInvoiceToQb: createQuickBooksInvoiceForInvoice,
   });
+  // Task #1831 — QBO Payment-Status Sync.
+  // Reads Balance from QBO for active QBO-linked invoices; stamps payment_status / balance.
+  registerQbPaymentSyncRoutes(app, {
+    requireAuthentication,
+    requireBillingAccess,
+    makeRequest: makeQuickBooksRequest,
+    apiBase:
+      process.env.NODE_ENV === "production"
+        ? "https://quickbooks.api.intuit.com"
+        : "https://sandbox-quickbooks.api.intuit.com",
+    getQbIntegration: async (companyId: string) => {
+      const lookup = await storage.getQuickBooksIntegrationByCompanyId(companyId);
+      if (!lookup?.realmId) return null;
+      return storage.getQuickBooksIntegration(lookup.realmId);
+    },
+  });
   // Slice 4a — Super-admin DB migration management page.
   registerAdminMigrationsRoutes(app, requireAuthentication);
 
@@ -10315,7 +10336,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
         invoices = invoices.slice(0, Math.max(1, Math.min(500, limit)));
       }
 
-      res.json(applyPricingVisibility(req, invoices));
+      // Task #1831 — annotate each invoice with a derived `isOverdue` flag.
+      // Overdue = (paymentStatus != paid) AND effectiveDueDate < now.
+      // Effective due date uses dueDate when set; otherwise falls back to
+      // createdAt + customer payment terms (net_30 / net_15 / due_on_receipt).
+      const uniqueCustomerIds = [...new Set(invoices.map((inv: any) => inv.customerId as number))];
+      const customerTermsRows = uniqueCustomerIds.length > 0
+        ? await db
+            .select({ id: customers.id, paymentTerms: customers.paymentTerms })
+            .from(customers)
+            .where(inArray(customers.id, uniqueCustomerIds))
+        : [];
+      const customerTermsMap = new Map(customerTermsRows.map((c) => [c.id, c.paymentTerms]));
+
+      const nowTs = new Date();
+      const annotated = invoices.map((inv: any) => {
+        const paymentTerms = customerTermsMap.get(inv.customerId) ?? undefined;
+        const effDue = computeEffectiveDueDate(inv.dueDate, inv.createdAt, paymentTerms);
+        const overdue = isInvoiceOverdue(inv.paymentStatus, effDue, nowTs);
+        return { ...inv, isOverdue: overdue };
+      });
+
+      res.json(applyPricingVisibility(req, annotated));
     } catch (error) {
       console.error('Error fetching invoices:', error);
       res.status(500).json({ message: "Failed to fetch invoices" });

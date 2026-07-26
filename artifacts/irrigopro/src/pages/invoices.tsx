@@ -129,6 +129,11 @@ interface Invoice {
   quickbooksInvoiceId?: string;
   supersededByInvoiceId?: number | null;
   mergedIntoInvoiceId?: number | null;
+  // Task #1831 — QBO payment-status sync fields
+  paymentStatus?: string | null;
+  balance?: string | null;
+  paymentSyncedAt?: string | null;
+  isOverdue?: boolean;
 }
 
 const MONTH_NAMES = [
@@ -598,6 +603,40 @@ export default function InvoicesPage() {
       }
     },
   });
+
+  // Task #1831 — Refresh payment status from QBO Balance field.
+  const paymentSyncMutation = useMutation({
+    mutationFn: () => apiRequest("/api/invoices/sync-payment-status", "POST"),
+    onSuccess: (result: any) => {
+      if (result?.throttled) {
+        // Silently swallow throttle responses from the auto-trigger on load
+        return;
+      }
+      const paid = result?.paid ?? 0;
+      const partial = result?.partiallyPaid ?? 0;
+      const msg =
+        paid > 0 || partial > 0
+          ? `Updated ${paid} paid, ${partial} partially paid`
+          : "All invoices are up to date";
+      toast({ title: "Payment status refreshed from QuickBooks", description: msg });
+      queryClient.invalidateQueries({ queryKey: ["/api/invoices"] });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Payment sync failed",
+        description: err.message || "Could not read payment status from QuickBooks.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Task #1831 — Auto-trigger payment sync on page load. The endpoint is
+  // throttled server-side (5 min per company), so calling it on every mount
+  // is safe — it returns immediately with throttled:true when recently run.
+  useEffect(() => {
+    paymentSyncMutation.mutate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Task #1438 — record/undo manual delivery of an invoice. mark-sent flips
   // a draft → sent (stamping sentAt); mark-unsent reverts a sent → draft.
@@ -1202,6 +1241,21 @@ export default function InvoicesPage() {
               <Button
                 variant="outline"
                 size="sm"
+                onClick={() => paymentSyncMutation.mutate()}
+                disabled={paymentSyncMutation.isPending}
+                data-testid="button-refresh-payment-status"
+                title="Refresh payment status from QuickBooks"
+              >
+                {paymentSyncMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                )}
+                Refresh QB Payments
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={handleExportCsv}
                 disabled={activeFilteredInvoices.length === 0}
                 data-testid="button-export-csv"
@@ -1419,13 +1473,27 @@ export default function InvoicesPage() {
                             </div>
                           </TableCell>
                           <TableCell className="whitespace-nowrap">
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
                               {getStatusBadge(invoice.status)}
+                              {invoice.isOverdue && (
+                                <Badge className="bg-red-100 text-red-800 text-xs" data-testid={`overdue-badge-${invoice.id}`}>Overdue</Badge>
+                              )}
+                              {invoice.paymentStatus === "partially_paid" && (
+                                <Badge className="bg-amber-100 text-amber-800 text-xs" data-testid={`partial-badge-${invoice.id}`}>Partial</Badge>
+                              )}
+                              {invoice.paymentSyncedAt && invoice.paymentStatus === "unpaid" && (
+                                <Badge className="bg-gray-100 text-gray-700 text-xs" data-testid={`unpaid-badge-${invoice.id}`}>Unpaid</Badge>
+                              )}
                               {renderQbIcon(invoice)}
                             </div>
                           </TableCell>
                           <TableCell className="text-right font-bold text-gray-900 whitespace-nowrap">
-                            {formatCurrency(invoice.totalAmount)}
+                            {invoice.paymentStatus === "partially_paid" && invoice.balance != null ? (
+                              <span title={`Total: ${formatCurrency(invoice.totalAmount)}`}>
+                                <span className="text-amber-700">{formatCurrency(invoice.balance)}</span>
+                                <span className="text-xs text-gray-400 ml-1">due</span>
+                              </span>
+                            ) : formatCurrency(invoice.totalAmount)}
                           </TableCell>
                           <TableCell
                             className="text-xs text-gray-600 whitespace-nowrap"

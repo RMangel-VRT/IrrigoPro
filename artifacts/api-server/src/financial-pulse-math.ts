@@ -17,6 +17,16 @@ export interface InvoiceLike {
   // Optional so existing fixtures without these fields keep compiling.
   invoiceMonth?: number | null;
   invoiceYear?: number | null;
+  // Task #1831 — QBO payment-status sync fields.
+  // `paymentStatus` is the 3-tier state: unpaid | partially_paid | paid.
+  // `balance` is the remaining owed (null = not yet synced).
+  // `dueDate` is used for overdue bucketing in AR aging.
+  // `paymentTerms` is the customer's terms (net_30 / net_15 / due_on_receipt)
+  // used as the fallback when `dueDate` is absent.
+  paymentStatus?: string | null;
+  balance?: string | number | null;
+  dueDate?: Date | string | null;
+  paymentTerms?: string | null;
 }
 
 // Task #726 — lightweight shapes used only by computeAllBillableYtd so the
@@ -213,6 +223,14 @@ export function computeOutstandingAr(invoices: InvoiceLike[]): number {
     if (INVOICE_EXCLUDED_STATUSES.has(inv.status) || inv.status === "paid")
       continue;
     if (inv.paidAt) continue;
+    // Task #1831 — use remaining balance for partially-paid invoices
+    const ps = inv.paymentStatus ?? "unpaid";
+    if (ps === "paid") continue;
+    if (ps === "partially_paid" && inv.balance != null) {
+      const bal = toNum(inv.balance);
+      if (bal > 0) sum += bal;
+      continue;
+    }
     sum += toNum(inv.totalAmount);
   }
   return sum;
@@ -546,11 +564,22 @@ export function computeArAging(
     if (INVOICE_EXCLUDED_STATUSES.has(inv.status) || inv.status === "paid")
       continue;
     if (inv.paidAt) continue;
+    // Task #1831 — skip fully-paid rows, use balance for partially-paid
+    const ps = inv.paymentStatus ?? "unpaid";
+    if (ps === "paid") continue;
     const created = toDate(inv.createdAt);
     if (!created) continue;
-    const age = (now.getTime() - created.getTime()) / MS;
-    const i = age < 30 ? 0 : age < 60 ? 1 : age < 90 ? 2 : 3;
-    buckets[i].amount += toNum(inv.totalAmount);
+    // Bucket by effective due date: dueDate if set, else createdAt + customer
+    // payment terms (net_30=30d, net_15=15d, due_on_receipt=0d; default net_30).
+    const TERMS_DAYS: Record<string, number> = { net_30: 30, net_15: 15, due_on_receipt: 0 };
+    const termsDays = TERMS_DAYS[inv.paymentTerms ?? "net_30"] ?? 30;
+    const due = inv.dueDate
+      ? toDate(inv.dueDate) ?? new Date(created.getTime() + termsDays * MS)
+      : new Date(created.getTime() + termsDays * MS);
+    const age = (now.getTime() - due.getTime()) / MS;
+    const i = age < 0 ? 0 : age < 30 ? 1 : age < 60 ? 2 : 3;
+    const amount = ps === "partially_paid" && inv.balance != null ? Math.max(0, toNum(inv.balance)) : toNum(inv.totalAmount);
+    buckets[i].amount += amount;
     buckets[i].count += 1;
   }
   return buckets;

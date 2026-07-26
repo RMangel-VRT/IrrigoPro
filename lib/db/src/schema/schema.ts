@@ -905,6 +905,16 @@ export const invoices = pgTable("invoices", {
   // a merge"). Null on most rows; populated on merged/superseded invoices whose
   // QB records need manual cleanup.
   qbNote: text("qb_note"),
+  // Task #1831 — QBO Payment-Status Sync.
+  // `paymentStatus` is the 3-tier payment state read back from QBO Balance:
+  //   unpaid (Balance == TotalAmt) | partially_paid (0 < Balance < TotalAmt) | paid (Balance == 0)
+  // `balance` is the remaining amount owed (null = not yet synced / no QB link).
+  // `paymentSyncedAt` is the last time we read Balance from QBO for this invoice.
+  // Fully-paid invoices also set `status='paid'` and `paidAt` so all existing
+  // paid-lock guards continue to fire without code changes.
+  paymentStatus: text("payment_status").notNull().default("unpaid"),
+  balance: decimal("balance", { precision: 10, scale: 2 }),
+  paymentSyncedAt: timestamp("payment_synced_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({

@@ -199,9 +199,15 @@ export function registerInvoiceEditabilityRoutes(
 
         // Metadata edits are allowed on any unpaid, non-terminal invoice:
         // draft, generated, or sent. Paid and terminal (cancelled/superseded/merged)
-        // are immutable.
-        if (invoice.status === "paid") {
-          res.status(409).json({ message: "Paid invoices cannot be edited." });
+        // are immutable. Partially-paid invoices are also locked — a QBO payment
+        // has been recorded against them and editing could cause a reconciliation mismatch.
+        if (invoice.status === "paid" || (invoice as any).paymentStatus === "partially_paid") {
+          res.status(409).json({
+            message:
+              invoice.status === "paid"
+                ? "Paid invoices cannot be edited."
+                : "This invoice has a partial payment recorded in QuickBooks and cannot be edited. Reconcile the payment in QuickBooks first.",
+          });
           return;
         }
         if (TERMINAL_STATUSES.has(invoice.status)) {
@@ -874,6 +880,16 @@ export function registerInvoiceEditabilityRoutes(
         if (invoice.status === "paid") {
           res.status(409).json({
             message: "Paid invoices cannot be voided. Use the correction/reissue engine for post-payment adjustments.",
+          });
+          return;
+        }
+
+        // Task #1831 — block void for partially-paid invoices (payment recorded in QBO)
+        if ((invoice as any).paymentStatus === "partially_paid") {
+          res.status(409).json({
+            message:
+              "This invoice has a partial payment recorded in QuickBooks and cannot be voided. " +
+              "Use the correction/reissue engine for post-payment adjustments.",
           });
           return;
         }

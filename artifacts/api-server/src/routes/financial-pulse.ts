@@ -177,9 +177,30 @@ async function loadInvoicesForCustomers(
   customerIds: number[],
 ): Promise<InvoiceLike[]> {
   if (customerIds.length === 0) return [];
+  // Task #1831 — join customers to get paymentTerms for the effective-due-date
+  // fallback used by computeArAging (net_30 / net_15 / due_on_receipt).
+  // Also include paymentStatus / balance / dueDate so AR math uses the live
+  // QBO-synced state instead of treating partially-paid invoices as full-balance.
   const rows = await db
-    .select()
+    .select({
+      id: invoices.id,
+      customerId: invoices.customerId,
+      totalAmount: invoices.totalAmount,
+      partsSubtotal: invoices.partsSubtotal,
+      laborSubtotal: invoices.laborSubtotal,
+      status: invoices.status,
+      createdAt: invoices.createdAt,
+      paidAt: invoices.paidAt,
+      invoiceMonth: invoices.invoiceMonth,
+      invoiceYear: invoices.invoiceYear,
+      // Task #1831 — QBO payment-sync fields
+      paymentStatus: invoices.paymentStatus,
+      balance: invoices.balance,
+      dueDate: invoices.dueDate,
+      paymentTerms: customers.paymentTerms,
+    })
     .from(invoices)
+    .leftJoin(customers, eq(invoices.customerId, customers.id))
     .where(inArray(invoices.customerId, customerIds));
   return rows.map((i) => ({
     id: i.id,
@@ -190,9 +211,12 @@ async function loadInvoicesForCustomers(
     status: i.status,
     createdAt: i.createdAt,
     paidAt: i.paidAt,
-    // Task #726 — needed for cycle-based billing period lookups.
     invoiceMonth: i.invoiceMonth,
     invoiceYear: i.invoiceYear,
+    paymentStatus: i.paymentStatus,
+    balance: i.balance,
+    dueDate: i.dueDate,
+    paymentTerms: i.paymentTerms,
   }));
 }
 

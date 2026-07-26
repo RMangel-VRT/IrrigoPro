@@ -1,8 +1,8 @@
-import { useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useState, useEffect } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { FileText, Loader2, AlertCircle, Calendar, CheckCircle2, RefreshCw, ClipboardList } from "lucide-react";
+import { FileText, Loader2, AlertCircle, Calendar, CheckCircle2, RefreshCw, ClipboardList, CreditCard, AlertTriangle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { apiRequest, queryClient, useArrayQuery } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -20,8 +20,14 @@ interface Invoice {
   invoiceYear: number;
   status: string;
   createdAt: string;
+  dueDate?: string | null;
   quickbooksInvoiceId?: string;
   billingType?: string;
+  // Task #1831 — QBO payment-status sync fields
+  paymentStatus?: string | null;
+  balance?: string | null;
+  paymentSyncedAt?: string | null;
+  isOverdue?: boolean;
 }
 
 const MONTH_NAMES = [
@@ -37,6 +43,37 @@ interface InvoiceListProps {
   customerId?: number;
   limit?: number;
   onOpenPdf?: (invoiceId: number, invoiceNumber: string, customerEmail: string) => void;
+}
+
+function getPaymentStatusBadge(invoice: Invoice) {
+  const ps = invoice.paymentStatus;
+  if (ps === "paid") {
+    return (
+      <Badge className="bg-emerald-100 text-emerald-800 text-xs" data-testid={`payment-status-paid-${invoice.id}`}>
+        <CreditCard className="w-3 h-3 mr-1" />
+        Paid in QB
+      </Badge>
+    );
+  }
+  if (ps === "partially_paid") {
+    const bal = invoice.balance ? parseFloat(invoice.balance) : null;
+    return (
+      <Badge className="bg-amber-100 text-amber-800 text-xs" data-testid={`payment-status-partial-${invoice.id}`}>
+        <CreditCard className="w-3 h-3 mr-1" />
+        {bal != null ? `$${bal.toFixed(2)} due` : "Partial"}
+      </Badge>
+    );
+  }
+  // Show Unpaid badge only after a sync has confirmed QBO knows about this invoice
+  if (ps === "unpaid" && invoice.paymentSyncedAt) {
+    return (
+      <Badge className="bg-gray-100 text-gray-700 text-xs" data-testid={`payment-status-unpaid-${invoice.id}`}>
+        <CreditCard className="w-3 h-3 mr-1" />
+        Unpaid
+      </Badge>
+    );
+  }
+  return null;
 }
 
 export function InvoiceList({ customerId, limit = 20, onOpenPdf }: InvoiceListProps) {
@@ -60,6 +97,35 @@ export function InvoiceList({ customerId, limit = 20, onOpenPdf }: InvoiceListPr
     },
   });
 
+  const paymentSyncMutation = useMutation({
+    mutationFn: async () => {
+      return apiRequest("/api/invoices/sync-payment-status", "POST");
+    },
+    onSuccess: (result: any) => {
+      if (result?.throttled) {
+        // Silently swallow throttle responses from the auto-trigger on load
+        return;
+      }
+      const paid = result?.paid ?? 0;
+      const partial = result?.partiallyPaid ?? 0;
+      const msg = paid > 0 || partial > 0
+        ? `Updated ${paid} paid, ${partial} partially paid`
+        : "All invoices are up to date";
+      toast({ title: "Payment status refreshed", description: msg });
+      queryClient.invalidateQueries({ queryKey: ["/api/invoices"] });
+    },
+    onError: () => {
+      // Silent on auto-trigger errors; user-initiated clicks will see the error
+    },
+  });
+
+  // Task #1831 — Auto-trigger payment sync on mount. Server-side throttle
+  // (5 min/company) prevents hammering QBO on every render.
+  useEffect(() => {
+    paymentSyncMutation.mutate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const { data: invoices = [], isLoading, error } = useArrayQuery<Invoice>({
     queryKey: ["/api/invoices", { customerId, limit }],
     queryFn: async () => {
@@ -77,10 +143,6 @@ export function InvoiceList({ customerId, limit = 20, onOpenPdf }: InvoiceListPr
     },
     enabled: !customerId || customerId > 0,
   });
-
-  const formatMonthYear = (date: string) => {
-    return new Date(date).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-  };
 
   const formatDate = (date: string) => {
     return new Date(date).toLocaleDateString();
@@ -154,119 +216,163 @@ export function InvoiceList({ customerId, limit = 20, onOpenPdf }: InvoiceListPr
     );
   }
 
+  const hasQbLinked = visibleInvoices.some(inv => !!inv.quickbooksInvoiceId);
+
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-      {visibleInvoices.map((invoice) => (
-        <Card key={invoice.id} className="border border-gray-200 hover:shadow-md transition-shadow">
-          <CardContent className="p-5">
-            <div className="flex items-start justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <Calendar className="w-5 h-5 text-blue-600" />
-                <h3 className="font-semibold text-base" data-testid={`text-month-${invoice.id}`}>
-                  {invoiceMonthLabel(invoice)}
-                </h3>
+    <div className="space-y-4">
+      {hasQbLinked && (
+        <div className="flex justify-end">
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-xs gap-1.5"
+            disabled={paymentSyncMutation.isPending}
+            onClick={() => paymentSyncMutation.mutate()}
+            data-testid="button-sync-payment-status"
+          >
+            {paymentSyncMutation.isPending ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="w-3.5 h-3.5" />
+            )}
+            Refresh Payment Status
+          </Button>
+        </div>
+      )}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {visibleInvoices.map((invoice) => (
+          <Card key={invoice.id} className={`border transition-shadow hover:shadow-md ${invoice.isOverdue ? "border-red-200" : "border-gray-200"}`}>
+            <CardContent className="p-5">
+              <div className="flex items-start justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <Calendar className="w-5 h-5 text-blue-600" />
+                  <h3 className="font-semibold text-base" data-testid={`text-month-${invoice.id}`}>
+                    {invoiceMonthLabel(invoice)}
+                  </h3>
+                </div>
+                <div className="flex flex-col items-end gap-1">
+                  {getStatusBadge(invoice.status)}
+                  {invoice.isOverdue && (
+                    <Badge className="bg-red-100 text-red-800 text-xs" data-testid={`overdue-badge-${invoice.id}`}>
+                      <AlertTriangle className="w-3 h-3 mr-1" />
+                      Overdue
+                    </Badge>
+                  )}
+                  {getPaymentStatusBadge(invoice)}
+                  {invoice.billingType === 'standalone' && (
+                    <Badge className="bg-indigo-100 text-indigo-800 text-xs">Standalone</Badge>
+                  )}
+                  {invoice.quickbooksInvoiceId && (
+                    <Badge className="bg-purple-100 text-purple-800 text-xs">
+                      <CheckCircle2 className="w-3 h-3 mr-1" />
+                      QB Synced
+                    </Badge>
+                  )}
+                </div>
               </div>
-              <div className="flex flex-col items-end gap-1">
-                {getStatusBadge(invoice.status)}
-                {invoice.billingType === 'standalone' && (
-                  <Badge className="bg-indigo-100 text-indigo-800 text-xs">Standalone</Badge>
-                )}
-                {invoice.quickbooksInvoiceId && (
-                  <Badge className="bg-purple-100 text-purple-800 text-xs">
-                    <CheckCircle2 className="w-3 h-3 mr-1" />
-                    QB Synced
-                  </Badge>
-                )}
-              </div>
-            </div>
 
-            <div className="space-y-2 text-sm mb-4">
-              <div className="flex justify-between items-center">
-                <span className="text-gray-500">Invoice #</span>
-                <span className="font-medium text-gray-700" data-testid={`text-invoice-number-${invoice.id}`}>
-                  {invoice.invoiceNumber}
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-500">Total</span>
-                <span className="font-semibold text-lg text-gray-900" data-testid={`text-amount-${invoice.id}`}>
-                  {formatCurrency(invoice.totalAmount)}
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-500">Period</span>
-                <span className="text-xs text-gray-600" data-testid={`text-period-${invoice.id}`}>
-                  {formatDate(invoice.periodStart)} – {formatDate(invoice.periodEnd)}
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-500">QuickBooks</span>
-                {invoice.quickbooksInvoiceId ? (
-                  <span className="flex items-center gap-1 text-xs text-emerald-600">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    Synced
+              <div className="space-y-2 text-sm mb-4">
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-500">Invoice #</span>
+                  <span className="font-medium text-gray-700" data-testid={`text-invoice-number-${invoice.id}`}>
+                    {invoice.invoiceNumber}
                   </span>
-                ) : (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-auto py-0.5 px-2 text-xs text-blue-600 hover:text-blue-800 hover:bg-blue-50"
-                    disabled={syncMutation.isPending}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      syncMutation.mutate(invoice.id);
-                    }}
-                    data-testid={`button-sync-qb-${invoice.id}`}
-                  >
-                    {syncMutation.isPending && syncMutation.variables === invoice.id ? (
-                      <>
-                        <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                        Syncing...
-                      </>
-                    ) : (
-                      <>
-                        <RefreshCw className="w-3 h-3 mr-1" />
-                        Sync to QuickBooks
-                      </>
-                    )}
-                  </Button>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-500">Total</span>
+                  <span className="font-semibold text-lg text-gray-900" data-testid={`text-amount-${invoice.id}`}>
+                    {formatCurrency(invoice.totalAmount)}
+                  </span>
+                </div>
+                {invoice.paymentStatus === "partially_paid" && invoice.balance != null && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-500">Balance due</span>
+                    <span className="font-medium text-amber-700" data-testid={`text-balance-${invoice.id}`}>
+                      {formatCurrency(invoice.balance)}
+                    </span>
+                  </div>
+                )}
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-500">Period</span>
+                  <span className="text-xs text-gray-600" data-testid={`text-period-${invoice.id}`}>
+                    {formatDate(invoice.periodStart)} – {formatDate(invoice.periodEnd)}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-500">QuickBooks</span>
+                  {invoice.quickbooksInvoiceId ? (
+                    <span className="flex items-center gap-1 text-xs text-emerald-600">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      Synced
+                    </span>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-auto py-0.5 px-2 text-xs text-blue-600 hover:text-blue-800 hover:bg-blue-50"
+                      disabled={syncMutation.isPending}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        syncMutation.mutate(invoice.id);
+                      }}
+                      data-testid={`button-sync-qb-${invoice.id}`}
+                    >
+                      {syncMutation.isPending && syncMutation.variables === invoice.id ? (
+                        <>
+                          <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                          Syncing...
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="w-3 h-3 mr-1" />
+                          Sync to QuickBooks
+                        </>
+                      )}
+                    </Button>
+                  )}
+                </div>
+                {invoice.paymentSyncedAt && (
+                  <div className="flex justify-between items-center text-xs text-gray-400">
+                    <span>Payment synced</span>
+                    <span>{new Date(invoice.paymentSyncedAt).toLocaleDateString()}</span>
+                  </div>
                 )}
               </div>
-            </div>
 
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="flex-1"
-                onClick={() =>
-                  setAuditInvoice({
-                    id: invoice.id,
-                    label: `${invoiceMonthLabel(invoice)} · #${invoice.invoiceNumber}`,
-                    total: formatCurrency(invoice.totalAmount),
-                  })
-                }
-                data-testid={`button-audit-${invoice.id}`}
-              >
-                <ClipboardList className="w-4 h-4 mr-2" />
-                Audit
-              </Button>
-              {onOpenPdf && (
+              <div className="flex gap-2">
                 <Button
                   variant="outline"
                   size="sm"
                   className="flex-1"
-                  onClick={() => onOpenPdf(invoice.id, invoice.invoiceNumber, invoice.customerEmail)}
-                  data-testid={`button-view-pdf-${invoice.id}`}
+                  onClick={() =>
+                    setAuditInvoice({
+                      id: invoice.id,
+                      label: `${invoiceMonthLabel(invoice)} · #${invoice.invoiceNumber}`,
+                      total: formatCurrency(invoice.totalAmount),
+                    })
+                  }
+                  data-testid={`button-audit-${invoice.id}`}
                 >
-                  <FileText className="w-4 h-4 mr-2" />
-                  View Details
+                  <ClipboardList className="w-4 h-4 mr-2" />
+                  Audit
                 </Button>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      ))}
+                {onOpenPdf && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="flex-1"
+                    onClick={() => onOpenPdf(invoice.id, invoice.invoiceNumber, invoice.customerEmail)}
+                    data-testid={`button-view-pdf-${invoice.id}`}
+                  >
+                    <FileText className="w-4 h-4 mr-2" />
+                    View Details
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
 
       {auditInvoice && (
         <InvoiceAuditModal
