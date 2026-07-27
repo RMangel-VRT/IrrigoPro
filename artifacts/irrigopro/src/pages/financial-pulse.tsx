@@ -1719,9 +1719,7 @@ function ArAgingCard({
                 <button
                   key={b.key}
                   type="button"
-                  // TODO: invoices page does not yet support an `?aging=`
-                  // filter — leaving the navigate as a best-effort link.
-                  onClick={() => navigate(`/invoices?aging=${b.key}`)}
+                  onClick={() => navigate(`/invoices?aging=${b.key === "days90" ? "days90Plus" : b.key}`)}
                   className={`rounded-md border p-3 text-left transition hover:opacity-90 ${AGING_COLORS[b.key]}`}
                   data-testid={`aging-bucket-${b.key}`}
                 >

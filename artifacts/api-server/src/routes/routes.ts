@@ -10354,7 +10354,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const paymentTerms = customerTermsMap.get(inv.customerId) ?? undefined;
         const effDue = computeEffectiveDueDate(inv.dueDate, inv.createdAt, paymentTerms);
         const overdue = isInvoiceOverdue(inv.paymentStatus, effDue, nowTs);
-        return { ...inv, isOverdue: overdue };
+        // Task #1833 — include the pre-computed effective due date so the
+        // frontend aging filter can bucket consistently with computeArAging
+        // without needing to re-derive payment terms client-side.
+        return { ...inv, isOverdue: overdue, effectiveDueDate: effDue.toISOString() };
       });
 
       res.json(applyPricingVisibility(req, annotated));

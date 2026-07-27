@@ -134,6 +134,11 @@ interface Invoice {
   balance?: string | null;
   paymentSyncedAt?: string | null;
   isOverdue?: boolean;
+  // Task #1833 — pre-computed effective due date from the API (accounts for
+  // customer payment terms: net_30 / net_15 / due_on_receipt). Use this
+  // instead of re-deriving due date client-side so aging buckets match the
+  // server-side computeArAging logic exactly.
+  effectiveDueDate?: string | null;
 }
 
 const MONTH_NAMES = [
@@ -340,13 +345,15 @@ function SortableHeader({
 // `/api/financial-pulse/ar-aging` bucket keys (with `days90Plus`
 // matching the inclusive 90+ bucket). The mapping lives here so the
 // widget can deep-link via `?aging=`.
+// Task #1833 — labels updated to "days past due" framing to match
+// the updated computeArAging bucket labels.
 type AgingFilter = "all" | "current" | "days30" | "days60" | "days90Plus";
 const AGING_OPTIONS: { value: AgingFilter; label: string }[] = [
   { value: "all", label: "All ages" },
-  { value: "current", label: "Current (0–29 days)" },
-  { value: "days30", label: "30–59 days" },
-  { value: "days60", label: "60–89 days" },
-  { value: "days90Plus", label: "90+ days" },
+  { value: "current", label: "Not yet due" },
+  { value: "days30", label: "1–30 days overdue" },
+  { value: "days60", label: "31–60 days overdue" },
+  { value: "days90Plus", label: "61–90+ days overdue" },
 ];
 
 function parseAging(search: string): AgingFilter {
@@ -373,10 +380,21 @@ function isOpenAr(inv: Invoice): boolean {
   return !inv.sentAt || true; // keep all non-terminal statuses; paidAt check below
 }
 
-function ageInDays(inv: Invoice, now: Date): number {
-  const d = new Date(inv.createdAt);
-  if (Number.isNaN(d.getTime())) return 0;
-  return Math.floor((now.getTime() - d.getTime()) / 86_400_000);
+// Task #1833 — buckets are now based on days past effective due date.
+// The server pre-computes `effectiveDueDate` (dueDate if set, else
+// createdAt + customer payment terms) so client-side bucketing aligns
+// exactly with the backend computeArAging logic for all payment term
+// variations (net_30 / net_15 / due_on_receipt).
+function daysPastDue(inv: Invoice, now: Date): number {
+  // Prefer the pre-computed effective due date the API returns (Task #1833).
+  // Fall back through explicit dueDate, then a safe net_30 approximation so
+  // this function stays safe on cached/stale payloads that pre-date the field.
+  const due = inv.effectiveDueDate
+    ? new Date(inv.effectiveDueDate)
+    : inv.dueDate
+      ? new Date(inv.dueDate)
+      : new Date(new Date(inv.createdAt).getTime() + 30 * 86_400_000);
+  return (now.getTime() - due.getTime()) / 86_400_000;
 }
 
 function matchesAging(inv: Invoice, filter: AgingFilter, now: Date): boolean {
@@ -384,16 +402,18 @@ function matchesAging(inv: Invoice, filter: AgingFilter, now: Date): boolean {
   if (!isOpenAr(inv)) return false;
   // `paidAt` may or may not be on the wire — guard it.
   if ((inv as unknown as { paidAt?: string | null }).paidAt) return false;
-  const days = ageInDays(inv, now);
+  // Skip fully-paid records even if status hasn't caught up.
+  if (inv.paymentStatus === "paid") return false;
+  const dpd = daysPastDue(inv, now);
   switch (filter) {
     case "current":
-      return days < 30;
+      return dpd < 0;           // not yet past due
     case "days30":
-      return days >= 30 && days < 60;
+      return dpd >= 0 && dpd < 30;   // 1–30 days overdue
     case "days60":
-      return days >= 60 && days < 90;
+      return dpd >= 30 && dpd < 60;  // 31–60 days overdue
     case "days90Plus":
-      return days >= 90;
+      return dpd >= 60;              // 61–90+ days overdue
   }
 }
 

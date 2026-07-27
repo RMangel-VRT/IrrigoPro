@@ -592,9 +592,9 @@ function ArAgingVariant() {
     data?.buckets ??
     ([
       { key: "current", label: "Current", amount: 0, count: 0 },
-      { key: "days30", label: "30 days", amount: 0, count: 0 },
-      { key: "days60", label: "60 days", amount: 0, count: 0 },
-      { key: "days90", label: "90+ days", amount: 0, count: 0 },
+      { key: "days30", label: "1–30 days overdue", amount: 0, count: 0 },
+      { key: "days60", label: "31–60 days overdue", amount: 0, count: 0 },
+      { key: "days90", label: "61–90+ days overdue", amount: 0, count: 0 },
     ] as AgingBucket[]);
   return (
     <WidgetCard
