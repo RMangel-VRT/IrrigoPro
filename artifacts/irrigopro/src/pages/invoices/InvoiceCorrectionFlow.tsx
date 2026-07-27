@@ -879,6 +879,7 @@ export function InvoiceCorrectionFlow({
   const [qbSyncState, setQbSyncState] = useState<"idle" | "synced" | "failed">("idle");
   const [qbSyncError, setQbSyncError] = useState<string | null>(null);
   const [qbSyncCode, setQbSyncCode] = useState<string | null>(null);
+  const [partialPaymentBlocked, setPartialPaymentBlocked] = useState(false);
 
   // Fetch tickets for this invoice.
   const { data: ticketsData, isLoading: ticketsLoading } = useQuery<{
@@ -916,6 +917,7 @@ export function InvoiceCorrectionFlow({
       setQbSyncState("idle");
       setQbSyncError(null);
       setQbSyncCode(null);
+      setPartialPaymentBlocked(false);
     }
   }, [open]);
 
@@ -932,7 +934,12 @@ export function InvoiceCorrectionFlow({
       setCorrectionId(data.correction.id);
     },
     onError: (err: Error) => {
-      toast({ title: "Failed to open correction", description: err.message, variant: "destructive" });
+      const code = parseApiErrorCode(err);
+      if (code === "PARTIALLY_PAID_RECONCILE_IN_QBO") {
+        setPartialPaymentBlocked(true);
+      } else {
+        toast({ title: "Failed to open correction", description: err.message, variant: "destructive" });
+      }
     },
   });
 
@@ -1109,11 +1116,33 @@ export function InvoiceCorrectionFlow({
                 <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
               </div>
             ) : step === 1 ? (
-              <DisputeStep
-                tickets={tickets}
-                selectedTicketIds={selectedTicketKeys}
-                onToggle={toggleTicket}
-              />
+              <div className="space-y-4">
+                {partialPaymentBlocked && (
+                  <div className="flex gap-3 items-start rounded-lg border border-amber-300 bg-amber-50 p-4">
+                    <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                    <div className="space-y-1 text-sm">
+                      <p className="font-semibold text-amber-900">
+                        Partial payment recorded in QuickBooks
+                      </p>
+                      <p className="text-amber-800">
+                        This invoice has a partial payment applied in QBO. Void or remove the payment
+                        in QuickBooks first, then return here to correct the invoice.
+                      </p>
+                      <a
+                        href="/quickbooks"
+                        className="inline-flex items-center gap-1 text-xs font-medium text-amber-900 underline underline-offset-2 hover:text-amber-700 mt-1"
+                      >
+                        Go to QuickBooks Settings →
+                      </a>
+                    </div>
+                  </div>
+                )}
+                <DisputeStep
+                  tickets={tickets}
+                  selectedTicketIds={selectedTicketKeys}
+                  onToggle={toggleTicket}
+                />
+              </div>
             ) : step === 2 ? (
               <CorrectStep
                 selectedTickets={selectedTickets}

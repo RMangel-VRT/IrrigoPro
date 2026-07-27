@@ -392,6 +392,20 @@ export function registerInvoiceCorrectionRoutes(
           return;
         }
 
+        // Partially-paid invoices have a QBO payment already applied against
+        // them. Correcting in-place without first reconciling in QuickBooks
+        // would create a mismatch between the recorded payment and the revised
+        // invoice amount. The billing manager must void or delete the partial
+        // payment in QBO before proceeding.
+        if (invoice.paymentStatus === "partially_paid") {
+          res.status(409).json({
+            message:
+              "This invoice has a partial payment recorded in QuickBooks. Reconcile or remove the payment in QBO first, then return here to correct the invoice.",
+            code: "PARTIALLY_PAID_RECONCILE_IN_QBO",
+          });
+          return;
+        }
+
         // Guard against double corrections on the same invoice.
         const existing = await db
           .select({ id: invoiceCorrections.id })
