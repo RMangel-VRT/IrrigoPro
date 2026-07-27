@@ -17,7 +17,7 @@
 import type { Express, RequestHandler } from "express";
 import { db as dbModule } from "../db";
 import { invoices } from "@workspace/db/schema";
-import { eq, and, isNotNull, notInArray } from "drizzle-orm";
+import { eq, and, isNotNull, notInArray, sql } from "drizzle-orm";
 import type { QbMakeRequestFn } from "./qb-invoice-ops";
 import { logger } from "../lib/logger";
 
@@ -46,10 +46,17 @@ export function derivePaymentStatus(
   return "unpaid";
 }
 
-// ── In-memory per-company throttle ────────────────────────────────────────
+// ── In-memory per-company throttle (DB-backed for restart durability) ────────
 
 // Minimum milliseconds between sync runs per company.
 const SYNC_THROTTLE_MS = 5 * 60 * 1000; // 5 minutes
+
+// app_settings key prefix for persisted last-run timestamps.
+const SYNC_SETTING_PREFIX = "qbPaymentSync.lastRun.";
+
+interface SyncRecord {
+  lastRun: number; // epoch ms
+}
 
 const lastSyncByCompany = new Map<string, number>();
 
@@ -59,8 +66,57 @@ export function isThrottled(companyId: string): boolean {
   return Date.now() - last < SYNC_THROTTLE_MS;
 }
 
-export function recordSyncTime(companyId: string): void {
+export function getLastSyncMs(companyId: string): number | undefined {
+  return lastSyncByCompany.get(companyId);
+}
+
+// Persist last-run timestamp to app_settings (fire-and-forget).
+// Uses an injectable db for testability.
+async function persistSyncTime(companyId: string, db: any): Promise<void> {
+  const key = SYNC_SETTING_PREFIX + companyId;
+  const value: SyncRecord = { lastRun: Date.now() };
+  try {
+    await db.execute(sql`
+      INSERT INTO app_settings (key, value, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}, now())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+    `);
+  } catch (err) {
+    logger.warn({ err, companyId }, "[qb-payment-sync] Failed to persist sync time to app_settings");
+  }
+}
+
+export function recordSyncTime(companyId: string, db?: any): void {
   lastSyncByCompany.set(companyId, Date.now());
+  void persistSyncTime(companyId, db ?? dbModule);
+}
+
+// Hydrate the in-memory map from app_settings on startup.
+// Only loads entries where lastRun is within the throttle window so stale
+// entries from long-ago runs do not block a sync after a long-dormant restart.
+export async function hydrateSyncThrottleFromDb(db?: any): Promise<void> {
+  const dbInstance = db ?? dbModule;
+  try {
+    const result = await dbInstance.execute(sql`
+      SELECT key, value FROM app_settings WHERE key LIKE ${SYNC_SETTING_PREFIX + "%"}
+    `);
+    const cutoff = Date.now() - SYNC_THROTTLE_MS;
+    for (const row of (result.rows ?? []) as Array<{ key: string; value: string }>) {
+      const companyId = row.key.slice(SYNC_SETTING_PREFIX.length);
+      if (!companyId) continue;
+      try {
+        const record = JSON.parse(row.value) as SyncRecord;
+        if (typeof record.lastRun === "number" && record.lastRun > cutoff) {
+          lastSyncByCompany.set(companyId, record.lastRun);
+        }
+      } catch {
+        // Ignore malformed entries
+      }
+    }
+    logger.info({ loaded: lastSyncByCompany.size }, "[qb-payment-sync] Hydrated sync throttle from DB");
+  } catch (err) {
+    logger.warn({ err }, "[qb-payment-sync] Failed to hydrate sync throttle from app_settings; starting cold");
+  }
 }
 
 // Exposed for tests to reset throttle state
@@ -221,7 +277,7 @@ export async function syncPaymentStatusForCompany(
   summary.invoicesChecked = candidates.length;
 
   if (candidates.length === 0) {
-    recordSyncTime(companyId);
+    recordSyncTime(companyId, db);
     return summary;
   }
 
@@ -276,7 +332,7 @@ export async function syncPaymentStatusForCompany(
       .where(eq(invoices.id, row.id));
   }
 
-  recordSyncTime(companyId);
+  recordSyncTime(companyId, db);
   return summary;
 }
 
@@ -333,6 +389,11 @@ export function registerQbPaymentSyncRoutes(
 ): void {
   const { requireAuthentication, requireBillingAccess, makeRequest, getQbIntegration, apiBase } = deps;
 
+  // Hydrate the in-memory throttle map from app_settings on startup so that
+  // a server restart doesn't let every company trigger a full QBO batch query
+  // simultaneously on the first post-deploy request.
+  void hydrateSyncThrottleFromDb();
+
   // POST /api/invoices/sync-payment-status
   // Reads Balance from QBO for all active QBO-linked invoices in the caller's
   // company and stamps payment_status / balance / payment_synced_at.
@@ -357,7 +418,7 @@ export function registerQbPaymentSyncRoutes(
         // Check throttle (bypassed when force=true is sent by super_admin)
         const force = role === "super_admin" && req.body?.force === true;
         if (!force && isThrottled(companyId)) {
-          const lastMs = lastSyncByCompany.get(companyId) ?? 0;
+          const lastMs = getLastSyncMs(companyId) ?? 0;
           res.json({
             throttled: true,
             nextAllowedIn: Math.ceil((lastMs + SYNC_THROTTLE_MS - Date.now()) / 1000),
