@@ -10979,6 +10979,29 @@ export class DatabaseStorage implements IStorage {
             await tx.delete(irrigationProfileZones).where(eq(irrigationProfileZones.id, zone.id));
           }
         }
+      } else if (
+        typeof newTotalZones === "number" &&
+        typeof oldTotalZones === "number" &&
+        newTotalZones > oldTotalZones
+      ) {
+        // Seed placeholder rows for newly added zones.
+        // onConflictDoNothing ensures safety on any race or partial-seeded state.
+        const newZones = [];
+        for (let z = oldTotalZones + 1; z <= newTotalZones; z++) {
+          newZones.push({
+            companyId: updated.companyId,
+            controllerId: updated.id,
+            zoneNumber: z,
+            name: `Zone ${z}`,
+            zoneType: "other" as const,
+            runTimeMinutes: 0,
+            zoneOrder: z,
+            isActive: true,
+          });
+        }
+        if (newZones.length > 0) {
+          await tx.insert(irrigationProfileZones).values(newZones).onConflictDoNothing();
+        }
       }
 
       await this._appendIrrigationSnapshot(tx, updated, actor, `Controller "${updated.name}" updated`);

@@ -5,6 +5,7 @@
 //  2. Zone placeholder rows (irrigation_profile_zones) are seeded 1..zoneCount from each config.
 //  3. A second call for the same tuple is a no-op (idempotent).
 //  4. The zone-count trim in updateIrrigationController removes only empty trailing zones.
+//  5. Growing zone count seeds new placeholder rows for the added zones.
 //
 // All tests hit the real dev DB (shared pattern) and clean up after themselves.
 
@@ -19,6 +20,19 @@ import { storage } from "./storage";
 const TEST_COMPANY_ID = 999999;
 const TEST_CUSTOMER_ID = 999998;
 
+async function ensureTestCompanyAndCustomer() {
+  await db.execute(sql`
+    INSERT INTO companies (id, name, subscription, is_active)
+    VALUES (${TEST_COMPANY_ID}, 'Test Company (unit tests)', 'basic', true)
+    ON CONFLICT (id) DO NOTHING
+  `);
+  await db.execute(sql`
+    INSERT INTO customers (id, company_id, name, email)
+    VALUES (${TEST_CUSTOMER_ID}, ${TEST_COMPANY_ID}, 'Test Customer (unit tests)', 'test@example.com')
+    ON CONFLICT (id) DO NOTHING
+  `);
+}
+
 async function cleanup() {
   await db.execute(sql`
     DELETE FROM irrigation_profile_zones
@@ -30,8 +44,18 @@ async function cleanup() {
   `);
 }
 
+async function fullCleanup() {
+  await cleanup();
+  await db.execute(sql`
+    DELETE FROM customers WHERE id = ${TEST_CUSTOMER_ID}
+  `);
+  await db.execute(sql`
+    DELETE FROM companies WHERE id = ${TEST_COMPANY_ID}
+  `);
+}
+
 describe("ensureIrrigationControllers — basic seeding", () => {
-  before(cleanup);
+  before(async () => { await ensureTestCompanyAndCustomer(); await cleanup(); });
   after(cleanup);
 
   it("seeds irrigation_controllers rows honoring passed-in zone counts", async () => {
@@ -95,7 +119,7 @@ describe("ensureIrrigationControllers — basic seeding", () => {
 });
 
 describe("ensureIrrigationControllers — idempotency", () => {
-  before(cleanup);
+  before(async () => { await ensureTestCompanyAndCustomer(); await cleanup(); });
   after(cleanup);
 
   it("calling twice for the same tuple creates no duplicate rows", async () => {
@@ -133,7 +157,7 @@ describe("ensureIrrigationControllers — idempotency", () => {
 });
 
 describe("ensureIrrigationControllers — branch isolation", () => {
-  before(cleanup);
+  before(async () => { await ensureTestCompanyAndCustomer(); await cleanup(); });
   after(cleanup);
 
   it("seeds with branchName scoped separately from the null branch", async () => {
@@ -156,6 +180,7 @@ describe("updateIrrigationController — non-destructive zone trim", () => {
   let controllerId: number;
 
   before(async () => {
+    await ensureTestCompanyAndCustomer();
     await cleanup();
     // Create a controller with 5 empty placeholder zones.
     const [ctrl] = await storage.ensureIrrigationControllers(
@@ -224,5 +249,86 @@ describe("updateIrrigationController — non-destructive zone trim", () => {
     const nums = remaining.rows.map((r) => Number(r.zone_number));
     // Zone 4 has runTimeMinutes=15 and should be preserved.
     assert.ok(nums.includes(4), "Zone 4 with runTimeMinutes=15 should be preserved");
+  });
+});
+
+describe("updateIrrigationController — zone count increase seeding", () => {
+  let controllerId: number;
+
+  before(async () => {
+    await ensureTestCompanyAndCustomer();
+    await cleanup();
+    const [ctrl] = await storage.ensureIrrigationControllers(
+      TEST_COMPANY_ID, TEST_CUSTOMER_ID, [{ name: "Controller A", zoneCount: 3 }], null,
+    );
+    controllerId = ctrl!.id;
+    // Ensure the DB reflects exactly 3 zones and 3 zone rows.
+    await db.execute(sql`
+      UPDATE irrigation_controllers SET total_zones = 3 WHERE id = ${controllerId}
+    `);
+    await db.execute(sql`
+      DELETE FROM irrigation_profile_zones WHERE controller_id = ${controllerId}
+    `);
+    for (let z = 1; z <= 3; z++) {
+      await db.execute(sql`
+        INSERT INTO irrigation_profile_zones
+          (company_id, controller_id, zone_number, name, zone_type, run_time_minutes, zone_order, is_active, created_at, updated_at)
+        VALUES
+          (${TEST_COMPANY_ID}, ${controllerId}, ${z}, ${"Zone " + z}, 'other', 0, ${z}, true, NOW(), NOW())
+      `);
+    }
+  });
+
+  after(fullCleanup);
+
+  it("bumping totalZones from 3 to 5 seeds placeholder rows for zones 4 and 5", async () => {
+    await storage.updateIrrigationController(TEST_COMPANY_ID, controllerId, {
+      totalZones: 5,
+    });
+
+    const rows = await db.execute<{
+      zone_number: string;
+      name: string;
+      zone_type: string;
+      run_time_minutes: string;
+      zone_order: string;
+      is_active: boolean;
+    }>(sql`
+      SELECT zone_number, name, zone_type, run_time_minutes, zone_order, is_active
+      FROM irrigation_profile_zones
+      WHERE controller_id = ${controllerId}
+      ORDER BY zone_number
+    `);
+
+    const nums = rows.rows.map((r) => Number(r.zone_number));
+    assert.deepEqual(nums, [1, 2, 3, 4, 5], "All 5 zone rows should exist");
+
+    // Original zones 1-3 are untouched.
+    for (const r of rows.rows.filter((r) => Number(r.zone_number) <= 3)) {
+      assert.equal(r.zone_type, "other");
+      assert.equal(Number(r.run_time_minutes), 0);
+    }
+
+    // New zones 4 and 5 have the expected placeholder defaults.
+    for (const r of rows.rows.filter((r) => Number(r.zone_number) >= 4)) {
+      assert.equal(r.name, `Zone ${r.zone_number}`, "name should match Zone N pattern");
+      assert.equal(r.zone_type, "other");
+      assert.equal(Number(r.run_time_minutes), 0);
+      assert.equal(Number(r.zone_order), Number(r.zone_number));
+      assert.equal(r.is_active, true);
+    }
+  });
+
+  it("calling updateIrrigationController again with the same totalZones is idempotent", async () => {
+    // Zone count is already 5 from the previous test; re-applying 5 should not create duplicates.
+    await storage.updateIrrigationController(TEST_COMPANY_ID, controllerId, {
+      totalZones: 5,
+    });
+
+    const count = await db.execute<{ cnt: string }>(sql`
+      SELECT COUNT(*) AS cnt FROM irrigation_profile_zones
+      WHERE controller_id = ${controllerId}
+    `);
+    assert.equal(Number(count.rows[0]?.cnt), 5, "should still have exactly 5 zone rows");
   });
 });
