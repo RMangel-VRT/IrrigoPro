@@ -38,11 +38,12 @@ interface FakeStorage {
 
 // ── Pure resolver logic (extracted inline for testing without DI wiring) ───────
 
-function extractLetter(name: string): string {
-  return (
-    name.trim().split(/\s+/).pop()?.slice(-1).toUpperCase() ??
-    name.slice(0, 1).toUpperCase()
-  );
+function extractLetter(name: string): string | null {
+  const lastWord = name.trim().split(/\s+/).pop() ?? "";
+  if (lastWord.length === 1 && /^[A-Z]$/i.test(lastWord)) {
+    return lastWord.toUpperCase();
+  }
+  return null;
 }
 
 async function resolveWithFakes(
@@ -56,8 +57,8 @@ async function resolveWithFakes(
 
   const irrigCtrls = await storage.listIrrigationControllers(companyId, customerId, branchArg);
   if (irrigCtrls.length > 0) {
-    return irrigCtrls.map((ctrl) => ({
-      letter: extractLetter(ctrl.name),
+    return irrigCtrls.map((ctrl, index) => ({
+      letter: extractLetter(ctrl.name) ?? String.fromCharCode(65 + index),
       zoneCount: ctrl.totalZones ?? null,
       notes: ctrl.notes ?? null,
     }));
@@ -195,7 +196,8 @@ describe("resolveWetCheckControllers — branch-scoped isolation", () => {
 });
 
 describe("extractLetter helper", () => {
-  const cases: Array<[string, string]> = [
+  // Standard "Controller X" pattern — returns the letter.
+  const standardCases: Array<[string, string]> = [
     ["Controller A", "A"],
     ["Controller B", "B"],
     ["Controller Z", "Z"],
@@ -204,11 +206,98 @@ describe("extractLetter helper", () => {
     ["  Controller  X  ", "X"],
   ];
 
-  for (const [name, expected] of cases) {
+  for (const [name, expected] of standardCases) {
     it(`extractLetter("${name}") === "${expected}"`, () => {
       assert.equal(extractLetter(name), expected);
     });
   }
+
+  // Descriptive names — last word is not a single letter → returns null so the
+  // caller can assign a sequential letter (A, B, C…) by position.
+  const descriptiveCases: string[] = [
+    "Hunter Clock - East",
+    "Hunter Clock - West",
+    "Rainbird - West",
+    "Rainbird Clock - East",
+    "Rainbird - 136th SouthEast",
+    "Rainbird - Broadlands Lane",
+    "Some Controller With Long Name",
+  ];
+
+  for (const name of descriptiveCases) {
+    it(`extractLetter("${name}") === null (descriptive name, caller uses position)`, () => {
+      assert.equal(extractLetter(name), null);
+    });
+  }
+});
+
+// ─── Descriptive controller name scenarios ───────────────────────────────────
+//
+// Customers like "Villas at the Boulders" whose irrigation_controllers were
+// seeded with real names ("Hunter Clock - East", "Rainbird - West", …) instead
+// of "Controller A" / "Controller B" must still get unique, stable letters.
+// The resolver falls back to sequential assignment (A, B, C…) by the order
+// the DB returns rows (ORDER BY name, id).
+
+describe("resolveWetCheckControllers — descriptive names get sequential letters", () => {
+  it("assigns A,B,C… by position when no name ends with a single letter", async () => {
+    const fakeStorage: FakeStorage = {
+      listIrrigationControllers: async () => [
+        { id: 134, name: "Hunter Clock - East",       totalZones: 40, notes: null, branchName: "" },
+        { id: 135, name: "Hunter Clock - West",       totalZones: 48, notes: null, branchName: "" },
+        { id: 137, name: "Rainbird - 136th SouthEast", totalZones: 24, notes: null, branchName: "" },
+        { id: 139, name: "Rainbird - Broadlands Lane", totalZones: 40, notes: null, branchName: "" },
+        { id: 138, name: "Rainbird - West",            totalZones: 37, notes: null, branchName: "" },
+        { id: 136, name: "Rainbird Clock - East",      totalZones: 41, notes: null, branchName: "" },
+      ],
+      listPropertyControllers: async () => {
+        throw new Error("should not call property_controllers when irrigation profile exists");
+      },
+    };
+
+    const result = await resolveWithFakes(fakeStorage, 1, 271);
+    assert.equal(result.length, 6);
+    assert.equal(result[0].letter, "A"); // Hunter Clock - East
+    assert.equal(result[1].letter, "B"); // Hunter Clock - West
+    assert.equal(result[2].letter, "C"); // Rainbird - 136th SouthEast
+    assert.equal(result[3].letter, "D"); // Rainbird - Broadlands Lane
+    assert.equal(result[4].letter, "E"); // Rainbird - West
+    assert.equal(result[5].letter, "F"); // Rainbird Clock - East
+  });
+
+  it("all descriptive letters are unique — none collapse to the same letter", async () => {
+    const fakeStorage: FakeStorage = {
+      listIrrigationControllers: async () => [
+        { id: 134, name: "Hunter Clock - East",       totalZones: 40, notes: null, branchName: "" },
+        { id: 135, name: "Hunter Clock - West",       totalZones: 48, notes: null, branchName: "" },
+        { id: 137, name: "Rainbird - 136th SouthEast", totalZones: 24, notes: null, branchName: "" },
+        { id: 139, name: "Rainbird - Broadlands Lane", totalZones: 40, notes: null, branchName: "" },
+        { id: 138, name: "Rainbird - West",            totalZones: 37, notes: null, branchName: "" },
+        { id: 136, name: "Rainbird Clock - East",      totalZones: 41, notes: null, branchName: "" },
+      ],
+      listPropertyControllers: async () => [],
+    };
+
+    const result = await resolveWithFakes(fakeStorage, 1, 271);
+    const letters = result.map(r => r.letter);
+    const unique = new Set(letters);
+    assert.equal(unique.size, letters.length, `Expected all unique letters, got: ${letters.join(", ")}`);
+  });
+
+  it("standard 'Controller X' names still take precedence over position index", async () => {
+    const fakeStorage: FakeStorage = {
+      listIrrigationControllers: async () => [
+        { id: 1, name: "Controller C", totalZones: 10, notes: null, branchName: "" },
+        { id: 2, name: "Controller A", totalZones: 5,  notes: null, branchName: "" },
+      ],
+      listPropertyControllers: async () => [],
+    };
+
+    const result = await resolveWithFakes(fakeStorage, 1, 42);
+    // Names explicitly say C and A — do not override with positional A and B.
+    assert.equal(result[0].letter, "C");
+    assert.equal(result[1].letter, "A");
+  });
 });
 
 // ─── Task #1706 wire-up scenarios ────────────────────────────────────────────

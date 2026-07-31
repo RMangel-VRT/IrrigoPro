@@ -1,0 +1,110 @@
+# BUILD — Decouple Invoice Sent-ness from Lifecycle Status
+
+**What & Why**
+`invoices.status` is currently doing two unrelated jobs: tracking **where the invoice is in its lifecycle** (draft → generated → sent → terminal) and recording **whether we delivered it to the customer**. Those collide. Task #1831's payment sync overwrites `status` with `'paid'`, and `mark-sent` requires `status === 'generated'` (`invoice-mark-sent-routes.ts:49`) — so an invoice paid in QuickBooks before anyone recorded the send **can never be marked sent, ever**. The delivery record is destroyed by an unrelated event.
+
+This isn't hypothetical: a customer who pays promptly off a mailed invoice produces exactly this sequence. And it directly blocks the QBO `EmailSent` work — we can't report send state to QuickBooks for invoices whose send state we can't record.
+
+Fix: **sent-ness becomes its own fact, not a lifecycle state.** Payment, correction, and voiding stop clobbering it.
+
+## Current state (confirmed in code)
+
+- `invoices.sentAt` **already exists** (`schema.ts:884`) and is already written by `mark-sent` (`invoice-mark-sent-routes.ts:57`) alongside `status: 'sent'`. The field we need is there — it's just not the thing anyone reads.
+- Everything that cares about sent-ness reads `status` instead:
+  - `mark-sent` guard: `invoice.status !== "generated"` → 400 (`:49`)
+  - `mark-unsent` guard: `invoice.status !== "sent"` → 400 (`:87`)
+  - UI: `canMarkSent && invoice.status === "sent"` gates the unsend menu item (`invoices.tsx:1079`); the badge switch keys on `case "sent"` (`:236`)
+  - Edit/correct gates: `["generated", "sent"].includes(invoice.status)` (`invoices.tsx:1145`, `:1158`, `:1221`)
+- `pdf/send` (`routes.ts:12466`) writes **neither** — it only stamps the `invoice_pdfs` row (see the EmailSent slice, which fixes that).
+- Blast radius is genuinely small: invoice sent-ness is **not** routed through `lib/shared/src/lifecycle.ts` — that module is for **estimates** and is untouched by this work.
+
+## The model
+
+| Concern | Field | Owner |
+|---|---|---|
+| Lifecycle position | `status` — `draft \| generated \| paid \| cancelled \| superseded \| merged` | invoice engine |
+| Delivered to customer? | `sentAt` (timestamp, null = never sent) | send paths |
+| Payment state | `paymentStatus` + `balance` | QBO sync (#1831) |
+
+**`sent` stops being a lifecycle value.** "Sent" is `sentAt != null`, and it's orthogonal to everything else — a paid invoice can be sent, an unsent invoice can be paid, and neither fact overwrites the other.
+
+## Slice 1 — Read sent-ness from `sentAt`
+
+Replace every `status === 'sent'` read with `sentAt != null`:
+
+- **`mark-sent` guard** → eligible when `sentAt == null` **and** status is not terminal (`cancelled`/`superseded`/`merged`). Explicitly **allow marking a `paid` invoice as sent** — that's the case this ticket exists to fix. Writes `sentAt` only; no `status` change.
+- **`mark-unsent` guard** → eligible when `sentAt != null` and not terminal. Clears `sentAt` only.
+- **UI badge** (`invoices.tsx:236`) → render **Sent** from `sentAt`, shown *alongside* the lifecycle and payment badges rather than instead of them. An invoice can legitimately read "Sent · Paid".
+- **Edit/correct gates** (`:1145`, `:1158`, `:1221`) → these are asking "is this invoice still editable", which is a *lifecycle* question. Replace `["generated","sent"].includes(status)` with `status === 'generated'` — behaviour is unchanged once `sent` is no longer a status, and the intent gets clearer.
+- **Filters/sorting**: anywhere the invoice list filters by "sent", switch to the `sentAt` predicate.
+
+## Slice 2 — Migration + backfill
+
+- Backfill: `UPDATE invoices SET sent_at = COALESCE(sent_at, updated_at) WHERE status = 'sent' AND sent_at IS NULL` — then migrate those rows to `status = 'generated'`. Every currently-`sent` row must come out with `sentAt` populated; none may be left with a `sent` status that nothing reads anymore.
+- Also backfill from the PDF record: where `invoice_pdfs.status = 'sent'` and the invoice has no `sentAt`, copy `invoice_pdfs.sent_at`. These are the invoices that were emailed to customers but never marked sent locally, because `pdf/send` never wrote to the invoice (`routes.ts:12507`).
+- After backfill, `'sent'` must not appear as a written `status` value anywhere. Grep the diff to confirm.
+- **Order matters:** run this **before** the QBO `EmailSent` backfill, which keys off sent-ness.
+
+## Slice 3 — Payment sync stops clobbering
+
+In `qb-payment-sync.ts:315`, the paid transition writes `status: 'paid'` + `paidAt`. That stays — but it can no longer destroy sent-ness, because sent-ness now lives in `sentAt` and the sync never touches that column. Add an explicit assertion to the sync tests: **a paid transition leaves `sentAt` unchanged.**
+
+Note the ordering interaction with the void fix: `FIX — QBO Void Misread as Paid` restores mis-flipped invoices by deriving their pre-payment status from `sentAt` (`sent` when set, else `generated`). If that backfill runs **after** this slice, it should restore to `generated` and leave `sentAt` alone. Sequence the two and state which ran first.
+
+## Multi-tenancy (Rule 1)
+
+No change to isolation — all three routes already fetch via `getInvoiceById(id, callerCompanyId)` with the `super_admin → null` convention, and the backfill must be written to run per company or with an explicit company-agnostic justification.
+
+## Knock-on: the QBO EmailSent slice gets simpler
+
+`BUILD - Mark Invoices EmailSent in QuickBooks on IrrigoPro Send` currently has to refuse to walk a `paid` invoice back to `sent` (its Slice 1 terminal-status carve-out). Once this lands:
+
+- `pdf/send` stamps `sentAt` when null — no status juggling, no terminal-status special case, no "don't re-stamp on re-send" branch beyond the null check.
+- The QBO `EmailSent` push keys off `sentAt != null`, which is now stable under payment.
+- The reconcile/backfill endpoint compares `sentAt != null` against `qbEmailStatus` — a clean two-field comparison.
+
+**Update that spec's Slice 1 once this ships.**
+
+## Decisions
+
+- **Sent-ness is `sentAt`, not a status value** ✅ — orthogonal to lifecycle and payment.
+- **A paid invoice can be marked sent** ✅ — this is the bug being fixed, not an edge case.
+- **Edit gates key on `generated` only** ✅ — they were always asking a lifecycle question.
+
+## Done looks like
+
+- An invoice paid in QuickBooks before it was marked sent **can still be marked sent**.
+- Payment, correction, and void no longer erase the delivery record.
+- The invoice list shows sent-ness and payment state independently ("Sent · Paid" is a valid row).
+- No code path writes `status = 'sent'` anymore; every existing sent invoice has a populated `sentAt`.
+- Invoices emailed via `pdf/send` before this work are backfilled from the PDF record.
+
+## Tests
+
+- Mark-sent on a **paid** invoice → succeeds, stamps `sentAt`, leaves `status = 'paid'`.
+- Mark-sent on an already-sent invoice → rejected (`sentAt` already set), original timestamp preserved.
+- Mark-sent on a terminal invoice (`cancelled`/`superseded`/`merged`) → rejected.
+- Mark-unsent clears `sentAt` and leaves `status` untouched — including on a paid invoice.
+- Payment sync flipping an invoice to paid → `sentAt` unchanged (regression guard).
+- Backfill: every `status='sent'` row ends with non-null `sentAt` and `status='generated'`; PDF-derived backfill catches emailed-but-unmarked invoices.
+- Edit/correct gates behave identically before and after for a `generated` invoice, and remain blocked for paid/terminal.
+- Company isolation on all three routes and the backfill.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for each `status === 'sent'` read that was replaced, the two guard rewrites, the badge change, and the backfill.
+- [ ] Screenshot: an invoice showing **Sent** and **Paid** simultaneously.
+- [ ] Backfill output: count of rows migrated from `status='sent'`, plus count recovered from `invoice_pdfs`.
+- [ ] Test output for the paid-then-mark-sent case and the `sentAt`-preservation regression.
+- [ ] Grep proof that no code path writes `status = 'sent'`.
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+
+- `artifacts/api-server/src/routes/invoice-mark-sent-routes.ts` (guards:49/87, writes:55/93)
+- `artifacts/api-server/src/routes/routes.ts` (`pdf/send`:12466, PDF stamp:12507)
+- `artifacts/api-server/src/routes/qb-payment-sync.ts` (paid write:315 — assert `sentAt` untouched)
+- `artifacts/irrigopro/src/pages/invoices.tsx` (badge:236, unsend gate:1079, edit gates:1145/1158/1221)
+- `artifacts/irrigopro/src/components/billing/invoice-list.tsx` (sent badge)
+- `lib/db/src/schema/schema.ts` (`invoices.sentAt`:884 — no schema change, comment the new contract)
+- Tests: `invoice-mark-sent-routes.test.ts`, `qb-payment-sync.test.ts`

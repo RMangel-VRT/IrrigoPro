@@ -1,0 +1,117 @@
+# FIX — QBO Void Misread as Paid + Payment-Sync Cleanups
+
+**What & Why**
+Task #1831's payment sync has a correctness bug that turns a QuickBooks **void** into an IrrigoPro **payment**. When an invoice is voided in QBO, QuickBooks zeroes every amount — `TotalAmt → 0`, `Balance → 0` — and appends `"Voided"` to `PrivateNote`. Our mapping sees `Balance <= 0` and calls it **paid**, then stamps `status = 'paid'` + `paidAt`. That invoice is now locked against edit/correct/void, dropped out of AR, and counted as money collected. It is money that will never arrive.
+
+This ticket fixes the mapping, surfaces QBO-side voids for a human instead of silently applying them, and clears four smaller defects found in the same review.
+
+Sources: [Intuit — voided invoice behavior](https://help.developer.intuit.com/s/question/0D54R00008pCzTNSA0/in-invoice-how-can-i-know-the-invoice-status-is-open-paid-void-in-rest-api), [Intuit — filtering voided transactions](https://help.developer.intuit.com/s/question/0D50f000052aiUGCAY/can-we-filter-voided-invoice-or-other-voided-transaction)
+
+## Current state (confirmed in code)
+
+- `derivePaymentStatus(balance, totalAmt)` (`qb-payment-sync.ts:41`):
+  ```ts
+  if (balance <= 0) return "paid";                              // ← fires before totalAmt is ever read
+  if (totalAmt > 0 && balance < totalAmt) return "partially_paid";
+  return "unpaid";
+  ```
+  The spec's `Balance == 0` **and `TotalAmt > 0`** condition only survived into the `partially_paid` branch.
+- On `"paid"` the sync writes `status: 'paid'` + `paidAt` (`qb-payment-sync.ts:315`), which drives the edit lock (`invoice-editability-routes.ts:203`), the void lock (`:887`), the correction block, and AR exclusion (`financial-pulse-math.ts:224`, `:568`).
+- The QBO query selects only `Id, Balance, TotalAmt` (`qb-payment-sync.ts:165`) — `PrivateNote` isn't fetched, so a void is currently indistinguishable from a payment.
+- A **local** void already sets `status: 'cancelled'` (`invoice-editability-routes.ts:953`), and `cancelled` is in `SYNC_EXCLUDED_STATUSES` (`qb-payment-sync.ts:135`). So locally-voided invoices are already safe — this bug is specific to voids performed **in QuickBooks**.
+
+## Slice 1 — Fix the mapping (the actual bug)
+
+`derivePaymentStatus` must never return `paid` for a zero-total invoice:
+
+```ts
+if (totalAmt <= 0) return "unpaid";        // zero-total: void, or a $0 invoice — never "paid"
+if (balance <= 0) return "paid";
+if (balance < totalAmt) return "partially_paid";
+return "unpaid";
+```
+
+This alone stops the damage: a QBO-voided invoice stays `unpaid`, keeps its lifecycle status, stays editable, and stays in AR until a human resolves it. It also protects legitimate $0 invoices (fully-covered membership work) from being auto-stamped paid.
+
+## Slice 2 — Detect and flag QBO-side voids ✅ (decided: flag, don't auto-cancel)
+
+Zero-total alone is ambiguous, so identify voids explicitly:
+
+- Add `PrivateNote` to the balance query (`qb-payment-sync.ts:165`): `SELECT Id, Balance, TotalAmt, PrivateNote FROM Invoice WHERE Id IN (...)`.
+- A row is a **QBO-side void** when `TotalAmt === 0` **and** `PrivateNote` contains `"Voided"` (case-insensitive substring — QBO prepends it to whatever note was already there).
+- Schema (additive, `invoices`): `qbVoidDetectedAt: timestamp("qb_void_detected_at")` — set on first detection, cleared if a later sync shows the invoice is no longer voided.
+- **Do not change `status` or `paymentStatus`.** Someone voided this invoice in QuickBooks outside the app; that is a discrepancy to surface, not an instruction to obey. The invoice keeps its lifecycle state and stays in AR until a person decides.
+- Surface it: a **"Voided in QuickBooks"** warning badge on the invoice row (`invoice-list.tsx`, `invoices.tsx`) with a tooltip explaining that QBO shows this as voided and IrrigoPro does not, and that the manager should either void it here too or restore it in QBO. Count them in the sync summary (`qbVoided`) and in the refresh toast when non-zero.
+- Zero-total invoices **without** the Voided marker are left alone as `unpaid` (Slice 1) — no flag, no noise.
+
+## Slice 3 — Manual refresh must respond when throttled
+
+`invoices.tsx` swallows every throttled response (`if (result?.throttled) return;` — the comment says "Always silent when throttled — auto or manual"). Because the page auto-syncs on mount, a manual **Refresh payment status** click almost always lands inside the 5-minute window and produces *nothing*: no toast, no change, no explanation. The button looks broken.
+
+- Keep the **auto**-trigger silent when throttled (correct — it's background).
+- On a **manual** click that comes back throttled, toast the server's own `nextAllowedIn`: *"Synced 2 minutes ago. Next refresh available in 3 minutes."*
+- The `isAutoSyncRef` flag added in #1832 already distinguishes the two paths; it just needs to be read before the throttle early-return.
+
+## Slice 4 — Smaller corrections
+
+- **AR bucket mislabeled.** `computeArAging` bucket 3 matches `daysPastDue >= 60` but is labeled `"61–90+ days overdue"` (`financial-pulse-math.ts:560`, mirrored in `financial-pulse-widget.tsx:595` and `invoices.tsx` `AGING_OPTIONS`). Relabel all three to **"60+ days overdue"** — the current label reads like a capped range and hides genuinely ancient balances.
+- **`summary.unchanged` counts *unpaid*, not unchanged** (`qb-payment-sync.ts:321` — the `else` branch of the status switch). Rename to `unpaid` so the response payload means what it says. Update the `PaymentSyncSummary` type and any test assertions.
+- **No-QBO companies skip the throttle stamp.** Both `skippedNoQb` early-returns (`qb-payment-sync.ts:246`, `:252`) return before `recordSyncTime`, so a company without a QBO connection re-runs the integration lookup on every single invoice-page mount. Stamp the throttle on the skip path too.
+- **Throttle check and stamp aren't atomic.** `isThrottled` → sync → `recordSyncTime` leaves a window where two near-simultaneous mounts both pass and both hit QBO. Set the in-memory timestamp *before* starting the run (and roll it back on immediate failure), or guard with a per-company in-flight promise.
+
+## Multi-tenancy (Rule 1)
+
+Unchanged from #1831 and must stay that way: candidate selection is `eq(invoices.companyId, companyIdNum)`, the QBO integration is resolved per company, and `super_admin` must pass an explicit `companyId`. The new void flag and its badge are company-scoped by the same query.
+
+## Decisions
+
+- **Flag QBO voids, don't auto-cancel** ✅ — an out-of-app void gets seen by a human before IrrigoPro acts on it.
+- **Zero total is never "paid"** ✅ — covers voids *and* legitimate $0 invoices.
+- **Auto-sync stays silent; manual refresh always answers** ✅.
+
+## Done looks like
+
+- An invoice voided in QuickBooks is **never** marked paid in IrrigoPro — it stays unpaid, editable, and in AR.
+- It carries a visible **"Voided in QuickBooks"** flag so a manager can reconcile deliberately.
+- A $0 invoice is not auto-stamped paid.
+- Clicking **Refresh payment status** always tells you something.
+- AR bucket labels match the ranges they actually match.
+
+## Backfill
+
+Any invoice already mis-flipped by this bug is sitting at `status='paid'`, `paymentStatus='paid'`, `balance='0.00'`, and — because paid rows are filtered out of `candidates` (`qb-payment-sync.ts:271`) — **the sync will never revisit it to self-correct.** A one-time repair is required:
+
+- Find invoices where `paymentStatus = 'paid'` and (`balance = 0` and the QBO row reports `TotalAmt = 0`) — i.e. re-query QBO for every locally-paid invoice and identify the zero-total ones.
+- For each: clear `paymentStatus → 'unpaid'`, clear `paidAt`, restore `status` to its pre-payment value (`sent` when `sentAt` is set, else `generated`), and set `qbVoidDetectedAt` where the Voided marker is present.
+- Report what changed rather than applying silently — these invoices may have been discussed with customers as paid.
+
+## Tests
+
+- `derivePaymentStatus(0, 0)` → **`unpaid`** (not `paid`) — the regression test for this bug.
+- `derivePaymentStatus(0, 100)` → `paid`; `(40, 100)` → `partially_paid`; `(100, 100)` → `unpaid`; negative balance with positive total → `paid`.
+- Void detection: `TotalAmt 0` + `PrivateNote "Voided"` → `qbVoidDetectedAt` set, `status` and `paymentStatus` **unchanged**, invoice still counted in AR.
+- `TotalAmt 0` with no Voided marker → `unpaid`, **no** void flag.
+- A previously-flagged invoice that QBO no longer reports as voided → flag cleared.
+- Manual refresh while throttled → toast with `nextAllowedIn`; auto-trigger while throttled → silent.
+- No-QBO company → throttle stamped, second mount within the window makes no integration lookup.
+- Concurrent sync requests for one company → only one QBO batch query.
+- Backfill: a mis-flipped invoice is restored to `unpaid` with `paidAt` cleared and the correct pre-payment `status`.
+- Company isolation unchanged: company A's sync never reads or writes company B's invoices.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the mapping fix, the `PrivateNote` query change, void detection + flag, the throttle/refresh fixes, and the relabels.
+- [ ] Screenshot: an invoice voided in QBO showing the "Voided in QuickBooks" flag and **still unpaid / still in AR**.
+- [ ] Test output including the `derivePaymentStatus(0, 0) → unpaid` regression case.
+- [ ] Backfill run output listing every invoice corrected (or an explicit "none affected").
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+
+- `artifacts/api-server/src/routes/qb-payment-sync.ts` (`derivePaymentStatus`:41, query:165, paid-write:315, summary:321, skip-returns:246/252, throttle:62–90)
+- `artifacts/api-server/src/routes/qb-payment-sync.test.ts` (regression + void cases)
+- `artifacts/api-server/src/financial-pulse-math.ts` (bucket labels:560)
+- `artifacts/irrigopro/src/pages/invoices.tsx` (throttled-manual toast, `AGING_OPTIONS`, void badge)
+- `artifacts/irrigopro/src/components/billing/invoice-list.tsx` (void badge)
+- `artifacts/irrigopro/src/components/financial-pulse/financial-pulse-widget.tsx` (bucket labels:595)
+- `lib/db/src/schema/schema.ts` (`invoices` — add `qb_void_detected_at`)
