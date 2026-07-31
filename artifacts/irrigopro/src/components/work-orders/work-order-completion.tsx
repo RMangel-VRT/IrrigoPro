@@ -52,6 +52,7 @@ import {
 import { PartPicker } from "@/components/parts/part-picker";
 import { ToastAction } from "@/components/ui/toast";
 import { CustomerLocationPicker } from "@/components/location/customer-location-picker";
+import { computeCompletionPrefillHours } from "./completion-prefill";
 import type { WorkOrder, Part, Customer } from "@workspace/db/schema";
 
 const workOrderCompletionSchema = z.object({
@@ -321,9 +322,11 @@ export function WorkOrderCompletion({
 
       setUsedParts(prefilledParts);
 
-      const estimatedHours = workOrderItems.reduce((total: number, item: any) =>
-        total + (parseFloat(item.laborHours) * item.quantity), 0
-      );
+      // Task #1869 — flat-mode pre-fill uses the WO header totalHours (the
+      // approved estimate's flat total). The old Σ laborHours × quantity
+      // formula double-counted because line laborHours already include the
+      // full quantity; see completion-prefill.ts for details.
+      const estimatedHours = computeCompletionPrefillHours(workOrder, workOrderItems);
 
       form.reset({
         workSummary: "",
@@ -333,7 +336,11 @@ export function WorkOrderCompletion({
         laborMode: workOrder.laborMode === "per_part" ? "per_part" : "flat",
       });
     }
-  }, [workOrderItems, workOrder.estimateId, form, usedParts.length]);
+    // Depend on the header fields the prefill consumes (totalHours, laborMode)
+    // so a refreshed work order prop can't leave stale hours behind. The
+    // usedParts.length guard still prevents overwriting user-entered values
+    // after the initial prefill.
+  }, [workOrderItems, workOrder.estimateId, workOrder.totalHours, workOrder.laborMode, form, usedParts.length]);
 
   const completeWorkOrderMutation = useMutation({
     mutationFn: async (data: any) => {
