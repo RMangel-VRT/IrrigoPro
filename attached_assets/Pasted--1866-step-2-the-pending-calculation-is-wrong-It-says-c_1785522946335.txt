@@ -1,0 +1,19 @@
+#1866 step 2 — the pending calculation is wrong
+
+It says compute pending "from open work orders (status work_completed or in_progress) not yet linked to an invoice, following the same pattern as unbilledExposure." Three problems, stacking:
+
+unbilledExposure doesn't sum work orders. It sums work orders + billing sheets + wet-check billings (financial-pulse.ts:1344–1360).
+It has no date window at all. It's a running total of everything ever unbilled. Copy it into a monthly bar and July shows March's unbilled work.
+Budget spend uses neither. It counts only uninvoiced wet-check billings, filtered by workDate inside the month (financial-pulse.ts:1409) — that's what Task #814 established.
+
+So as written, #1866 computes a different, larger, un-windowed pending number than #1864's shared function. That's a fourth disagreeing figure, which is precisely the bug this sequence exists to eliminate.
+
+The fix is simple: step 2 calls the shared function from #1864 for both invoiced and pending. #1864 already returns { invoiced, pendingNotBilled, total } as a split for exactly this reason. Step 2 currently says "reuses the shared spend function for invoiced amounts" — drop that qualifier and delete the unbilledExposure reference entirely.
+
+#1866 — two smaller things
+
+Delete the monthlyBudgetCap fallback. The ticket says the Seasonal Budget Model is "not yet filed" — it is, it's #1865, and #1865 retires that column. Building a fallback against it means writing code that reads a column scheduled for removal. #1866 depends on #1865; no fallback.
+
+Two endpoints do the same job. #1865 step 9 adds GET /api/budget/company-summary; #1866 step 2 adds GET /api/budget-status returning the roll-up as well. Pick one and have the other reference it — I'd keep the #1866 one and cut #1865's, since #1866 is the only consumer.
+
+fillPercent on the crew endpoint is fine, incidentally — the bar needs a width and a percentage of a hidden number reveals nothing. Just tell Replit it must never be rendered as a text label.
