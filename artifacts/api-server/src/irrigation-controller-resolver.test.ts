@@ -39,10 +39,16 @@ interface FakeStorage {
 // ── Pure resolver logic (extracted inline for testing without DI wiring) ───────
 
 function extractLetter(name: string): string | null {
-  const lastWord = name.trim().split(/\s+/).pop() ?? "";
-  if (lastWord.length === 1 && /^[A-Z]$/i.test(lastWord)) {
-    return lastWord.toUpperCase();
+  const trimmed = name.trim();
+  // Single-character name (e.g. bare "A")
+  if (trimmed.length === 1 && /^[A-Z]$/i.test(trimmed)) {
+    return trimmed.toUpperCase();
   }
+  // "[word] [single-letter]" — the letter is the second whitespace token,
+  // e.g. "Controller A", "Controller A - 136th Southeast", "Ctrl B".
+  // The \b after the capture group ensures we don't match "C" from "Clock".
+  const m = trimmed.match(/^[A-Za-z]+\s+([A-Z])\b/i);
+  if (m) return m[1].toUpperCase();
   return null;
 }
 
@@ -204,6 +210,11 @@ describe("extractLetter helper", () => {
     ["A", "A"],
     ["controller a", "A"],
     ["  Controller  X  ", "X"],
+    // "Controller X - Description" format: letter is the second word, description follows
+    ["Controller A - 136th Southeast", "A"],
+    ["Controller B - Hunter Clock West", "B"],
+    ["Controller C - Rainbird East", "C"],
+    ["Controller F - Broadlands Lane", "F"],
   ];
 
   for (const [name, expected] of standardCases) {

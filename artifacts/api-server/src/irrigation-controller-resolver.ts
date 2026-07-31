@@ -32,20 +32,30 @@ export interface ResolvedController {
 }
 
 /**
- * Extract the single uppercase letter from a controller name like "Controller A".
+ * Extract the single uppercase letter from a controller name.
  *
- * Returns the letter when the last whitespace-separated word of the name is
- * exactly one alphabetic character (e.g. "Controller A" → "A", "Ctrl B" → "B").
+ * Recognises two forms:
+ *  1. A single-character name:            "A"              → "A"
+ *  2. "[word] [single-letter]" at start:  "Controller A"   → "A"
+ *                                         "Controller B - Hunter Clock West" → "B"
+ *                                         "Ctrl C"         → "C"
  *
- * Returns `null` for descriptive names like "Hunter Clock - East" or
- * "Rainbird - West". In that case the caller assigns letters sequentially
- * (A, B, C…) by the position of the controller in the DB-sorted result set.
+ * Returns `null` for descriptive names where the second word is not a single
+ * letter (e.g. "Hunter Clock - East", "Rainbird - West"). In that case the
+ * caller assigns letters sequentially (A, B, C…) by the position of the
+ * controller in the DB-sorted result set.
  */
 function extractLetter(name: string): string | null {
-  const lastWord = name.trim().split(/\s+/).pop() ?? "";
-  if (lastWord.length === 1 && /^[A-Z]$/i.test(lastWord)) {
-    return lastWord.toUpperCase();
+  const trimmed = name.trim();
+  // Single-character name (e.g. bare "A")
+  if (trimmed.length === 1 && /^[A-Z]$/i.test(trimmed)) {
+    return trimmed.toUpperCase();
   }
+  // "[word] [single-letter]" — the letter is the second whitespace token,
+  // e.g. "Controller A", "Controller A - 136th Southeast", "Ctrl B".
+  // The \b after the capture group ensures we don't match "C" from "Clock".
+  const m = trimmed.match(/^[A-Za-z]+\s+([A-Z])\b/i);
+  if (m) return m[1].toUpperCase();
   return null;
 }
 
