@@ -1,10 +1,14 @@
-// Task #1438 — HTTP tests for POST /api/invoices/:id/mark-sent and
-// POST /api/invoices/:id/mark-unsent.
+// Task #1847 — HTTP tests for POST /api/invoices/:id/mark-sent and
+// POST /api/invoices/:id/mark-unsent after the sent-ness / lifecycle decoupling.
 //
-// Mounts the routes against in-memory storage stubs and exercises the role
-// guard, company scoping, the status preconditions (only generated → sent,
-// only sent → generated), and the happy paths (status + sentAt are written
-// through storage.updateInvoice).
+// Covers:
+//   (a) mark-sent on a `paid` invoice succeeds and stamps sentAt (leaves status=paid)
+//   (b) mark-sent on an already-sent invoice (sentAt set) is rejected; original timestamp preserved
+//   (c) mark-sent on terminal statuses (cancelled, superseded, merged) is rejected
+//   (d) mark-unsent clears sentAt and leaves status untouched (including on a paid invoice)
+//   (e) company isolation on both routes
+//   (f) role guards (field_tech / irrigation_manager → 403)
+//   (g) invalid id → 400
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -111,6 +115,8 @@ function stubStorage(rows: Record<number, any>) {
   return calls;
 }
 
+// ── POST /api/invoices/:id/mark-sent ─────────────────────────────────────────
+
 describe("POST /api/invoices/:id/mark-sent", () => {
   it("returns 403 for field_tech (and never touches storage)", async () => {
     try {
@@ -135,36 +141,91 @@ describe("POST /api/invoices/:id/mark-sent", () => {
     }
   });
 
-  it("flips a generated invoice to sent and stamps sentAt", async () => {
+  it("(a) mark-sent on a generated invoice stamps sentAt without touching status", async () => {
     try {
       const calls = stubStorage({ 1: invoice({ status: "generated" }) });
       const app = buildApp("billing_manager");
       const { status, body } = await post(app, "/api/invoices/1/mark-sent");
       assert.equal(status, 200);
-      assert.equal(body.status, "sent");
+      // status must not be changed by mark-sent
+      assert.equal(body.status, "generated");
       assert.equal(calls.length, 1);
-      assert.equal(calls[0].patch.status, "sent");
+      // patch must only include sentAt — no status change
+      assert.equal(calls[0].patch.status, undefined, "mark-sent must not write status");
       assert.ok(calls[0].patch.sentAt instanceof Date);
     } finally {
       restoreAll();
     }
   });
 
-  it("rejects a non-generated invoice with 400 (no write)", async () => {
-    for (const st of ["draft", "sent", "paid", "cancelled"]) {
-      try {
-        const calls = stubStorage({ 1: invoice({ status: st }) });
-        const app = buildApp("company_admin");
-        const { status } = await post(app, "/api/invoices/1/mark-sent");
-        assert.equal(status, 400, `expected 400 for status=${st}`);
-        assert.equal(calls.length, 0);
-      } finally {
-        restoreAll();
-      }
+  it("(a) mark-sent on a PAID invoice succeeds and stamps sentAt, leaves status=paid", async () => {
+    try {
+      const calls = stubStorage({ 1: invoice({ status: "paid", sentAt: null }) });
+      const app = buildApp("billing_manager");
+      const { status, body } = await post(app, "/api/invoices/1/mark-sent");
+      assert.equal(status, 200);
+      assert.equal(body.status, "paid", "status must remain paid after mark-sent");
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].patch.status, undefined, "mark-sent must not write status");
+      assert.ok(calls[0].patch.sentAt instanceof Date);
+    } finally {
+      restoreAll();
     }
   });
 
-  it("returns 404 for a cross-tenant invoice", async () => {
+  it("(b) mark-sent on already-sent invoice (sentAt set) is rejected; original timestamp preserved", async () => {
+    try {
+      const originalSentAt = new Date("2026-05-01T10:00:00.000Z");
+      const calls = stubStorage({
+        1: invoice({ status: "generated", sentAt: originalSentAt }),
+      });
+      const app = buildApp("billing_manager");
+      const { status } = await post(app, "/api/invoices/1/mark-sent");
+      assert.equal(status, 400);
+      // Must not touch storage
+      assert.equal(calls.length, 0);
+    } finally {
+      restoreAll();
+    }
+  });
+
+  it("(c) mark-sent on terminal status 'cancelled' is rejected", async () => {
+    try {
+      const calls = stubStorage({ 1: invoice({ status: "cancelled", sentAt: null }) });
+      const app = buildApp("company_admin");
+      const { status } = await post(app, "/api/invoices/1/mark-sent");
+      assert.equal(status, 400);
+      assert.equal(calls.length, 0);
+    } finally {
+      restoreAll();
+    }
+  });
+
+  it("(c) mark-sent on terminal status 'superseded' is rejected", async () => {
+    try {
+      const calls = stubStorage({ 1: invoice({ status: "superseded", sentAt: null }) });
+      const app = buildApp("company_admin");
+      const { status } = await post(app, "/api/invoices/1/mark-sent");
+      assert.equal(status, 400);
+      assert.equal(calls.length, 0);
+    } finally {
+      restoreAll();
+    }
+  });
+
+  it("(c) mark-sent on terminal status 'merged' is rejected", async () => {
+    try {
+      const calls = stubStorage({ 1: invoice({ status: "merged", sentAt: null }) });
+      const app = buildApp("company_admin");
+      const { status } = await post(app, "/api/invoices/1/mark-sent");
+      assert.equal(status, 400);
+      assert.equal(calls.length, 0);
+    } finally {
+      restoreAll();
+    }
+  });
+
+  it("(e) returns 404 for a cross-tenant invoice (company isolation)", async () => {
     try {
       stubStorage({ 1: invoice({ companyId: 999 }) });
       const app = buildApp("billing_manager", 1);
@@ -175,7 +236,7 @@ describe("POST /api/invoices/:id/mark-sent", () => {
     }
   });
 
-  it("returns 400 for an invalid id", async () => {
+  it("(g) returns 400 for an invalid id", async () => {
     try {
       stubStorage({});
       const app = buildApp("billing_manager");
@@ -187,10 +248,12 @@ describe("POST /api/invoices/:id/mark-sent", () => {
   });
 });
 
+// ── POST /api/invoices/:id/mark-unsent ────────────────────────────────────────
+
 describe("POST /api/invoices/:id/mark-unsent", () => {
   it("returns 403 for field_tech", async () => {
     try {
-      stubStorage({ 1: invoice({ status: "sent" }) });
+      stubStorage({ 1: invoice({ status: "generated", sentAt: new Date() }) });
       const app = buildApp("field_tech");
       const { status } = await post(app, "/api/invoices/1/mark-unsent");
       assert.equal(status, 403);
@@ -199,27 +262,57 @@ describe("POST /api/invoices/:id/mark-unsent", () => {
     }
   });
 
-  it("reverts a sent invoice to generated and clears sentAt", async () => {
+  it("(d) mark-unsent clears sentAt and leaves status unchanged (generated)", async () => {
     try {
       const calls = stubStorage({
-        1: invoice({ status: "sent", sentAt: new Date() }),
+        1: invoice({ status: "generated", sentAt: new Date() }),
       });
       const app = buildApp("billing_manager");
       const { status, body } = await post(app, "/api/invoices/1/mark-unsent");
       assert.equal(status, 200);
       assert.equal(body.status, "generated");
       assert.equal(calls.length, 1);
-      assert.equal(calls[0].patch.status, "generated");
+      // patch must not include status
+      assert.equal(calls[0].patch.status, undefined, "mark-unsent must not write status");
       assert.equal(calls[0].patch.sentAt, null);
     } finally {
       restoreAll();
     }
   });
 
-  it("rejects a non-sent invoice with 400 (no write)", async () => {
-    for (const st of ["draft", "generated", "paid", "cancelled"]) {
+  it("(d) mark-unsent clears sentAt on a PAID invoice, leaves status=paid", async () => {
+    try {
+      const calls = stubStorage({
+        1: invoice({ status: "paid", sentAt: new Date() }),
+      });
+      const app = buildApp("billing_manager");
+      const { status, body } = await post(app, "/api/invoices/1/mark-unsent");
+      assert.equal(status, 200);
+      assert.equal(body.status, "paid", "status must remain paid after mark-unsent");
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].patch.status, undefined, "mark-unsent must not write status");
+      assert.equal(calls[0].patch.sentAt, null);
+    } finally {
+      restoreAll();
+    }
+  });
+
+  it("(d) mark-unsent on an invoice with sentAt=null is rejected (no write)", async () => {
+    try {
+      const calls = stubStorage({ 1: invoice({ status: "generated", sentAt: null }) });
+      const app = buildApp("company_admin");
+      const { status } = await post(app, "/api/invoices/1/mark-unsent");
+      assert.equal(status, 400);
+      assert.equal(calls.length, 0);
+    } finally {
+      restoreAll();
+    }
+  });
+
+  it("(c) mark-unsent on terminal status is rejected (no write)", async () => {
+    for (const st of ["cancelled", "superseded", "merged"]) {
       try {
-        const calls = stubStorage({ 1: invoice({ status: st }) });
+        const calls = stubStorage({ 1: invoice({ status: st, sentAt: new Date() }) });
         const app = buildApp("company_admin");
         const { status } = await post(app, "/api/invoices/1/mark-unsent");
         assert.equal(status, 400, `expected 400 for status=${st}`);
@@ -227,6 +320,17 @@ describe("POST /api/invoices/:id/mark-unsent", () => {
       } finally {
         restoreAll();
       }
+    }
+  });
+
+  it("(e) returns 404 for a cross-tenant invoice (company isolation)", async () => {
+    try {
+      stubStorage({ 1: invoice({ companyId: 999, sentAt: new Date() }) });
+      const app = buildApp("billing_manager", 1);
+      const { status } = await post(app, "/api/invoices/1/mark-unsent");
+      assert.equal(status, 404);
+    } finally {
+      restoreAll();
     }
   });
 });

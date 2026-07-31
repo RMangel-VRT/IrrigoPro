@@ -1,12 +1,12 @@
 // Task #1438 — Record manual delivery of an invoice.
+// Task #1847 — Decouple sent-ness from lifecycle status.
 //
-// POST /api/invoices/:id/mark-sent   — flip a generated invoice to `sent` and
-//   stamp `sentAt = now()`. Does NOT email anything; it only records that
-//   the invoice was delivered out-of-band (printed, hand-delivered, sent
-//   from a personal mailbox). Only `generated` invoices are eligible.
-// POST /api/invoices/:id/mark-unsent — undo a mistaken mark-sent: revert a
-//   `sent` invoice back to `generated` and clear `sentAt`. Only valid from
-//   `sent`.
+// POST /api/invoices/:id/mark-sent   — stamp `sentAt = now()` without touching
+//   `status`. Allowed when sentAt is null and status is not terminal
+//   (cancelled / superseded / merged). Explicitly allows `paid` invoices so a
+//   QB-paid invoice can still be recorded as delivered.
+// POST /api/invoices/:id/mark-unsent — clear `sentAt` without touching
+//   `status`. Allowed when sentAt is non-null and status is not terminal.
 //
 // Both are company-scoped (getInvoiceById under the caller's company) and
 // role-guarded by requireBillingAccess (company_admin / billing_manager).
@@ -46,14 +46,20 @@ export function registerInvoiceMarkSentRoutes(
           res.status(404).json({ message: "Invoice not found" });
           return;
         }
-        if (invoice.status !== "generated") {
-          res
-            .status(400)
-            .json({ message: "Only generated invoices can be marked as sent." });
+        // Reject if already sent (sentAt is set) — idempotency guard.
+        if (invoice.sentAt) {
+          res.status(400).json({ message: "Invoice is already marked as sent." });
           return;
         }
+        // Reject terminal statuses — cannot record delivery on a closed invoice.
+        const TERMINAL = ["cancelled", "superseded", "merged"] as const;
+        if (TERMINAL.includes(invoice.status as any)) {
+          res.status(400).json({ message: "Cannot mark a terminal invoice as sent." });
+          return;
+        }
+        // Explicitly allow `paid` (and `generated`, `draft`) — sentAt is
+        // independent of lifecycle status after Task #1847.
         const updated = await storage.updateInvoice(id, {
-          status: "sent",
           sentAt: new Date(),
         });
         res.json(updated);
@@ -84,14 +90,18 @@ export function registerInvoiceMarkSentRoutes(
           res.status(404).json({ message: "Invoice not found" });
           return;
         }
-        if (invoice.status !== "sent") {
-          res
-            .status(400)
-            .json({ message: "Only sent invoices can be marked unsent" });
+        // Reject if not yet sent — nothing to undo.
+        if (!invoice.sentAt) {
+          res.status(400).json({ message: "Invoice has not been marked as sent." });
+          return;
+        }
+        // Reject terminal statuses — cannot undo delivery on a closed invoice.
+        const TERMINAL = ["cancelled", "superseded", "merged"] as const;
+        if (TERMINAL.includes(invoice.status as any)) {
+          res.status(400).json({ message: "Cannot mark a terminal invoice as unsent." });
           return;
         }
         const updated = await storage.updateInvoice(id, {
-          status: "generated",
           sentAt: null,
         });
         res.json(updated);

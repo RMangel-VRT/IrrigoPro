@@ -227,14 +227,21 @@ function buildInvoicesCsv(invoices: Invoice[]) {
   return [headers.join(","), ...rows].join("\r\n") + "\r\n";
 }
 
+// Task #1847 — sentAt is now the single source of delivery truth. The
+// lifecycle badge no longer has a "sent" case; a separate Sent badge is
+// rendered at each site when sentAt != null. This allows "Paid · Sent"
+// to appear simultaneously as independent badges.
+function getSentBadge(sentAt: string | null | undefined) {
+  if (!sentAt) return null;
+  return <Badge className="bg-green-100 text-green-800">Sent</Badge>;
+}
+
 function getStatusBadge(status: string) {
   switch (status.toLowerCase()) {
     case "draft":
       return <Badge className="bg-yellow-100 text-yellow-800 border border-yellow-300">Draft</Badge>;
     case "generated":
       return <Badge className="bg-blue-100 text-blue-800">Generated</Badge>;
-    case "sent":
-      return <Badge className="bg-green-100 text-green-800">Sent</Badge>;
     case "paid":
       return <Badge className="bg-emerald-100 text-emerald-800">Paid</Badge>;
     case "overdue":
@@ -1059,7 +1066,7 @@ export default function InvoicesPage() {
           <FileText className="w-3.5 h-3.5 mr-2" />
           View PDF
         </DropdownMenuItem>
-        {canMarkSent && invoice.status === "generated" && (
+        {canMarkSent && invoice.sentAt == null && !["cancelled", "superseded", "merged", "draft"].includes(invoice.status) && (
           <DropdownMenuItem
             disabled={markSentMutation.isPending && markSentMutation.variables === invoice.id}
             onSelect={(e) => {
@@ -1076,7 +1083,7 @@ export default function InvoicesPage() {
             Mark sent
           </DropdownMenuItem>
         )}
-        {canMarkSent && invoice.status === "sent" && (
+        {canMarkSent && invoice.sentAt != null && (
           <DropdownMenuItem
             disabled={markUnsentMutation.isPending && markUnsentMutation.variables === invoice.id}
             onSelect={(e) => {
@@ -1141,8 +1148,8 @@ export default function InvoicesPage() {
             Re-sync to QuickBooks
           </DropdownMenuItem>
         )}
-        {/* Task #1710 — Correct / Reissue. Available on generated and sent invoices. */}
-        {canCorrect && ["generated", "sent"].includes(invoice.status) && (
+        {/* Task #1710 — Correct / Reissue. Available on generated invoices. */}
+        {canCorrect && invoice.status === "generated" && (
           <DropdownMenuItem
             onSelect={(e) => {
               e.preventDefault();
@@ -1154,8 +1161,8 @@ export default function InvoicesPage() {
             Correct / Reissue
           </DropdownMenuItem>
         )}
-        {/* Task #1811 — Edit metadata. Available on generated or sent (not draft — use the manage-tickets sheet for draft). */}
-        {canBillingEdit && ["generated", "sent"].includes(invoice.status) && (
+        {/* Task #1811 — Edit metadata. Available on generated (not draft — use the manage-tickets sheet for draft). */}
+        {canBillingEdit && invoice.status === "generated" && (
           <DropdownMenuItem
             onSelect={(e) => {
               e.preventDefault();
@@ -1217,8 +1224,8 @@ export default function InvoicesPage() {
             Finalize invoice
           </DropdownMenuItem>
         )}
-        {/* Task #1811 — Void & Release. Available on any unpaid invoice: draft, generated, or sent. */}
-        {canBillingEdit && ["draft", "generated", "sent"].includes(invoice.status) && (
+        {/* Task #1811 — Void & Release. Available on unpaid invoices: draft or generated. */}
+        {canBillingEdit && ["draft", "generated"].includes(invoice.status) && (
           <DropdownMenuItem
             className="text-red-600 focus:text-red-600"
             onSelect={(e) => {
@@ -1516,6 +1523,7 @@ export default function InvoicesPage() {
                           <TableCell className="whitespace-nowrap">
                             <div className="flex items-center gap-1.5 flex-wrap">
                               {getStatusBadge(invoice.status)}
+                              {getSentBadge(invoice.sentAt)}
                               {invoice.isOverdue && (
                                 <Badge className="bg-red-100 text-red-800 text-xs" data-testid={`overdue-badge-${invoice.id}`}>Overdue</Badge>
                               )}
@@ -1628,6 +1636,7 @@ export default function InvoicesPage() {
                         <div className="mt-3 flex items-center justify-between gap-2">
                           <div className="flex items-center gap-1.5">
                             {getStatusBadge(invoice.status)}
+                            {getSentBadge(invoice.sentAt)}
                             {renderQbIcon(invoice)}
                           </div>
                           <span className="font-bold text-gray-900">

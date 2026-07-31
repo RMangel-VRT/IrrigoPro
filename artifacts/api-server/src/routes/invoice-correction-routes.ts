@@ -383,8 +383,10 @@ export function registerInvoiceCorrectionRoutes(
         }
 
         // Only issued invoices (non-draft, non-cancelled, non-superseded) can
-        // be corrected.
-        const correctable = ["sent", "paid", "overdue", "generated"];
+        // be corrected. Task #1847: "sent" is retired as a lifecycle value —
+        // invoices that were previously status='sent' are now status='generated'
+        // with sentAt populated, so they remain correctable via "generated".
+        const correctable = ["paid", "overdue", "generated"];
         if (!correctable.includes(invoice.status)) {
           res.status(400).json({
             message: `Invoice status "${invoice.status}" is not eligible for correction. Only issued invoices can be corrected.`,

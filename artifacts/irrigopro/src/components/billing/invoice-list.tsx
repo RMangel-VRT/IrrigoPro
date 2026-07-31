@@ -20,6 +20,7 @@ interface Invoice {
   invoiceYear: number;
   status: string;
   createdAt: string;
+  sentAt?: string | null;
   dueDate?: string | null;
   quickbooksInvoiceId?: string;
   billingType?: string;
@@ -155,12 +156,18 @@ export function InvoiceList({ customerId, limit = 20, onOpenPdf }: InvoiceListPr
     }).format(parseFloat(amount));
   };
 
+  // Task #1847 — sentAt is now the single source of delivery truth. The
+  // lifecycle badge no longer has a "sent" case; a separate Sent badge is
+  // rendered when sentAt != null so "Paid · Sent" can appear simultaneously.
+  const getSentBadge = (invoice: Invoice) => {
+    if (!invoice.sentAt) return null;
+    return <Badge className="bg-green-100 text-green-800 text-xs">Sent</Badge>;
+  };
+
   const getStatusBadge = (status: string) => {
     switch (status.toLowerCase()) {
       case 'generated':
         return <Badge className="bg-blue-100 text-blue-800" data-testid={`status-${status}`}>Generated</Badge>;
-      case 'sent':
-        return <Badge className="bg-green-100 text-green-800" data-testid={`status-${status}`}>Sent</Badge>;
       case 'paid':
         return <Badge className="bg-emerald-100 text-emerald-800" data-testid={`status-${status}`}>Paid</Badge>;
       default:
@@ -252,6 +259,7 @@ export function InvoiceList({ customerId, limit = 20, onOpenPdf }: InvoiceListPr
                 </div>
                 <div className="flex flex-col items-end gap-1">
                   {getStatusBadge(invoice.status)}
+                  {getSentBadge(invoice)}
                   {invoice.isOverdue && (
                     <Badge className="bg-red-100 text-red-800 text-xs" data-testid={`overdue-badge-${invoice.id}`}>
                       <AlertTriangle className="w-3 h-3 mr-1" />

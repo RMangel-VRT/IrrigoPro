@@ -12548,11 +12548,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       );
 
       if (emailResult.success) {
+        const now = new Date();
         // Update PDF status to mark it as sent
         await storage.updateInvoicePdf(pdf.id, {
           status: 'sent',
-          sentAt: new Date(),
+          sentAt: now,
         });
+        // Task #1847 — sentAt on the invoice row is the single source of
+        // delivery truth. Stamp it when a PDF is emailed so the Sent badge
+        // appears without requiring a separate manual mark-sent action.
+        // Preserve an existing sentAt (e.g. a prior manual mark-sent) — only
+        // fill in when it is currently null.
+        if (!invoice.sentAt) {
+          await storage.updateInvoice(invoiceId, { sentAt: now });
+        }
         
         res.json({ 
           message: "PDF sent successfully to customer",

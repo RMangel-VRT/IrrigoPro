@@ -260,6 +260,10 @@ describe("syncPaymentStatusForCompany", () => {
     assert.equal(updates[0].paymentStatus, "paid");
     assert.equal(updates[0].status, "paid");
     assert.ok(updates[0].paidAt instanceof Date);
+    // Task #1847 regression: the QB payment sync must NEVER overwrite sentAt.
+    // sentAt is the single source of delivery truth and is managed exclusively
+    // by mark-sent / mark-unsent. The sync should not include sentAt in updates.
+    assert.equal(updates[0].sentAt, undefined, "QB payment sync must not overwrite sentAt");
   });
 
   it("marks partiallyPaid=1 when QBO Balance is partial", async () => {
