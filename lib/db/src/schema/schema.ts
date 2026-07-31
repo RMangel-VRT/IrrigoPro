@@ -240,6 +240,9 @@ export const billingSheets = pgTable("billing_sheets", {
   workLocationAddress: text("work_location_address"),
   controllerLetter: text("controller_letter"),
   zoneNumber: integer("zone_number"),
+  // Task #1857 — nullable FK to irrigation_controllers. Populated going forward
+  // when a billing sheet is created from a wet check. NULL on legacy sheets.
+  controllerId: integer("controller_id").references(() => irrigationControllers.id),
   workDate: timestamp("work_date").notNull(),
   technicianName: text("technician_name").notNull(),
   technicianId: integer("technician_id").references(() => users.id),
@@ -502,6 +505,8 @@ export const estimates = pgTable("estimates", {
   // number from the customer's controller setup this estimate is for.
   controllerLetter: text("controller_letter"),
   zoneNumber: integer("zone_number"),
+  // Task #1857 — nullable FK to irrigation_controllers. Populated going forward. NULL on legacy.
+  controllerId: integer("controller_id").references(() => irrigationControllers.id),
   // Task #1499 — Customer signature captured at approval time.
   // All seven columns are nullable; they are populated only when the
   // customer completes the "Sign to approve" flow (POST approve-via-token).
@@ -578,49 +583,8 @@ export const estimateItems = pgTable("estimate_items", {
   controllerLetter: text("controller_letter"),
   zoneNumber: integer("zone_number"),
   issueType: text("issue_type"),
-});
-
-
-
-// Property zones for field tech operations
-export const propertyZones = pgTable("property_zones", {
-  id: serial("id").primaryKey(),
-  propertyName: text("property_name").notNull(),
-  propertyAddress: text("property_address").notNull(),
-  googleSheetsUrl: text("google_sheets_url"),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
-});
-
-export const zones = pgTable("zones", {
-  id: serial("id").primaryKey(),
-  propertyId: integer("property_id").references(() => propertyZones.id, { onDelete: "cascade" }).notNull(),
-  name: text("name").notNull(),
-  description: text("description"),
-  clockNumber: text("clock_number").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
-});
-
-// Field work sessions
-export const fieldWorkSessions = pgTable("field_work_sessions", {
-  id: serial("id").primaryKey(),
-  propertyId: integer("property_id").references(() => propertyZones.id, { onDelete: "cascade" }).notNull(),
-  zoneId: integer("zone_id").references(() => zones.id, { onDelete: "cascade" }).notNull(),
-  clockNumber: text("clock_number").notNull(),
-  workDescription: text("work_description").notNull(),
-  startTime: timestamp("start_time", { withTimezone: true }).notNull(),
-  endTime: timestamp("end_time", { withTimezone: true }),
-  status: text("status").notNull().default("in-progress"),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
-});
-
-export const fieldWorkItems = pgTable("field_work_items", {
-  id: serial("id").primaryKey(),
-  sessionId: integer("session_id").references(() => fieldWorkSessions.id, { onDelete: "cascade" }).notNull(),
-  partId: integer("part_id").references(() => parts.id, { onDelete: "cascade" }).notNull(),
-  partName: text("part_name").notNull(),
-  quantity: integer("quantity").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  // Task #1857 — nullable FK to irrigation_controllers.
+  controllerId: integer("controller_id").references(() => irrigationControllers.id),
 });
 
 // QuickBooks integration
@@ -769,6 +733,8 @@ export const workOrders = pgTable("work_orders", {
   // is for, mirrored from the originating estimate when applicable.
   controllerLetter: text("controller_letter"),
   zoneNumber: integer("zone_number"),
+  // Task #1857 — nullable FK to irrigation_controllers. Populated going forward. NULL on legacy.
+  controllerId: integer("controller_id").references(() => irrigationControllers.id),
   // AI-generated description fields (populated during completion)
   aiInputs: text("ai_inputs"), // JSON blob of structured inputs used for AI generation
   aiShortDescription: text("ai_short_description"), // Final accepted short description
@@ -843,6 +809,8 @@ export const workOrderItems = pgTable("work_order_items", {
   controllerLetter: text("controller_letter"),
   zoneNumber: integer("zone_number"),
   issueType: text("issue_type"),
+  // Task #1857 — nullable FK to irrigation_controllers.
+  controllerId: integer("controller_id").references(() => irrigationControllers.id),
   // Per-item check-off state for the tech zone checklist. Null = not done.
   completedAt: timestamp("completed_at"),
   // Slice 3 lineage columns — finding_id links a WO item back to the wet-check
@@ -1099,10 +1067,8 @@ export const insertAssemblyPartSchema = createInsertSchema(assemblyParts).omit({
 // companyId is always stamped server-side; clients must never send it directly.
 export const insertEstimateSchema = createInsertSchema(estimates).omit({ id: true, estimateNumber: true, createdAt: true, updatedAt: true, companyId: true });
 export const insertEstimateItemSchema = createInsertSchema(estimateItems).omit({ id: true });
-export const insertPropertyZoneSchema = createInsertSchema(propertyZones).omit({ id: true });
-export const insertZoneSchema = createInsertSchema(zones).omit({ id: true });
-export const insertFieldWorkSessionSchema = createInsertSchema(fieldWorkSessions).omit({ id: true });
-export const insertFieldWorkItemSchema = createInsertSchema(fieldWorkItems).omit({ id: true });
+// insertPropertyZoneSchema, insertZoneSchema, insertFieldWorkSessionSchema, insertFieldWorkItemSchema
+// removed by Task #1857 — prototype tables dropped.
 export const insertQuickbooksIntegrationSchema = createInsertSchema(quickbooksIntegration).omit({ id: true });
 export const insertQuickbooksSyncSchema = createInsertSchema(quickbooksSync).omit({ id: true });
 export const workOrderStatusValues = ['pending', 'assigned', 'in_progress', 'work_completed', 'pending_manager_review', 'approved_passed_to_billing', 'cancelled', 'billed'] as const;
@@ -1203,10 +1169,7 @@ export type LifecycleStatus =
   | "expired";
 export type Estimate = typeof estimates.$inferSelect & { lifecycleStatus?: LifecycleStatus };
 export type EstimateItem = typeof estimateItems.$inferSelect;
-export type PropertyZone = typeof propertyZones.$inferSelect;
-export type Zone = typeof zones.$inferSelect;
-export type FieldWorkSession = typeof fieldWorkSessions.$inferSelect;
-export type FieldWorkItem = typeof fieldWorkItems.$inferSelect;
+// PropertyZone, Zone, FieldWorkSession, FieldWorkItem removed by Task #1857.
 export type QuickbooksIntegration = typeof quickbooksIntegration.$inferSelect;
 export type QuickbooksSync = typeof quickbooksSync.$inferSelect;
 export type WorkOrder = typeof workOrders.$inferSelect;
@@ -1233,10 +1196,7 @@ export type InsertAssembly = z.infer<typeof insertAssemblySchema>;
 export type InsertAssemblyPart = z.infer<typeof insertAssemblyPartSchema>;
 export type InsertEstimate = z.infer<typeof insertEstimateSchema>;
 export type InsertEstimateItem = z.infer<typeof insertEstimateItemSchema>;
-export type InsertPropertyZone = z.infer<typeof insertPropertyZoneSchema>;
-export type InsertZone = z.infer<typeof insertZoneSchema>;
-export type InsertFieldWorkSession = z.infer<typeof insertFieldWorkSessionSchema>;
-export type InsertFieldWorkItem = z.infer<typeof insertFieldWorkItemSchema>;
+// InsertPropertyZone, InsertZone, InsertFieldWorkSession, InsertFieldWorkItem removed by Task #1857.
 export type InsertQuickbooksIntegration = z.infer<typeof insertQuickbooksIntegrationSchema>;
 export type InsertQuickbooksSync = z.infer<typeof insertQuickbooksSyncSchema>;
 export type InsertWorkOrder = z.infer<typeof insertWorkOrderSchema>;
@@ -1259,13 +1219,7 @@ export type EstimateWithItems = Estimate & {
   items: EstimateItem[];
 };
 
-export type PropertyZoneWithZones = PropertyZone & {
-  zones: Zone[];
-};
-
-export type FieldWorkSessionWithItems = FieldWorkSession & {
-  items: FieldWorkItem[];
-};
+// PropertyZoneWithZones and FieldWorkSessionWithItems removed by Task #1857.
 
 export type WorkOrderWithItems = WorkOrder & {
   items: WorkOrderItem[];
@@ -1348,38 +1302,9 @@ export type InsertPhotoLateAddition = z.infer<typeof insertPhotoLateAdditionSche
 // Wet Check System (Slice 2A)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Per-property, per-controller record. Persists across visits — the tech's
-// zoneCount override on a wet check writes back here so the next wet check at
-// the same property starts with the corrected counts.
-export const propertyControllers = pgTable("property_controllers", {
-  id: serial("id").primaryKey(),
-  companyId: integer("company_id").references(() => companies.id).notNull(),
-  customerId: integer("customer_id").references(() => customers.id).notNull(),
-  // Optional branch scope for customers with multiple locations
-  // (customers.branches). The empty string "" means "no branch /
-  // customer-level" — the bucket every existing row originally fell into.
-  // Per-branch rows are keyed by (customerId, branchName, controllerLetter);
-  // see uniq index below. NOT NULL with a default of '' so the unique index
-  // can be three plain typed columns (no COALESCE expression). The public
-  // API contract still exposes the customer-level bucket as
-  // `branchName: null` — normalization happens at the storage boundary.
-  branchName: text("branch_name").notNull().default(""),
-  controllerLetter: text("controller_letter").notNull(),
-  zoneCount: integer("zone_count").notNull().default(100),
-  notes: text("notes"),
-  // Future hook for VRTSync map / GPS wiring; not populated by capture UI.
-  controllerId: integer("controller_id").references(() => controllers.id),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
-}, (table) => ({
-  // Unique by (customer, branch, letter). branch_name is NOT NULL DEFAULT ''
-  // so the customer-level bucket uses '' and Postgres treats duplicates as
-  // conflicts under normal `=` semantics — no COALESCE expression needed.
-  // Three plain typed columns means drizzle-kit's opclass inference can't
-  // mis-stamp `int4_ops` on a raw SQL fragment.
-  uniqCustomerLetter: uniqueIndex("uniq_property_ctrl_branch")
-    .on(table.customerId, table.controllerLetter, table.branchName),
-}));
+// property_controllers was retired by Task #1857 (One irrigation system per customer).
+// The table is dropped by migration 0018; this declaration is removed from the schema.
+// irrigation_controllers is now the single source of truth for controller/zone data.
 
 // Issue type catalog — drives the field-UI preset grid and the per-issue
 // labor defaults / part category filter for the part picker.
@@ -1482,8 +1407,14 @@ export const wetCheckZoneRecords = pgTable("wet_check_zone_records", {
   // on finding-set changes. Reset to false via the /reset endpoint.
   repairLaborManuallySet: boolean("repair_labor_manually_set").notNull().default(false),
   clientId: text("client_id"),
+  // Task #1857 — nullable FK to irrigation_controllers row. Backfilled via migration 0016.
+  // After the backfill and index swap (migration 0017), zone records are keyed by
+  // controller row rather than letter string.
+  controllerId: integer("controller_id").references(() => irrigationControllers.id),
 }, (table) => ({
-  uniqZone: uniqueIndex("uniq_wet_check_zone").on(table.wetCheckId, table.controllerLetter, table.zoneNumber),
+  // Task #1857 — new unique index on (wetCheckId, controllerId, zoneNumber), partial
+  // WHERE controller_id IS NOT NULL. The old letter-based index was dropped by migration 0017.
+  uniqZone: uniqueIndex("uniq_wet_check_zone").on(table.wetCheckId, table.controllerId, table.zoneNumber).where(sql`${table.controllerId} IS NOT NULL`),
   clientIdUniq: uniqueIndex("uniq_zone_record_client_id")
     .on(table.clientId)
     .where(sql`${table.clientId} IS NOT NULL`),
@@ -1656,6 +1587,8 @@ export const workOrderZonePhotos = pgTable("work_order_zone_photos", {
   workOrderItemId: integer("work_order_item_id").references(() => workOrderItems.id, { onDelete: "set null" }),
   controllerLetter: text("controller_letter"),
   zoneNumber: integer("zone_number"),
+  // Task #1857 — nullable FK to irrigation_controllers.
+  controllerId: integer("controller_id").references(() => irrigationControllers.id),
   url: text("url").notNull(),
   caption: text("caption"),
   takenAt: timestamp("taken_at").defaultNow().notNull(),
@@ -1669,9 +1602,7 @@ export const workOrderZonePhotos = pgTable("work_order_zone_photos", {
     .where(sql`${table.clientId} IS NOT NULL`),
 }));
 
-export const insertPropertyControllerSchema = createInsertSchema(propertyControllers).omit({
-  id: true, createdAt: true, updatedAt: true,
-});
+// insertPropertyControllerSchema removed by Task #1857.
 export const insertIssueTypeConfigSchema = createInsertSchema(issueTypeConfigs).omit({
   id: true, createdAt: true, updatedAt: true,
 });
@@ -1685,7 +1616,7 @@ export const insertWetCheckFindingSchema = createInsertSchema(wetCheckFindings).
 export const insertWetCheckPhotoSchema = createInsertSchema(wetCheckPhotos).omit({ id: true });
 export const insertWorkOrderZonePhotoSchema = createInsertSchema(workOrderZonePhotos).omit({ id: true });
 
-export type PropertyController = typeof propertyControllers.$inferSelect;
+// PropertyController removed by Task #1857 — table dropped.
 export type IssueTypeConfig = typeof issueTypeConfigs.$inferSelect;
 export type WetCheck = typeof wetChecks.$inferSelect;
 export type WetCheckZoneRecord = typeof wetCheckZoneRecords.$inferSelect;
@@ -1693,7 +1624,7 @@ export type WetCheckFinding = typeof wetCheckFindings.$inferSelect;
 export type WetCheckPhoto = typeof wetCheckPhotos.$inferSelect;
 export type WorkOrderZonePhoto = typeof workOrderZonePhotos.$inferSelect;
 
-export type InsertPropertyController = z.infer<typeof insertPropertyControllerSchema>;
+// InsertPropertyController removed by Task #1857.
 export type InsertIssueTypeConfig = z.infer<typeof insertIssueTypeConfigSchema>;
 export type InsertWetCheck = z.infer<typeof insertWetCheckSchema>;
 export type InsertWetCheckZoneRecord = z.infer<typeof insertWetCheckZoneRecordSchema>;
@@ -1803,11 +1734,8 @@ export type InsertMobileToken = z.infer<typeof insertMobileTokenSchema>;
 // without always joining up through the controller FK chain — mirrors the
 // `company-id-columns` pattern used throughout the rest of the schema.
 //
-// NOTE: `propertyControllers` (below, line ~1287) and these tables are
-// parallel: `propertyControllers` drives the wet-check grid (letter + zone
-// count only); `irrigationControllers` captures the full programming profile.
-// A follow-up task will unify so the new profile becomes the source of truth
-// for the wet-check grid when a profile exists.
+// Task #1857 — `irrigation_controllers` is now the sole source of truth for a
+// customer's irrigation system. `property_controllers` was retired and dropped.
 
 export const irrigationControllers = pgTable("irrigation_controllers", {
   id: serial("id").primaryKey(),

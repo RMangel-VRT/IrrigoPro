@@ -49,14 +49,7 @@ async function deleteByTag(): Promise<void> {
   await db.execute(sql`
     DELETE FROM app_event_groups WHERE fingerprint LIKE ${`${TAG}%`}
   `);
-  // field_work_sessions / zones / property_zones — clock_number == tag,
-  // FK chain cascade-deletes from property_zones first.
-  await db.execute(sql`
-    DELETE FROM field_work_sessions WHERE clock_number = ${TAG}
-  `);
-  await db.execute(sql`
-    DELETE FROM property_zones WHERE property_name = ${TAG}
-  `);
+  // field_work_sessions, property_zones, zones dropped by Task #1857 — no cleanup needed.
 }
 
 before(async () => {
@@ -318,46 +311,11 @@ describe("tenantIsolatedFailureRule", () => {
 });
 
 // ─── sync_queue_stuck ─────────────────────────────────────────────────────
+// Task #1857: field_work_sessions dropped → rule always returns non-firing.
 describe("syncQueueStuckRule", () => {
-  it("seeds property/zone fixtures and counts stuck in-progress sessions", async () => {
-    // Insert a property + zone we own, then 6 stuck sessions (>1h old,
-    // status=in-progress) → must fire.
-    const p = await db.execute<{ id: number }>(sql`
-      INSERT INTO property_zones (property_name, property_address)
-      VALUES (${TAG}, ${TAG})
-      RETURNING id
-    `);
-    const propertyId = p.rows![0].id;
-    const z = await db.execute<{ id: number }>(sql`
-      INSERT INTO zones (property_id, name, clock_number)
-      VALUES (${propertyId}, ${TAG}, ${TAG})
-      RETURNING id
-    `);
-    const zoneId = z.rows![0].id;
-
-    // 5 stuck sessions — STUCK_THRESHOLD=5 and rule wants `> 5`,
-    // so 5 alone should NOT fire.
-    for (let i = 0; i < 5; i++) {
-      await db.execute(sql`
-        INSERT INTO field_work_sessions
-          (property_id, zone_id, clock_number, work_description, start_time, status)
-        VALUES (${propertyId}, ${zoneId}, ${TAG}, 'tag-${sql.raw(TAG)}',
-                now() - interval '2 hours', 'in-progress')
-      `);
-    }
-    const before = await syncQueueStuckRule.evaluate(new Date());
-    assert.equal(before.firing, false, "5 stuck must not fire (rule wants > 5)");
-
-    // One more — now 6, which crosses the threshold.
-    await db.execute(sql`
-      INSERT INTO field_work_sessions
-        (property_id, zone_id, clock_number, work_description, start_time, status)
-      VALUES (${propertyId}, ${zoneId}, ${TAG}, 'tag-${sql.raw(TAG)}',
-              now() - interval '2 hours', 'in-progress')
-    `);
-    const after = await syncQueueStuckRule.evaluate(new Date());
-    assert.equal(after.firing, true);
-    assert.ok((after.details as { stuck: number }).stuck >= 6);
+  it("always returns non-firing after field_work_sessions was retired", async () => {
+    const out = await syncQueueStuckRule.evaluate(new Date());
+    assert.equal(out.firing, false, "Rule must not fire — field portal retired");
   });
 });
 

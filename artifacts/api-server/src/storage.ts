@@ -7,10 +7,7 @@ import {
   assemblyParts,
   estimates, 
   estimateItems,
-  propertyZones,
-  zones,
-  fieldWorkSessions,
-  fieldWorkItems,
+  // propertyZones, zones, fieldWorkSessions, fieldWorkItems removed by Task #1857.
   workOrders,
   workOrderItems,
   invoices,
@@ -68,10 +65,7 @@ import {
   type AssemblyPart, 
   type Estimate, 
   type EstimateItem,
-  type PropertyZone,
-  type Zone,
-  type FieldWorkSession,
-  type FieldWorkItem,
+  // PropertyZone, Zone, FieldWorkSession, FieldWorkItem removed by Task #1857.
   type WorkOrder,
   type WorkOrderItem,
   type Invoice,
@@ -101,10 +95,7 @@ import {
   type InsertAssemblyPart, 
   type InsertEstimate, 
   type InsertEstimateItem,
-  type InsertPropertyZone,
-  type InsertZone,
-  type InsertFieldWorkSession,
-  type InsertFieldWorkItem,
+  // InsertPropertyZone, InsertZone, InsertFieldWorkSession, InsertFieldWorkItem removed by Task #1857.
   type InsertWorkOrder,
   type InsertWorkOrderItem,
   type InsertInvoice,
@@ -126,12 +117,11 @@ import {
   type InsertPartMaterial,
   type InsertPartFittingType,
   type EstimateWithItems,
-  type PropertyZoneWithZones,
-  type FieldWorkSessionWithItems,
+  // PropertyZoneWithZones, FieldWorkSessionWithItems removed by Task #1857.
   type InvoiceWithItems,
   type BillingSheetWithItems,
   type AssemblyWithParts,
-  propertyControllers,
+  // propertyControllers removed by Task #1857 — table dropped, migration 0018.
   issueTypeConfigs,
   wetChecks,
   wetCheckZoneRecords,
@@ -139,8 +129,7 @@ import {
   wetCheckPhotos,
   workOrderZonePhotos,
   wetCheckBillings,
-  type PropertyController,
-  type InsertPropertyController,
+  // PropertyController, InsertPropertyController removed by Task #1857.
   type IssueTypeConfig,
   type InsertIssueTypeConfig,
   type WetCheck,
@@ -598,33 +587,7 @@ export interface IStorage {
     recentWorkOrders: WorkOrder[];
   }>;
 
-  // Property Zones
-  getPropertyZones(): Promise<PropertyZoneWithZones[]>;
-  getPropertyZone(id: number): Promise<PropertyZoneWithZones | undefined>;
-  createPropertyZone(propertyZone: InsertPropertyZone): Promise<PropertyZone>;
-  updatePropertyZone(id: number, propertyZone: Partial<InsertPropertyZone>): Promise<PropertyZone | undefined>;
-  deletePropertyZone(id: number): Promise<boolean>;
-  syncPropertyZonesFromGoogleSheets(sheetsUrl: string): Promise<void>;
-
-  // Zones
-  getZones(propertyId: number): Promise<Zone[]>;
-  createZone(zone: InsertZone): Promise<Zone>;
-  updateZone(id: number, zone: Partial<InsertZone>): Promise<Zone | undefined>;
-  deleteZone(id: number): Promise<boolean>;
-
-  // Field Work Sessions
-  getFieldWorkSessions(): Promise<FieldWorkSessionWithItems[]>;
-  getFieldWorkSession(id: number): Promise<FieldWorkSessionWithItems | undefined>;
-  createFieldWorkSession(session: InsertFieldWorkSession): Promise<FieldWorkSession>;
-  updateFieldWorkSession(id: number, session: Partial<InsertFieldWorkSession>): Promise<FieldWorkSession | undefined>;
-  completeFieldWorkSession(id: number): Promise<FieldWorkSession | undefined>;
-  deleteFieldWorkSession(id: number): Promise<boolean>;
-
-  // Field Work Items
-  getFieldWorkItems(sessionId: number): Promise<FieldWorkItem[]>;
-  addFieldWorkItem(item: InsertFieldWorkItem): Promise<FieldWorkItem>;
-  updateFieldWorkItem(id: number, item: Partial<InsertFieldWorkItem>): Promise<FieldWorkItem | undefined>;
-  deleteFieldWorkItem(id: number): Promise<boolean>;
+  // Property Zones / Field Work Sessions interface methods removed by Task #1857 (Slice 5).
 
   // Work Orders - Enhanced
   getWorkOrders(companyId: number | null): Promise<WorkOrder[]>;
@@ -923,13 +886,9 @@ export interface IStorage {
   updateIssueTypeConfig(companyId: number, id: number, patch: Partial<Omit<InsertIssueTypeConfig, "companyId">>): Promise<IssueTypeConfig | undefined>;
   reorderIssueTypeConfigs(companyId: number, orderedIds: number[]): Promise<IssueTypeConfig[]>;
   getPartsByIssueType(companyId: number, issueType: string, customerId?: number | null): Promise<{ parts: Part[]; recentPartIds: number[] }>;
-  listPropertyControllers(companyId: number, customerId: number): Promise<PropertyController[]>;
-  ensurePropertyControllers(
-    companyId: number,
-    customerId: number,
-    count: number,
-    branchName?: string | null,
-  ): Promise<PropertyController[]>;
+  // listPropertyControllers, ensurePropertyControllers, updatePropertyController,
+  // upsertPropertyController removed by Task #1857 (property_controllers table dropped).
+
   // Seed irrigation_controllers + irrigation_profile_zones placeholders for
   // the given (companyId, customerId, branchName) tuple. For each config entry
   // that does not already have a matching "Controller {letter}" row, inserts a
@@ -942,40 +901,24 @@ export interface IStorage {
     configs: Array<{ name: string; zoneCount: number | null }>,
     branchName?: string | null,
   ): Promise<IrrigationController[]>;
-  updatePropertyController(
-    companyId: number,
-    customerId: number,
-    letter: string,
-    patch: { zoneCount?: number; notes?: string },
-    branchName?: string | null,
-  ): Promise<PropertyController | undefined>;
-  upsertPropertyController(
-    companyId: number,
-    customerId: number,
-    letter: string,
-    values: { zoneCount: number; notes?: string },
-    branchName?: string | null,
-  ): Promise<PropertyController>;
-  // Admin: company-wide overview of active customers and their controller
-  // letters (with each controller's current zoneCount), grouped per
-  // branch. The customer-level bucket (NULL branch) appears as
+  // Admin: company-wide overview of active customers and their controllers,
+  // grouped per branch. The customer-level bucket (NULL branch) appears as
   // `branchName: null`. Excludes customers hidden from billing.
+  // Task #1857: now returns IrrigationController[] instead of PropertyController[].
   listCustomerControllersOverview(companyId: number): Promise<Array<{
     customer: Customer;
-    branches: Array<{ branchName: string | null; controllers: PropertyController[] }>;
+    branches: Array<{ branchName: string | null; controllers: IrrigationController[] }>;
   }>>;
-  // Admin: reconcile property_controllers rows so they match `count` (1-26).
-  // Updates customers.totalControllers as well (only when branchName is null,
-  // i.e. customer-level edits). When shrinking, refuses to delete controllers
-  // whose zoneCount > 0 unless `confirmDeleteWithZones` is true. Scoped to
-  // the given branch (NULL == customer-level / "no branch"). Returns the
-  // updated controller list for that branch and the new customer record.
+  // Admin: reconcile irrigation_controllers rows so they match `count` (1-26).
+  // When shrinking, refuses to delete controllers whose totalZones > 0 unless
+  // `confirmDeleteWithZones` is true. Scoped to the given branch. Returns the
+  // updated controller list for that branch and the customer record.
   setCustomerControllerCount(
     companyId: number,
     customerId: number,
     count: number,
     opts?: { confirmDeleteWithZones?: boolean; branchName?: string | null },
-  ): Promise<{ customer: Customer; controllers: PropertyController[]; removedLetters: string[] }>;
+  ): Promise<{ customer: Customer; controllers: IrrigationController[]; removedLetters: string[] }>;
 
   listWetChecks(companyId: number, opts?: { status?: string; technicianId?: number; customerId?: number; branchName?: string }): Promise<Array<WetCheck & { zoneCount: number; processedCount: number; failedCount: number; workOrderIds: number[] }>>;
   // Admin-only company-wide list with per-row aggregate counts (zone
@@ -1753,14 +1696,20 @@ export class DatabaseStorage implements IStorage {
         );
 
         if (nullRows.rows.length > 0) {
-          const pcRows = await client.query<{
-            company_id: string; customer_id: string;
-            branch_name: string; controller_letter: string;
-          }>(
-            `SELECT company_id, customer_id, COALESCE(branch_name,'') AS branch_name, controller_letter
-             FROM property_controllers
-             ORDER BY company_id, customer_id, branch_name, controller_letter`
-          );
+          // Task #1857: property_controllers was dropped. If the table still exists
+          // (environment that hasn't run migration 0018 yet), use it as a hint source.
+          // If already dropped, fall back to positional letter assignment only.
+          const pcRows: { rows: Array<{ company_id: string; customer_id: string; branch_name: string; controller_letter: string }> } = { rows: [] };
+          try {
+            const r = await client.query<{ company_id: string; customer_id: string; branch_name: string; controller_letter: string }>(
+              `SELECT company_id, customer_id, COALESCE(branch_name,'') AS branch_name, controller_letter
+               FROM property_controllers
+               ORDER BY company_id, customer_id, branch_name, controller_letter`
+            );
+            pcRows.rows = r.rows;
+          } catch {
+            // Table doesn't exist — migration 0018 already applied. Skip hints.
+          }
           const pcHints = new Map<string, Set<string>>();
           for (const pc of pcRows.rows) {
             const key = `${pc.company_id}:${pc.customer_id}:${pc.branch_name}`;
@@ -3259,126 +3208,8 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(estimateItems).where(eq(estimateItems.estimateId, estimateId)).orderBy(estimateItems.sortOrder);
   }
 
-  // Property Zones
-  async getPropertyZones(): Promise<PropertyZoneWithZones[]> {
-    const propertyZonesList = await db.select().from(propertyZones);
-    const zonesList = await db.select().from(zones);
-
-    return propertyZonesList.map(property => ({
-      ...property,
-      zones: zonesList.filter(zone => zone.propertyId === property.id)
-    }));
-  }
-
-  async getPropertyZone(id: number): Promise<PropertyZoneWithZones | undefined> {
-    const [property] = await db.select().from(propertyZones).where(eq(propertyZones.id, id));
-    if (!property) return undefined;
-
-    const zonesList = await db.select().from(zones).where(eq(zones.propertyId, id));
-    return { ...property, zones: zonesList };
-  }
-
-  async createPropertyZone(propertyZone: InsertPropertyZone): Promise<PropertyZone> {
-    const [newPropertyZone] = await db.insert(propertyZones).values(propertyZone).returning();
-    return newPropertyZone;
-  }
-
-  async updatePropertyZone(id: number, propertyZone: Partial<InsertPropertyZone>): Promise<PropertyZone | undefined> {
-    const [updatedPropertyZone] = await db.update(propertyZones).set(propertyZone).where(eq(propertyZones.id, id)).returning();
-    return updatedPropertyZone || undefined;
-  }
-
-  async deletePropertyZone(id: number): Promise<boolean> {
-    const result = await db.delete(propertyZones).where(eq(propertyZones.id, id));
-    return (result.rowCount || 0) > 0;
-  }
-
-  async syncPropertyZonesFromGoogleSheets(sheetsUrl: string): Promise<void> {
-    // Implementation for Google Sheets sync would go here
-    console.log(`Syncing property zones from Google Sheets URL: ${sheetsUrl}`);
-  }
-
-  // Zones
-  async getZones(propertyId: number): Promise<Zone[]> {
-    return await db.select().from(zones).where(eq(zones.propertyId, propertyId));
-  }
-
-  async createZone(zone: InsertZone): Promise<Zone> {
-    const [newZone] = await db.insert(zones).values(zone).returning();
-    return newZone;
-  }
-
-  async updateZone(id: number, zone: Partial<InsertZone>): Promise<Zone | undefined> {
-    const [updatedZone] = await db.update(zones).set(zone).where(eq(zones.id, id)).returning();
-    return updatedZone || undefined;
-  }
-
-  async deleteZone(id: number): Promise<boolean> {
-    const result = await db.delete(zones).where(eq(zones.id, id));
-    return (result.rowCount || 0) > 0;
-  }
-
-  // Field Work Sessions
-  async getFieldWorkSessions(): Promise<FieldWorkSessionWithItems[]> {
-    const sessions = await db.select().from(fieldWorkSessions).orderBy(desc(fieldWorkSessions.createdAt));
-    const items = await db.select().from(fieldWorkItems);
-
-    return sessions.map(session => ({
-      ...session,
-      items: items.filter(item => item.sessionId === session.id)
-    }));
-  }
-
-  async getFieldWorkSession(id: number): Promise<FieldWorkSessionWithItems | undefined> {
-    const [session] = await db.select().from(fieldWorkSessions).where(eq(fieldWorkSessions.id, id));
-    if (!session) return undefined;
-
-    const items = await db.select().from(fieldWorkItems).where(eq(fieldWorkItems.sessionId, id));
-    return { ...session, items };
-  }
-
-  async createFieldWorkSession(session: InsertFieldWorkSession): Promise<FieldWorkSession> {
-    const [newSession] = await db.insert(fieldWorkSessions).values(session).returning();
-    return newSession;
-  }
-
-  async updateFieldWorkSession(id: number, session: Partial<InsertFieldWorkSession>): Promise<FieldWorkSession | undefined> {
-    const [updatedSession] = await db.update(fieldWorkSessions).set(session).where(eq(fieldWorkSessions.id, id)).returning();
-    return updatedSession || undefined;
-  }
-
-  async completeFieldWorkSession(id: number): Promise<FieldWorkSession | undefined> {
-    const [completedSession] = await db.update(fieldWorkSessions).set({
-      status: "completed",
-      endTime: new Date()
-    }).where(eq(fieldWorkSessions.id, id)).returning();
-    return completedSession || undefined;
-  }
-
-  async deleteFieldWorkSession(id: number): Promise<boolean> {
-    const result = await db.delete(fieldWorkSessions).where(eq(fieldWorkSessions.id, id));
-    return (result.rowCount || 0) > 0;
-  }
-
-  // Field Work Items
-  async getFieldWorkItems(sessionId: number): Promise<FieldWorkItem[]> {
-    return await db.select().from(fieldWorkItems).where(eq(fieldWorkItems.sessionId, sessionId));
-  }
-
-  async addFieldWorkItem(item: InsertFieldWorkItem): Promise<FieldWorkItem> {
-    const [newItem] = await db.insert(fieldWorkItems).values(item).returning();
-    return newItem;
-  }
-
-  async updateFieldWorkItem(id: number, item: Partial<InsertFieldWorkItem>): Promise<FieldWorkItem | undefined> {
-    const [updatedItem] = await db.update(fieldWorkItems).set(item).where(eq(fieldWorkItems.id, id)).returning();
-    return updatedItem || undefined;
-  }
-
-  async deleteFieldWorkItem(id: number): Promise<boolean> {
-    const result = await db.delete(fieldWorkItems).where(eq(fieldWorkItems.id, id));
-    return (result.rowCount || 0) > 0;
-  }
+  // Property Zones / Field Work Sessions implementations removed by Task #1857 (Slice 5).
+  // Tables dropped: property_zones, zones, field_work_sessions, field_work_items.
 
   // Dashboard Stats
   async getDashboardStats(): Promise<{
@@ -7923,153 +7754,13 @@ export class DatabaseStorage implements IStorage {
     return { parts: list, recentPartIds: Array.from(recentIds) };
   }
 
-  async listPropertyControllers(companyId: number, customerId: number): Promise<PropertyController[]> {
-    return await db.select().from(propertyControllers)
-      .where(and(eq(propertyControllers.companyId, companyId), eq(propertyControllers.customerId, customerId)))
-      .orderBy(propertyControllers.controllerLetter);
-  }
-
-  // Normalize an external branchName (which may be undefined/null/string)
-  // into the storage-side string key. The customer-level bucket is the
-  // empty string ''. The DB column is NOT NULL DEFAULT '' so plain `=`
-  // semantics work for both customer-level and named-branch lookups.
-  // The public API still exposes `branchName: null` for the customer-level
-  // bucket (preserved at the response-mapping layer in
-  // listCustomerControllersOverview), so external callers are unaffected.
-  private branchKey(branchName?: string | null): string {
-    if (typeof branchName !== "string") return "";
-    return branchName.trim();
-  }
-
-  // Drizzle helper: equality predicate against the (NOT NULL) branch_name
-  // column. Plain `=` works for both customer-level ('') and named branches.
-  private branchEq(branchName: string) {
-    return eq(propertyControllers.branchName, branchName);
-  }
-
-  async ensurePropertyControllers(
-    companyId: number,
-    customerId: number,
-    count: number,
-    branchName?: string | null,
-  ): Promise<PropertyController[]> {
-    const branch = this.branchKey(branchName);
-    const all = await this.listPropertyControllers(companyId, customerId);
-    const inBranch = all.filter(c => (c.branchName ?? "") === branch);
-    const haveLetters = new Set(inBranch.map(c => c.controllerLetter));
-    const needed: string[] = [];
-    for (let i = 0; i < count; i++) {
-      const letter = String.fromCharCode("A".charCodeAt(0) + i);
-      if (!haveLetters.has(letter)) needed.push(letter);
-    }
-    if (needed.length > 0) {
-      await db.insert(propertyControllers)
-        .values(needed.map(letter => ({
-          companyId,
-          customerId,
-          branchName: branch,
-          controllerLetter: letter,
-          zoneCount: 12,
-        })))
-        .onConflictDoNothing();
-    }
-    const refreshed = await this.listPropertyControllers(companyId, customerId);
-    return refreshed.filter(c => (c.branchName ?? "") === branch);
-  }
-
-  async upsertPropertyController(
-    companyId: number,
-    customerId: number,
-    letter: string,
-    values: { zoneCount: number; notes?: string },
-    branchName?: string | null,
-  ): Promise<PropertyController> {
-    // Try update first (scoped to this branch). If no row exists yet for
-    // this (customer, branch, letter), insert one. The composite-with-
-    // COALESCE unique index makes Drizzle's onConflictDoUpdate awkward, so
-    // we do the update-then-insert dance manually.
-    const branch = this.branchKey(branchName);
-    const [updated] = await db.update(propertyControllers)
-      .set({
-        zoneCount: values.zoneCount,
-        ...(values.notes !== undefined ? { notes: values.notes } : {}),
-        updatedAt: new Date(),
-      })
-      .where(and(
-        eq(propertyControllers.companyId, companyId),
-        eq(propertyControllers.customerId, customerId),
-        eq(propertyControllers.controllerLetter, letter),
-        this.branchEq(branch),
-      ))
-      .returning();
-    if (updated) return updated;
-    const [inserted] = await db.insert(propertyControllers)
-      .values({
-        companyId,
-        customerId,
-        branchName: branch,
-        controllerLetter: letter,
-        zoneCount: values.zoneCount,
-        notes: values.notes,
-      })
-      .returning();
-    return inserted;
-  }
-
-  async updatePropertyController(
-    companyId: number,
-    customerId: number,
-    letter: string,
-    patch: { zoneCount?: number; notes?: string },
-    branchName?: string | null,
-  ): Promise<PropertyController | undefined> {
-    const branch = this.branchKey(branchName);
-    const [updated] = await db.update(propertyControllers)
-      .set({ ...patch, updatedAt: new Date() })
-      .where(and(
-        eq(propertyControllers.companyId, companyId),
-        eq(propertyControllers.customerId, customerId),
-        eq(propertyControllers.controllerLetter, letter),
-        this.branchEq(branch),
-      ))
-      .returning();
-    if (!updated) return undefined;
-
-    // Shrink side effect: when zoneCount drops, mark ALL zone records above
-    // the new count as not_applicable on every in-progress wet check for this
-    // property/controller — including ones already marked YES/NO. Spec: zones
-    // that don't exist on the controller cannot remain "checked".
-    //
-    // Per task #312: wet-check capture is customer-level only (no per-branch
-    // wet checks yet). A branch-scoped controller edit must NOT touch the
-    // customer-level wet-check zone records, otherwise editing a named
-    // branch could corrupt an in-progress customer wet check that is keyed
-    // off the customer-level (NULL branch) controllers.
-    if (typeof patch.zoneCount === "number" && branch === "") {
-      const newCount = patch.zoneCount;
-      const inProgressIds = await db.select({ id: wetChecks.id }).from(wetChecks)
-        .where(and(
-          eq(wetChecks.companyId, companyId),
-          eq(wetChecks.customerId, customerId),
-          eq(wetChecks.status, "in_progress"),
-        ));
-      const ids = inProgressIds.map(r => r.id);
-      if (ids.length > 0) {
-        await db.update(wetCheckZoneRecords)
-          .set({ status: "not_applicable" })
-          .where(and(
-            inArray(wetCheckZoneRecords.wetCheckId, ids),
-            eq(wetCheckZoneRecords.controllerLetter, letter),
-            gt(wetCheckZoneRecords.zoneNumber, newCount),
-          ));
-      }
-    }
-    return updated;
-  }
+  // Task #1857: listPropertyControllers, branchKey, branchEq, ensurePropertyControllers,
+  // upsertPropertyController, updatePropertyController removed — property_controllers dropped.
+  // irrigation_controllers is now the single source of truth.
 
   async listCustomerControllersOverview(companyId: number): Promise<Array<{
     customer: Customer;
-    branches: Array<{ branchName: string | null; controllers: PropertyController[] }>;
+    branches: Array<{ branchName: string | null; controllers: IrrigationController[] }>;
   }>> {
     const custs = await db.select().from(customers)
       .where(and(
@@ -8078,45 +7769,16 @@ export class DatabaseStorage implements IStorage {
       ))
       .orderBy(customers.name);
     if (custs.length === 0) return [];
-    // First pass: seed any declared branch that doesn't yet have a row in
-    // property_controllers. Per task #312, a freshly added branch should
-    // appear with one controller (A) at the default zone count so the admin
-    // sees a sensible starting state and can immediately bump the count.
-    {
-      const existingPairs = await db.select({
-        customerId: propertyControllers.customerId,
-        branchName: propertyControllers.branchName,
-      }).from(propertyControllers)
-        .where(and(
-          eq(propertyControllers.companyId, companyId),
-          inArray(propertyControllers.customerId, custs.map(c => c.id)),
-        ));
-      const seenByCustomer = new Map<number, Set<string>>();
-      for (const p of existingPairs) {
-        const set = seenByCustomer.get(p.customerId) ?? new Set<string>();
-        set.add(p.branchName ?? "");
-        seenByCustomer.set(p.customerId, set);
-      }
-      for (const c of custs) {
-        const declared = (c.branches ?? []).filter((b): b is string => typeof b === "string" && b.length > 0);
-        if (declared.length === 0) continue;
-        const seen = seenByCustomer.get(c.id) ?? new Set<string>();
-        for (const branchName of declared) {
-          if (!seen.has(branchName)) {
-            await this.ensurePropertyControllers(companyId, c.id, 1, branchName);
-          }
-        }
-      }
-    }
-    const ctrls = await db.select().from(propertyControllers)
+
+    const ctrls = await db.select().from(irrigationControllers)
       .where(and(
-        eq(propertyControllers.companyId, companyId),
-        inArray(propertyControllers.customerId, custs.map(c => c.id)),
+        eq(irrigationControllers.companyId, companyId),
+        inArray(irrigationControllers.customerId, custs.map(c => c.id)),
       ))
-      .orderBy(propertyControllers.controllerLetter);
-    // Group: customerId -> (branchKey -> rows). Use "" as a stable Map key
-    // for the NULL branch and convert back to null on the way out.
-    const byCust = new Map<number, Map<string, PropertyController[]>>();
+      .orderBy(irrigationControllers.letter, irrigationControllers.name);
+
+    // Group: customerId -> (branchKey -> rows).
+    const byCust = new Map<number, Map<string, IrrigationController[]>>();
     for (const c of ctrls) {
       const branchKey = c.branchName ?? "";
       let perBranch = byCust.get(c.customerId);
@@ -8125,14 +7787,11 @@ export class DatabaseStorage implements IStorage {
       arr.push(c);
       perBranch.set(branchKey, arr);
     }
+
     return custs.map(customer => {
-      const perBranch = byCust.get(customer.id) ?? new Map<string, PropertyController[]>();
+      const perBranch = byCust.get(customer.id) ?? new Map<string, IrrigationController[]>();
       const declaredBranches = (customer.branches ?? []).filter((b): b is string => typeof b === "string" && b.length > 0);
-      // Always include the customer-level (NULL) bucket if it has rows OR
-      // the customer has no declared branches at all (so the page renders
-      // the original single-row UX). For branch customers, also include a
-      // row per declared branch even if empty so the admin can fill it in.
-      const orderedBranches: Array<{ branchName: string | null; controllers: PropertyController[] }> = [];
+      const orderedBranches: Array<{ branchName: string | null; controllers: IrrigationController[] }> = [];
       const customerLevelRows = perBranch.get("") ?? [];
       if (customerLevelRows.length > 0 || declaredBranches.length === 0) {
         orderedBranches.push({ branchName: null, controllers: customerLevelRows });
@@ -8140,12 +7799,6 @@ export class DatabaseStorage implements IStorage {
       for (const b of declaredBranches) {
         orderedBranches.push({ branchName: b, controllers: perBranch.get(b) ?? [] });
       }
-      // Per task #312: only branches currently declared on the customer
-      // record (plus the customer-level NULL bucket) are shown. Rows in
-      // property_controllers tied to a branch that has been removed from
-      // customers.branches are intentionally hidden here so deleting a
-      // branch on the customer profile makes the matching sub-row
-      // disappear from this admin page.
       return { customer, branches: orderedBranches };
     });
   }
@@ -8155,78 +7808,92 @@ export class DatabaseStorage implements IStorage {
     customerId: number,
     count: number,
     opts?: { confirmDeleteWithZones?: boolean; branchName?: string | null },
-  ): Promise<{ customer: Customer; controllers: PropertyController[]; removedLetters: string[] }> {
+  ): Promise<{ customer: Customer; controllers: IrrigationController[]; removedLetters: string[] }> {
     if (!Number.isInteger(count) || count < 1 || count > 26) {
       throw new Error("Controller count must be between 1 and 26");
     }
-    const branch = this.branchKey(opts?.branchName);
+    const branch = typeof opts?.branchName === "string" ? opts.branchName.trim() : "";
     const [customer] = await db.select().from(customers)
       .where(and(eq(customers.id, customerId), eq(customers.companyId, companyId)));
     if (!customer) throw new Error("Customer not found");
 
-    const allExisting = await this.listPropertyControllers(companyId, customerId);
-    const existing = allExisting.filter(c => (c.branchName ?? "") === branch);
-    // Determine which letters belong to the new size and which fall outside.
+    const existing = await db.select().from(irrigationControllers)
+      .where(and(
+        eq(irrigationControllers.companyId, companyId),
+        eq(irrigationControllers.customerId, customerId),
+        eq(irrigationControllers.branchName, branch),
+      ))
+      .orderBy(irrigationControllers.letter, irrigationControllers.name);
+
+    // Determine which letters belong to the new size.
     const keepLetters = new Set<string>();
     for (let i = 0; i < count; i++) {
       keepLetters.add(String.fromCharCode("A".charCodeAt(0) + i));
     }
-    const toRemove = existing.filter(c => !keepLetters.has(c.controllerLetter));
-    const removedLetters = toRemove.map(c => c.controllerLetter).sort();
+
+    // Only shrink controllers that have a stored letter.
+    const toRemove = existing.filter(c => c.letter != null && !keepLetters.has(c.letter));
+    const removedLetters = toRemove.map(c => c.letter as string).sort();
 
     if (toRemove.length > 0) {
-      const withZones = toRemove.filter(c => (c.zoneCount ?? 0) > 0).map(c => c.controllerLetter);
+      const withZones = toRemove.filter(c => (c.totalZones ?? 0) > 0).map(c => c.letter as string);
       if (withZones.length > 0 && !opts?.confirmDeleteWithZones) {
         throw new ControllerHasZonesError(withZones.sort());
       }
-      // Mirror the shrink behaviour from updatePropertyController: mark zone
-      // records on in-progress wet checks for the removed letters as not
-      // applicable so the field UI doesn't keep checking phantom controllers.
-      // Wet-check capture is still customer-level (per task scope), so we
-      // only do this for the customer-level (NULL) branch — branch-level
-      // edits don't affect any wet-check zone records yet.
-      if (branch === "") {
-        const inProgressIds = await db.select({ id: wetChecks.id }).from(wetChecks)
+      // Mark zone records on in-progress wet checks as not_applicable,
+      // resolved by controller_id (Task #1857 Slice 1).
+      const toRemoveIds = toRemove.map(c => c.id);
+      const inProgressIds = await db.select({ id: wetChecks.id }).from(wetChecks)
+        .where(and(
+          eq(wetChecks.companyId, companyId),
+          eq(wetChecks.customerId, customerId),
+          eq(wetChecks.status, "in_progress"),
+        ));
+      const wcIds = inProgressIds.map(r => r.id);
+      if (wcIds.length > 0 && toRemoveIds.length > 0) {
+        await db.update(wetCheckZoneRecords)
+          .set({ status: "not_applicable" })
           .where(and(
-            eq(wetChecks.companyId, companyId),
-            eq(wetChecks.customerId, customerId),
-            eq(wetChecks.status, "in_progress"),
+            inArray(wetCheckZoneRecords.wetCheckId, wcIds),
+            inArray(wetCheckZoneRecords.controllerId, toRemoveIds),
           ));
-        const ids = inProgressIds.map(r => r.id);
-        if (ids.length > 0) {
-          await db.update(wetCheckZoneRecords)
-            .set({ status: "not_applicable" })
-            .where(and(
-              inArray(wetCheckZoneRecords.wetCheckId, ids),
-              inArray(wetCheckZoneRecords.controllerLetter, removedLetters),
-            ));
-        }
       }
-      await db.delete(propertyControllers).where(and(
-        eq(propertyControllers.companyId, companyId),
-        eq(propertyControllers.customerId, customerId),
-        this.branchEq(branch),
-        inArray(propertyControllers.controllerLetter, removedLetters),
-      ));
+      await db.delete(irrigationControllers).where(
+        inArray(irrigationControllers.id, toRemoveIds),
+      );
     }
 
-    // Add any missing letters up to the new count (default zoneCount = 12).
-    await this.ensurePropertyControllers(companyId, customerId, count, branch);
-
-    // customers.totalControllers is a customer-level field; only mirror the
-    // count there for customer-level edits. Branch counts live solely on
-    // the property_controllers rows.
-    let updatedCustomer: Customer | undefined;
-    if (branch === "") {
-      const [u] = await db.update(customers)
-        .set({ totalControllers: count })
-        .where(and(eq(customers.id, customerId), eq(customers.companyId, companyId)))
-        .returning();
-      updatedCustomer = u;
+    // Add any missing letters up to the new count.
+    const existingLetters = new Set(
+      existing.filter(c => c.letter != null).map(c => c.letter as string),
+    );
+    const toAdd: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const letter = String.fromCharCode("A".charCodeAt(0) + i);
+      if (!existingLetters.has(letter)) toAdd.push(letter);
     }
-    const refreshed = await this.listPropertyControllers(companyId, customerId);
-    const controllers = refreshed.filter(c => (c.branchName ?? "") === branch);
-    return { customer: updatedCustomer ?? customer, controllers, removedLetters };
+    if (toAdd.length > 0) {
+      await db.insert(irrigationControllers)
+        .values(toAdd.map(letter => ({
+          companyId,
+          customerId,
+          branchName: branch,
+          name: `Controller ${letter}`,
+          letter,
+          isActive: true,
+          lastUpdatedAt: new Date(),
+        })))
+        .onConflictDoNothing();
+    }
+
+    const refreshed = await db.select().from(irrigationControllers)
+      .where(and(
+        eq(irrigationControllers.companyId, companyId),
+        eq(irrigationControllers.customerId, customerId),
+        eq(irrigationControllers.branchName, branch),
+      ))
+      .orderBy(irrigationControllers.letter, irrigationControllers.name);
+    return { customer, controllers: refreshed, removedLetters };
   }
 
   async listWetChecks(companyId: number, opts?: { status?: string; technicianId?: number; customerId?: number; branchName?: string }): Promise<Array<WetCheck & { zoneCount: number; processedCount: number; failedCount: number; workOrderIds: number[] }>> {
@@ -8796,9 +8463,36 @@ export class DatabaseStorage implements IStorage {
     const [wc] = await db.select().from(wetChecks)
       .where(and(eq(wetChecks.id, id), eq(wetChecks.companyId, companyId)));
     if (!wc) return undefined;
-    const zoneRecords = await db.select().from(wetCheckZoneRecords)
+    // Task #1857: order by the controller's stored letter via a join so that
+    // if a controller is re-lettered the ordering reflects the new letter.
+    // Falls back to controllerLetter (denormalized copy) for historical records
+    // without a resolved controllerId.
+    const zoneRecords = await db.select({
+      id: wetCheckZoneRecords.id,
+      wetCheckId: wetCheckZoneRecords.wetCheckId,
+      controllerLetter: wetCheckZoneRecords.controllerLetter,
+      zoneNumber: wetCheckZoneRecords.zoneNumber,
+      status: wetCheckZoneRecords.status,
+      ranSuccessfully: wetCheckZoneRecords.ranSuccessfully,
+      notes: wetCheckZoneRecords.notes,
+      issueSummary: wetCheckZoneRecords.issueSummary,
+      repairLaborHours: wetCheckZoneRecords.repairLaborHours,
+      repairLaborManuallySet: wetCheckZoneRecords.repairLaborManuallySet,
+      resolvedAt: wetCheckZoneRecords.resolvedAt,
+      resolvedByUserId: wetCheckZoneRecords.resolvedByUserId,
+      billingSheetId: wetCheckZoneRecords.billingSheetId,
+      wetCheckBillingId: wetCheckZoneRecords.wetCheckBillingId,
+      clientId: wetCheckZoneRecords.clientId,
+      controllerId: wetCheckZoneRecords.controllerId,
+      observedPressure: wetCheckZoneRecords.observedPressure,
+      observedFlow: wetCheckZoneRecords.observedFlow,
+    }).from(wetCheckZoneRecords)
+      .leftJoin(irrigationControllers, eq(wetCheckZoneRecords.controllerId, irrigationControllers.id))
       .where(eq(wetCheckZoneRecords.wetCheckId, id))
-      .orderBy(wetCheckZoneRecords.controllerLetter, wetCheckZoneRecords.zoneNumber);
+      .orderBy(
+        sql`coalesce(${irrigationControllers.letter}, ${wetCheckZoneRecords.controllerLetter})`,
+        wetCheckZoneRecords.zoneNumber,
+      );
     const findings = await db.select().from(wetCheckFindings)
       .where(eq(wetCheckFindings.wetCheckId, id));
     const photos = await db.select().from(wetCheckPhotos)
@@ -8968,24 +8662,12 @@ export class DatabaseStorage implements IStorage {
         isNotNull(irrigationControllers.letter),
       ));
 
-      // Legacy fallback: use property_controllers when no irrigation profile exists.
-      type CtrlEntry = { letter: string; zoneCount: number };
-      let ctrlEntries: CtrlEntry[];
-      if (irrigCtrls.length > 0) {
-        ctrlEntries = irrigCtrls
-          .filter(c => c.letter != null)
-          .map(c => ({ letter: c.letter as string, zoneCount: c.totalZones ?? 0 }));
-      } else {
-        const legacyCtrls = await tx.select().from(propertyControllers).where(and(
-          eq(propertyControllers.companyId, companyId),
-          eq(propertyControllers.customerId, wc.customerId),
-        ));
-        const filtered = legacyCtrls.filter(c => (c.branchName ?? "") === branchKey);
-        ctrlEntries = filtered.map(c => ({
-          letter: c.controllerLetter,
-          zoneCount: c.zoneCount ?? 0,
-        }));
-      }
+      // Task #1857: irrigation_controllers is the sole source of truth.
+      // No property_controllers fallback.
+      type CtrlEntry = { id: number; letter: string; zoneCount: number };
+      const ctrlEntries: CtrlEntry[] = irrigCtrls
+        .filter(c => c.letter != null && c.id != null)
+        .map(c => ({ id: c.id as number, letter: c.letter as string, zoneCount: c.totalZones ?? 0 }));
 
       const existing = await tx.select({
         letter: wetCheckZoneRecords.controllerLetter,
@@ -8999,6 +8681,7 @@ export class DatabaseStorage implements IStorage {
             toInsert.push({
               wetCheckId: id,
               controllerLetter: ctrl.letter,
+              controllerId: ctrl.id,
               zoneNumber: z,
               status: "not_applicable",
             } as InsertWetCheckZoneRecord);
@@ -9519,11 +9202,20 @@ export class DatabaseStorage implements IStorage {
       ));
       if (byClient) return byClient;
     }
-    const [byNatural] = await db.select().from(wetCheckZoneRecords).where(and(
-      eq(wetCheckZoneRecords.wetCheckId, wetCheckId),
-      eq(wetCheckZoneRecords.controllerLetter, insert.controllerLetter),
-      eq(wetCheckZoneRecords.zoneNumber, insert.zoneNumber),
-    ));
+    // Task #1857: prefer controllerId as the natural key when available;
+    // fall back to controllerLetter for historical records without a resolved FK.
+    const naturalKeyWhere = insert.controllerId != null
+      ? and(
+          eq(wetCheckZoneRecords.wetCheckId, wetCheckId),
+          eq(wetCheckZoneRecords.controllerId, insert.controllerId),
+          eq(wetCheckZoneRecords.zoneNumber, insert.zoneNumber),
+        )
+      : and(
+          eq(wetCheckZoneRecords.wetCheckId, wetCheckId),
+          eq(wetCheckZoneRecords.controllerLetter, insert.controllerLetter),
+          eq(wetCheckZoneRecords.zoneNumber, insert.zoneNumber),
+        );
+    const [byNatural] = await db.select().from(wetCheckZoneRecords).where(naturalKeyWhere);
     if (byNatural) {
       const [updated] = await db.update(wetCheckZoneRecords)
         .set({ ...insert, wetCheckId })

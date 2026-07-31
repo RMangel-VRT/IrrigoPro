@@ -43,7 +43,7 @@ function RedirectToWetChecksApproved() {
   return null;
 }
 import FinancialPulsePage from "@/pages/financial-pulse";
-import FieldTech from "@/pages/field-tech";
+// FieldTech import removed by Task #1857 (Slice 5).
 import BillingSheets from "@/pages/billing-sheets";
 import WorkOrders from "@/pages/work-orders";
 import WetCheckSystemPage from "@/pages/wet-checks/WetCheckSystemPage";
@@ -76,7 +76,7 @@ import SwitchUser from "@/pages/switch-user";
 import Login from "@/pages/login";
 import ForgotPassword from "@/pages/forgot-password";
 import ResetPassword from "@/pages/reset-password";
-import FieldPortal from "@/pages/field-portal";
+// FieldPortal import removed by Task #1857 (Slice 5).
 import NotFound from "@/pages/not-found";
 import OnboardingFlow from "@/components/onboarding/onboarding-flow";
 
@@ -192,7 +192,7 @@ export default function CompanyAdminApp({ user }: CompanyAdminAppProps) {
           <Route path="/financial-pulse" component={FinancialPulsePage} />
           <Route path="/billing/command-center" component={CustomerBilling} />
           <Route path="/customer-billing" component={RedirectToCommandCenter} />
-          <Route path="/field-tech" component={FieldTech} />
+          {/* /field-tech route removed by Task #1857 */}
           <Route path="/work-orders/missing-photos" component={WorkOrdersMissingPhotosReport} />
           <Route path="/billing-sheets/missing-photos" component={MissingPhotosReport} />
           <Route path="/billing-sheets/zero-price-audit" component={BillingZeroPriceAuditPage} />
@@ -226,7 +226,7 @@ export default function CompanyAdminApp({ user }: CompanyAdminAppProps) {
           <Route path="/login" component={Login} />
           <Route path="/forgot-password" component={ForgotPassword} />
           <Route path="/reset-password" component={ResetPassword} />
-          <Route path="/field-portal" component={FieldPortal} />
+          {/* /field-portal route removed by Task #1857 */}
           {/* Estimates still routes through the Operations page */}
           <Route path="/estimates" component={Operations} />
           <Route component={NotFound} />

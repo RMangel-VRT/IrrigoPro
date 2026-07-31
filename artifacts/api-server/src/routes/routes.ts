@@ -331,10 +331,7 @@ import {
   insertPartSchema, 
   insertEstimateSchema, 
   insertEstimateItemSchema,
-  insertPropertyZoneSchema,
-  insertZoneSchema,
-  insertFieldWorkSessionSchema,
-  insertFieldWorkItemSchema,
+  // insertPropertyZoneSchema, insertZoneSchema, insertFieldWorkSessionSchema, insertFieldWorkItemSchema removed by Task #1857.
   insertWorkOrderSchema,
   insertWorkOrderItemSchema,
   insertNotificationSchema,
@@ -969,8 +966,8 @@ setInterval(() => {
 import { db } from "../db";
 import { 
   customers, estimates, workOrders, estimateItems, parts, billingSheets, billingSheetItems, 
-  users, invoices, invoiceItems, zones, fieldWorkSessions, fieldWorkItems, notifications,
-  companies, siteMaps, controllers, irrigationZones, partUsage, utilityMarkers, propertyZones, invoicePdfs,
+  users, invoices, invoiceItems, notifications,
+  companies, siteMaps, controllers, irrigationZones, partUsage, utilityMarkers, invoicePdfs,
   wetCheckPhotos, wetChecks, wetCheckFindings, wetCheckBillings,
   workOrderZonePhotos,
   irrigationControllers,
@@ -2005,44 +2002,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Sync queue depth proxy: we don't yet have a server-side persisted
   // queue, so use field_work_sessions stuck in "in_progress" as a
   // best-effort signal — these are the records most likely to be in the
-  // tech's local offline queue waiting on a sync. > 1h old counts as
-  // "stuck".
+  // field_work_sessions table removed by Task #1857. Sync queue depth
+  // always reports 0; the field portal feature is fully retired.
   async function getSyncQueueDepth(): Promise<{ depth: number; stuck: number }> {
-    try {
-      const r = await db.execute<{ depth: number; stuck: number }>(sql`
-        SELECT
-          COUNT(*) FILTER (WHERE status = 'in-progress')::int AS depth,
-          COUNT(*) FILTER (WHERE status = 'in-progress' AND start_time < now() - interval '1 hour')::int AS stuck
-        FROM field_work_sessions
-      `);
-      const row = r.rows?.[0];
-      return { depth: row?.depth ?? 0, stuck: row?.stuck ?? 0 };
-    } catch {
-      return { depth: 0, stuck: 0 };
-    }
+    return { depth: 0, stuck: 0 };
   }
 
-  // Same as getSyncQueueDepth but scoped to one company. Sessions
-  // don't carry company_id so we resolve through the users table on
-  // the same `clock_number ↔ username|id` rule used elsewhere.
-  async function getSyncQueueDepthForCompany(cid: number): Promise<{ depth: number; stuck: number }> {
-    try {
-      const r = await db.execute<{ depth: number; stuck: number }>(sql`
-        SELECT
-          COUNT(*) FILTER (WHERE s.status = 'in-progress')::int AS depth,
-          COUNT(*) FILTER (WHERE s.status = 'in-progress' AND s.start_time < now() - interval '1 hour')::int AS stuck
-        FROM field_work_sessions s
-        WHERE s.clock_number IN (
-          SELECT username FROM users WHERE company_id = ${cid}
-          UNION ALL
-          SELECT CAST(id AS text) FROM users WHERE company_id = ${cid}
-        )
-      `);
-      const row = r.rows?.[0];
-      return { depth: row?.depth ?? 0, stuck: row?.stuck ?? 0 };
-    } catch {
-      return { depth: 0, stuck: 0 };
-    }
+  async function getSyncQueueDepthForCompany(_cid: number): Promise<{ depth: number; stuck: number }> {
+    // field_work_sessions table dropped; no per-company sync queue data.
+    return { depth: 0, stuck: 0 };
   }
 
   // Rolling snapshots for delta computation on metrics that don't have
@@ -3269,45 +3237,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Average queue-age (minutes) — derived from in-progress
       // field_work_sessions; skipped silently on error.
       let avgAgeMinutes: number | null = null;
-      try {
-        const ageRes = await db.execute<{ m: number | null }>(sql`
-          SELECT EXTRACT(EPOCH FROM AVG(now() - s.start_time))/60 AS m
-          FROM field_work_sessions s
-          WHERE s.status = 'in-progress'
-          ${sessionCompanyFilter}
-        `);
-        const m = ageRes.rows?.[0]?.m;
-        avgAgeMinutes = m == null ? null : Math.round(Number(m) * 10) / 10;
-      } catch { avgAgeMinutes = null; }
+      // field_work_sessions removed by Task #1857; session avg age is always null.
+      avgAgeMinutes = null;
       // Stuck-item table — in-progress sessions older than 1h, joined to
       // user / company. The session's clockNumber maps to a tech.
-      const stuckItemsRes = await db.execute<{
-        kind: string; userId: number | null; userName: string | null; companyName: string | null;
-        ageMinutes: number; statusVal: string;
-      }>(sql`
-        SELECT 'wet_check.session' AS kind,
-               u.id AS "userId",
-               u.name AS "userName",
-               c.name AS "companyName",
-               GREATEST(0, EXTRACT(EPOCH FROM (now() - s.start_time))/60)::int AS "ageMinutes",
-               s.status AS "statusVal"
-        FROM field_work_sessions s
-        LEFT JOIN users u ON u.username = s.clock_number OR CAST(u.id AS text) = s.clock_number
-        LEFT JOIN companies c ON c.id = u.company_id
-        WHERE s.status = 'in-progress'
-          AND s.start_time < now() - interval '1 hour'
-          ${sessionCompanyFilter}
-        ORDER BY s.start_time ASC
-        LIMIT 50
-      `);
-      const stuckItems = (stuckItemsRes.rows ?? []).map((r) => ({
-        kind: r.kind,
-        userId: r.userId ?? null,
-        userName: r.userName ?? null,
-        companyName: r.companyName ?? null,
-        ageMinutes: r.ageMinutes,
-        status: r.statusVal,
-      }));
+      // field_work_sessions table removed by Task #1857. Return empty stuck-items list.
+      const stuckItems: Array<{ kind: string; userId: number | null; userName: string | null; companyName: string | null; ageMinutes: number; status: string }> = [];
       res.json({
         window: key,
         queueDepth: depth.depth,
@@ -3616,18 +3551,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
                END AS "status"
         FROM users u
         LEFT JOIN companies c ON c.id = u.company_id
+        -- field_work_sessions removed by Task #1857; session stats are unavailable.
         LEFT JOIN LATERAL (
           SELECT
-            MAX(COALESCE(s.end_time, s.start_time)) AS last_activity_at,
-            COUNT(*) FILTER (
-              WHERE COALESCE(s.end_time, s.start_time) >= now() - interval '5 minutes'
-            ) AS active_5m,
-            COUNT(*) FILTER (WHERE s.status = 'in-progress') AS in_progress,
-            COUNT(*) FILTER (
-              WHERE s.status = 'in-progress' AND s.start_time < now() - interval '1 hour'
-            ) AS stuck_1h
-          FROM field_work_sessions s
-          WHERE s.clock_number = u.username OR s.clock_number = CAST(u.id AS text)
+            NULL::timestamptz AS last_activity_at,
+            0::bigint AS active_5m,
+            0::bigint AS in_progress,
+            0::bigint AS stuck_1h
         ) sess ON TRUE
         LEFT JOIN LATERAL (
           SELECT COUNT(*) AS c FROM client_errors ce
@@ -4354,15 +4284,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         role: string; lastSeenAt: string | null;
       }>(sql`
         SELECT u.id, u.name, u.username, u.email, u.role,
-               MAX(s.last_seen_at)::text AS "lastSeenAt"
+               NULL::text AS "lastSeenAt"
         FROM users u
-        LEFT JOIN field_work_sessions s ON s.user_id = u.id
         WHERE u.company_id = ${id}
           AND u.is_deleted = false
           AND u.is_active = true
           AND u.role IN ('company_admin', 'irrigation_manager')
-        GROUP BY u.id, u.name, u.username, u.email, u.role
-        ORDER BY (u.role = 'company_admin') DESC, MAX(s.last_seen_at) DESC NULLS LAST
+        ORDER BY (u.role = 'company_admin') DESC
         LIMIT 20
       `);
       const admins = r.rows ?? [];
@@ -8224,133 +8152,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     recordLifecycleAudit,
   });
 
-  // Property Zones routes
-  app.get("/api/property-zones", requireAuthentication, async (req, res) => {
-    try {
-      const propertyZones = await storage.getPropertyZones();
-      res.json(propertyZones);
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({ message: "Failed to fetch property zones" });
-    }
-  });
-
-  app.get("/api/property-zones/:id", requireAuthentication, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const propertyZone = await storage.getPropertyZone(id);
-      if (!propertyZone) {
-        res.status(404).json({ message: "Property zone not found" });
-        return;
-      }
-      res.json(propertyZone);
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({ message: "Failed to fetch property zone" });
-    }
-  });
-
-  app.post("/api/property-zones", requireAuthentication, async (req, res) => {
-    try {
-      const propertyZoneData = insertPropertyZoneSchema.parse(req.body);
-      const propertyZone = await storage.createPropertyZone(propertyZoneData);
-      res.status(201).json(propertyZone);
-    } catch (error) {
-      console.error(error);
-      if (error instanceof z.ZodError) {
-        res.status(400).json({ message: "Invalid property zone data", errors: error.issues });
-        return;
-      }
-      res.status(500).json({ message: "Failed to create property zone" });
-    }
-  });
-
-  app.post("/api/property-zones/sync-google-sheets", requireAuthentication, async (req, res) => {
-    try {
-      const { sheetsUrl } = req.body;
-      if (!sheetsUrl) {
-        res.status(400).json({ message: "Google Sheets URL is required" });
-        return;
-      }
-      await storage.syncPropertyZonesFromGoogleSheets(sheetsUrl);
-      res.json({ message: "Property zones synced from Google Sheets successfully" });
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({ message: "Failed to sync property zones from Google Sheets" });
-    }
-  });
-
-  // Field Work Sessions routes
-  app.get("/api/field-work-sessions", requireAuthentication, async (req, res) => {
-    try {
-      const sessions = await storage.getFieldWorkSessions();
-      res.json(sessions);
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({ message: "Failed to fetch field work sessions" });
-    }
-  });
-
-  app.get("/api/field-work-sessions/:id", requireAuthentication, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const session = await storage.getFieldWorkSession(id);
-      if (!session) {
-        res.status(404).json({ message: "Field work session not found" });
-        return;
-      }
-      res.json(session);
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({ message: "Failed to fetch field work session" });
-    }
-  });
-
-  app.post("/api/field-work-sessions", requireAuthentication, async (req, res) => {
-    try {
-      const sessionData = insertFieldWorkSessionSchema.parse(req.body);
-      const session = await storage.createFieldWorkSession(sessionData);
-      res.status(201).json(session);
-    } catch (error) {
-      console.error(error);
-      if (error instanceof z.ZodError) {
-        res.status(400).json({ message: "Invalid field work session data", errors: error.issues });
-        return;
-      }
-      res.status(500).json({ message: "Failed to create field work session" });
-    }
-  });
-
-  app.post("/api/field-work-sessions/:id/complete", requireAuthentication, async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const session = await storage.completeFieldWorkSession(id);
-      if (!session) {
-        res.status(404).json({ message: "Field work session not found" });
-        return;
-      }
-      res.json(session);
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({ message: "Failed to complete field work session" });
-    }
-  });
-
-  app.post("/api/field-work-sessions/:sessionId/items", requireAuthentication, async (req, res) => {
-    try {
-      const sessionId = parseInt(req.params.sessionId);
-      const itemData = insertFieldWorkItemSchema.parse(req.body);
-      const item = await storage.addFieldWorkItem({ ...itemData, sessionId });
-      res.status(201).json(item);
-    } catch (error) {
-      console.error(error);
-      if (error instanceof z.ZodError) {
-        res.status(400).json({ message: "Invalid field work item data", errors: error.issues });
-        return;
-      }
-      res.status(500).json({ message: "Failed to add field work item" });
-    }
-  });
+  // Property Zones and Field Work Sessions routes removed by Task #1857 (Slice 5).
+  // GET /api/property-zones now returns 404 (route intentionally absent).
 
   // Field Tech Parts route (without pricing)
   app.get("/api/parts/field-tech", requireAuthentication, async (req, res) => {
@@ -16291,66 +16094,46 @@ export async function registerRoutes(app: Express): Promise<Server> {
           res.status(404).json({ message: "Customer not found" });
           return;
         }
-        // Prefer irrigation_controllers profile (single source of truth).
-        // buildWetCheckGrid inspects the already-scoped irrigCtrls list: if non-empty
-        // it uses profile count + zone values; otherwise falls back to
-        // clamp(totalControllers) + property_controllers (legacy path, exact behaviour).
+        // Task #1857: irrigation_controllers is the single source of truth.
         const irrigCtrlsForBranch = await storage.listIrrigationControllers(cid, customerId, branchParam);
-        const legacyPCsForBranch = await storage.listPropertyControllers(cid, customerId);
-        const { seedConfigs } = buildWetCheckGrid(
-          irrigCtrlsForBranch,
-          customer.totalControllers,
-          legacyPCsForBranch,
-          branchParam,
-        );
+        const { seedConfigs } = buildWetCheckGrid(irrigCtrlsForBranch);
         const irrigCtrls = await storage.ensureIrrigationControllers(cid, customerId, seedConfigs, branchParam);
         // Map IrrigationController → PropertyController-compatible wire shape
-        // so all existing wet-check UI consumers (ControllerSelectionPage, etc.)
-        // continue to work without frontend changes.
-        const mappedRows = irrigCtrls.map(ctrl => ({
+        // so all existing wet-check UI consumers continue to work without frontend changes.
+        res.json(irrigCtrls.map(ctrl => ({
           id: ctrl.id,
           companyId: ctrl.companyId,
           customerId: ctrl.customerId,
           branchName: branchParam || null,
-          // Task #1856: use stored letter, not derived from name
           controllerLetter: ctrl.letter,
           zoneCount: ctrl.totalZones,
           notes: ctrl.notes ?? null,
-        }));
-        res.json(mappedRows);
+        })));
         return;
       }
-      // Customer-level endpoint: branchKey="" (irrigation_controllers stores
-      // customer-level rows under branchName='', NOT under null/undefined).
-      // buildWetCheckGrid handles both profile and legacy paths.
-      const irrigCtrlsNoBranch = await storage.listIrrigationControllers(cid, customerId, "");
+      // Customer-level endpoint: irrigation_controllers stores customer-level
+      // rows under branchName='' (empty string), not null.
       const customerNoBranch = await storage.getCustomer(customerId);
       if (!customerNoBranch || customerNoBranch.companyId !== cid) {
         res.status(404).json({ message: "Customer not found" });
         return;
       }
-      const legacyPCsNoBranch = await storage.listPropertyControllers(cid, customerId);
-      const { seedConfigs: seedConfigsNoBranch } = buildWetCheckGrid(
-        irrigCtrlsNoBranch,
-        customerNoBranch.totalControllers,
-        legacyPCsNoBranch,
-        "",
-      );
+      const irrigCtrlsNoBranch = await storage.listIrrigationControllers(cid, customerId, "");
+      const { seedConfigs: seedConfigsNoBranch } = buildWetCheckGrid(irrigCtrlsNoBranch);
       const seededNoBranch = await storage.ensureIrrigationControllers(cid, customerId, seedConfigsNoBranch, "");
-      // Expose customer-level bucket as branchName: null on the wire (pre-Task-#320 shape).
+      // Expose customer-level bucket as branchName: null on the wire.
       res.json(seededNoBranch.map(ctrl => ({
         id: ctrl.id,
         companyId: ctrl.companyId,
         customerId: ctrl.customerId,
         branchName: null,
-        // Task #1856: use stored letter, not derived from name
         controllerLetter: ctrl.letter,
         zoneCount: ctrl.totalZones,
         notes: ctrl.notes ?? null,
       })));
     } catch (e: any) {
       const { status, message } = classifyAndLog(req, e, {
-        op: "listPropertyControllers",
+        op: "listControllers",
         ctx: { cid, customerId },
         fallbackMessage: "Couldn't load controllers — please retry",
       });
@@ -16383,25 +16166,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(404).json({ message: "Not found" });
         return;
       }
-      // Try a normal update first so the wet-check shrink side-effect in
-      // updatePropertyController still fires for existing rows.
-      let updated = await storage.updatePropertyController(cid, customerId, controllerLetter, {
-        zoneCount,
-        notes: notes ?? undefined,
+      // Task #1857: property_controllers is dropped; look up the irrigation_controller by letter.
+      const branchParam = typeof req.query.branch === "string" ? req.query.branch.trim() : "";
+      const ctrls = await storage.listIrrigationControllers(cid, customerId, branchParam);
+      const ctrl = ctrls.find(c => c.letter === controllerLetter);
+      if (!ctrl) { res.status(404).json({ message: "Controller not found" }); return; }
+      const patch: Record<string, unknown> = { lastUpdatedAt: new Date() };
+      if (zoneCount !== undefined) patch.totalZones = zoneCount;
+      if (notes !== undefined) patch.notes = notes;
+      const [updated] = await db.update(irrigationControllers)
+        .set(patch)
+        .where(eq(irrigationControllers.id, ctrl.id))
+        .returning();
+      if (!updated) { res.status(404).json({ message: "Not found" }); return; }
+      res.json({
+        id: updated.id,
+        companyId: updated.companyId,
+        customerId: updated.customerId,
+        branchName: branchParam || null,
+        controllerLetter: updated.letter,
+        zoneCount: updated.totalZones,
+        notes: updated.notes ?? null,
       });
-      if (!updated) {
-        // No row yet for this letter (typical for legacy customers or a
-        // freshly-bumped controller count). Upsert just this controller —
-        // do NOT bulk-seed A..N which would invent unrelated controllers.
-        if (zoneCount === undefined) { res.status(404).json({ message: "Not found" }); return; }
-        updated = await storage.upsertPropertyController(cid, customerId, controllerLetter, {
-          zoneCount,
-          notes: notes ?? undefined,
-        });
-      }
-      // Preserve pre-Task-#320 wire shape: customer-level bucket is
-      // exposed as branchName: null even though it's stored as ''.
-      res.json({ ...updated, branchName: updated.branchName ? updated.branchName : null });
     } catch (e: any) {
       const { status, message } = classifyAndLog(req, e, {
         op: "patchPropertyController",
@@ -17175,13 +16961,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // listIrrigationControllers applies the branch filter correctly.
         const branchKey = branchName ?? "";
         const irrigCtrlsForWC = await storage.listIrrigationControllers(cid, body.customerId, branchKey);
-        const legacyPCsForWC = await storage.listPropertyControllers(cid, body.customerId);
-        const gridResult = buildWetCheckGrid(
-          irrigCtrlsForWC,
-          customer.totalControllers,
-          legacyPCsForWC,
-          branchKey,
-        );
+        // Task #1857: no property_controllers fallback; irrigation_controllers is the sole source.
+        const gridResult = buildWetCheckGrid(irrigCtrlsForWC);
         numControllers = gridResult.numControllers;
         await storage.ensureIrrigationControllers(cid, body.customerId, gridResult.seedConfigs, branchName);
       }

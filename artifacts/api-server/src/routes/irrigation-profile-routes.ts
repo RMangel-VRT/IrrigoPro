@@ -357,27 +357,8 @@ export function registerIrrigationProfileRoutes(
           lastUpdatedAt: new Date(),
         });
 
-        // Slice 3: keep customers.totalControllers in sync for the customer-level
-        // bucket (branchName = ""). Branch-scoped controllers do not write the
-        // customer-level integer (matching existing setCustomerControllerCount semantics).
-        if (effectiveBranch === "") {
-          const countRows = await db
-            .select({ count: sql<number>`count(*)` })
-            .from(irrigationControllers)
-            .where(and(
-              eq(irrigationControllers.companyId, companyIdForCreate),
-              eq(irrigationControllers.customerId, customerId),
-              eq(irrigationControllers.branchName, ""),
-            ));
-          const newCount = Number(countRows[0]?.count ?? 0);
-          await db
-            .update(customers)
-            .set({ totalControllers: newCount })
-            .where(and(
-              eq(customers.id, customerId),
-              eq(customers.companyId, companyIdForCreate),
-            ));
-        }
+        // Task #1857: stop syncing customers.totalControllers — count is now
+        // derived from COUNT(*) on irrigation_controllers.
 
         res.status(201).json(controller);
       } catch (e: any) {
@@ -517,28 +498,8 @@ export function registerIrrigationProfileRoutes(
         );
         if (!ok) return notFound(res, "Controller");
 
-        // Slice 3: keep customers.totalControllers in sync when a customer-level
-        // controller is deleted. Branch-scoped controllers do not affect the count.
-        if (controllerToDelete.branchName === "") {
-          const syncCompanyId = controllerToDelete.companyId;
-          const custId = controllerToDelete.customerId;
-          const countRows = await db
-            .select({ count: sql<number>`count(*)` })
-            .from(irrigationControllers)
-            .where(and(
-              eq(irrigationControllers.companyId, syncCompanyId),
-              eq(irrigationControllers.customerId, custId),
-              eq(irrigationControllers.branchName, ""),
-            ));
-          const newCount = Number(countRows[0]?.count ?? 0);
-          await db
-            .update(customers)
-            .set({ totalControllers: newCount })
-            .where(and(
-              eq(customers.id, custId),
-              eq(customers.companyId, syncCompanyId),
-            ));
-        }
+        // Task #1857: stop syncing customers.totalControllers — count is now
+        // derived from COUNT(*) on irrigation_controllers.
 
         res.json({ ok: true });
       } catch (e: any) {

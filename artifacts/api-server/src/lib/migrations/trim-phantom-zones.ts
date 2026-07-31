@@ -78,12 +78,14 @@ async function loadCandidates(): Promise<PhantomZoneRow[]> {
     repair_labor_hours: string | null;
     finding_count: string;
   }>(sql`
+    -- Task #1857: property_controllers dropped; resolve via irrigation_controllers
+    -- keyed by controller_id (preferred) or letter+scope (fallback).
     SELECT
       wcz.id,
       wcz.wet_check_id,
       wcz.controller_letter,
       wcz.zone_number,
-      pc.zone_count,
+      ic.total_zones AS zone_count,
       wcz.status,
       wcz.observed_pressure,
       wcz.observed_flow,
@@ -93,18 +95,23 @@ async function loadCandidates(): Promise<PhantomZoneRow[]> {
       COALESCE(fc.cnt, 0) AS finding_count
     FROM wet_check_zone_records wcz
     JOIN wet_checks wc ON wc.id = wcz.wet_check_id
-    JOIN property_controllers pc
-      ON pc.company_id  = wc.company_id
-     AND pc.customer_id = wc.customer_id
-     AND pc.branch_name = COALESCE(TRIM(wc.branch_name), '')
-     AND pc.controller_letter = wcz.controller_letter
+    JOIN irrigation_controllers ic
+      ON ic.id = COALESCE(
+           wcz.controller_id,
+           (SELECT ic2.id FROM irrigation_controllers ic2
+            WHERE ic2.company_id  = wc.company_id
+              AND ic2.customer_id = wc.customer_id
+              AND COALESCE(ic2.branch_name, '') = COALESCE(TRIM(wc.branch_name), '')
+              AND ic2.letter = wcz.controller_letter
+            LIMIT 1)
+         )
     LEFT JOIN LATERAL (
       SELECT COUNT(*) AS cnt
       FROM wet_check_findings
       WHERE zone_record_id = wcz.id
     ) fc ON true
     WHERE wcz.status = 'not_checked'
-      AND wcz.zone_number > pc.zone_count
+      AND wcz.zone_number > ic.total_zones
     ORDER BY wc.id, wcz.id
   `);
 

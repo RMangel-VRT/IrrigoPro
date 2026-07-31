@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { customers, parts, estimates, estimateItems, propertyZones, zones, users, workOrders, workOrderItems, billingSheets, billingSheetItems, companies } from "@workspace/db";
+import { customers, parts, estimates, estimateItems, users, workOrders, workOrderItems, billingSheets, billingSheetItems, companies } from "@workspace/db";
 import { eq } from "drizzle-orm";
 
 type UserInsert = typeof users.$inferInsert;
@@ -111,36 +111,6 @@ export async function seedDatabase() {
 
     const insertedParts = await db.insert(parts).values(sampleParts).returning();
     console.log(`Inserted ${insertedParts.length} parts`);
-
-    // Seed property zones
-    const samplePropertyZones = [
-      { propertyName: "Greenfield Corporate Campus", propertyAddress: "100 Corporate Blvd, Austin, TX 78701", contactName: "Mike Johnson", contactEmail: "mike@greenfield.com", contactPhone: "(555) 111-2222" },
-      { propertyName: "Sunset Residential Complex", propertyAddress: "200 Sunset Drive, Austin, TX 78702", contactName: "Sarah Wilson", contactEmail: "sarah@sunset.com", contactPhone: "(555) 333-4444" },
-      { propertyName: "Downtown Office Plaza", propertyAddress: "300 Main Street, Austin, TX 78703", contactName: "Robert Chen", contactEmail: "robert@downtown.com", contactPhone: "(555) 555-6666" },
-    ];
-
-    const insertedPropertyZones = await db.insert(propertyZones).values(samplePropertyZones).returning();
-    console.log(`Inserted ${insertedPropertyZones.length} property zones`);
-
-    // Seed zones for each property
-    const sampleZones = [
-      // Greenfield Corporate Campus zones
-      { propertyId: insertedPropertyZones[0].id, name: "Front Entrance", description: "Main entrance landscaping area", clockNumber: "C001" },
-      { propertyId: insertedPropertyZones[0].id, name: "East Parking", description: "Eastern parking lot perimeter", clockNumber: "C002" },
-      { propertyId: insertedPropertyZones[0].id, name: "West Courtyard", description: "Western courtyard garden area", clockNumber: "C003" },
-      
-      // Sunset Residential Complex zones
-      { propertyId: insertedPropertyZones[1].id, name: "Pool Area", description: "Swimming pool and deck landscaping", clockNumber: "R001" },
-      { propertyId: insertedPropertyZones[1].id, name: "Building A Perimeter", description: "Around Building A foundation", clockNumber: "R002" },
-      { propertyId: insertedPropertyZones[1].id, name: "Central Lawn", description: "Main common area lawn", clockNumber: "R003" },
-      
-      // Downtown Office Plaza zones
-      { propertyId: insertedPropertyZones[2].id, name: "Lobby Entrance", description: "Main lobby entrance planters", clockNumber: "D001" },
-      { propertyId: insertedPropertyZones[2].id, name: "Rooftop Garden", description: "Rooftop garden and terrace", clockNumber: "D002" },
-    ];
-
-    const insertedZones = await db.insert(zones).values(sampleZones).returning();
-    console.log(`Inserted ${insertedZones.length} zones`);
 
     // Seed estimates.
     // Task #669 — every seeded estimate is scoped to a `companyId`

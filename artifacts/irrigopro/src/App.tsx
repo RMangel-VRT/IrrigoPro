@@ -27,11 +27,11 @@ const Dashboard = lazyPage(() => import("@/pages/dashboard"));
 const Estimates = lazyPage(() => import("@/pages/estimates"));
 const PartsCatalog = lazyPage(() => import("@/pages/parts-catalog"));
 const Customers = lazyPage(() => import("@/pages/customers"));
-const FieldTech = lazyPage(() => import("@/pages/field-tech"));
+// FieldTech page removed by Task #1857 (Slice 5 — retire prototype stores).
 const WorkOrders = lazyPage(() => import("@/pages/work-orders"));
 const ForgotPassword = lazyPage(() => import("@/pages/forgot-password"));
 const ResetPassword = lazyPage(() => import("@/pages/reset-password"));
-const FieldPortal = lazyPage(() => import("@/pages/field-portal"));
+// FieldPortal page removed by Task #1857 (Slice 5 — retire prototype stores).
 const BillingSheets = lazyPage(() => import("@/pages/billing-sheets"));
 const MissingPhotosReport = lazyPage(() => import("@/pages/missing-photos-report"));
 const WorkOrdersMissingPhotosReport = lazyPage(() => import("@/pages/work-orders-missing-photos-report"));
@@ -251,7 +251,6 @@ function Router() {
                 <Switch>
                   <Route path="/" component={FieldTechDashboard} />
                   <Route path="/field-tech" component={FieldTechDashboard} />
-                  <Route path="/field-portal" component={FieldPortal} />
                   <Route path="/work-orders" component={WorkOrders} />
                   <Route path="/billing-sheets" component={BillingSheets} />
                   <Route path="/wet-check-billings" component={WetCheckBillingsPage} />
@@ -507,7 +506,7 @@ function Router() {
                 <Route path="/customers" component={Customers} />
                 <Route path="/site-maps" component={SiteMapsPage} />
                 <Route path="/customer-billing" component={CustomerBilling} />
-                <Route path="/field-tech" component={FieldTech} />
+                {/* /field-tech route removed by Task #1857 */}
                 <Route path="/billing-sheets/zero-price-audit" component={BillingZeroPriceAuditPage} />
                 <Route path="/billing-sheets/labor-rate-audit" component={LaborRateAuditPage} />
                 <Route path="/billing-sheets" component={BillingSheets} />
@@ -522,7 +521,7 @@ function Router() {
                 <Route path="/license-agreement" component={LicenseAgreement} />
                 <Route path="/privacy-policy" component={PrivacyPolicy} />
                 <Route path="/login" component={Login} />
-                <Route path="/field-portal" component={FieldPortal} />
+                {/* /field-portal route removed by Task #1857 */}
                 {/* Redirect estimates and work-orders to operations page */}
                 <Route path="/estimates/command-center" component={EstimateCommandCenter} />
                 <Route path="/estimates/pending-approval" component={RedirectPendingApprovalToCC} />

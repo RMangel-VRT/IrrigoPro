@@ -1,13 +1,12 @@
 // Slice 4B — IndexedDB schema for the offline mirror + mutation queue.
 //
-// Database: `irrigopro_offline` v1
+// Database: `irrigopro_offline` v4 (v3→v4: propertyControllers store removed)
 //   - wetChecks                 (key: clientId)         indexes: id, status
 //   - wetCheckZoneRecords       (key: clientId)         indexes: wetCheckClientId, wetCheckId, id
 //   - wetCheckFindings          (key: clientId)         indexes: zoneRecordClientId, zoneRecordId, id
 //   - wetCheckPhotos            (key: clientId)         indexes: wetCheckId — metadata only in 4B
 //   - parts                     (key: id)               read-cache for parts catalog
 //   - issueTypeConfigs          (key: id)               read-cache
-//   - propertyControllers       (key: id)               read-cache; index: customerId
 //   - mutationQueue             (key: id)               indexes: status, createdAt, parentClientId, clientId
 
 import { openDB, type IDBPDatabase, type DBSchema } from "idb";
@@ -96,11 +95,6 @@ interface OfflineSchema extends DBSchema {
   };
   parts: { key: number; value: KvRow };
   issueTypeConfigs: { key: number; value: KvRow };
-  propertyControllers: {
-    key: number;
-    value: KvWithCustomer;
-    indexes: { byCustomerId: number };
-  };
   apiCache: {
     key: string;
     value: { key: string; data: any; updatedAt: number };
@@ -120,7 +114,7 @@ interface OfflineSchema extends DBSchema {
 export type OfflineDB = IDBPDatabase<OfflineSchema>;
 
 const DB_NAME = "irrigopro_offline";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 let dbPromise: Promise<OfflineDB> | null = null;
 
@@ -163,9 +157,9 @@ export function openOfflineDB(): Promise<OfflineDB> {
         if (!db.objectStoreNames.contains("issueTypeConfigs")) {
           db.createObjectStore("issueTypeConfigs", { keyPath: "id" });
         }
-        if (!db.objectStoreNames.contains("propertyControllers")) {
-          const s = db.createObjectStore("propertyControllers", { keyPath: "id" });
-          s.createIndex("byCustomerId", "customerId");
+        // v4: propertyControllers store removed (Task #1857 retired property_controllers).
+        if (db.objectStoreNames.contains("propertyControllers")) {
+          db.deleteObjectStore("propertyControllers");
         }
         if (!db.objectStoreNames.contains("mutationQueue")) {
           const s = db.createObjectStore("mutationQueue", { keyPath: "id" });

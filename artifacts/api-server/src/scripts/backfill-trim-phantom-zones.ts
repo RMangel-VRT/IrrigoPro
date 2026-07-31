@@ -37,8 +37,8 @@ try { (process.stdout as unknown as { _handle?: { setBlocking?: (b: boolean) => 
 try { (process.stderr as unknown as { _handle?: { setBlocking?: (b: boolean) => void } })._handle?.setBlocking?.(true); } catch {}
 
 import { db } from "../db";
-import { wetChecks, wetCheckZoneRecords, propertyControllers, appSettings } from "@workspace/db";
-import { eq, and, gt, inArray, sql } from "drizzle-orm";
+import { wetChecks, wetCheckZoneRecords, irrigationControllers, appSettings } from "@workspace/db";
+import { eq, and, gt, inArray, sql, isNotNull } from "drizzle-orm";
 import { isEmptyZone } from "../wet-check-zone-filter";
 
 const DONE_KEY = "trimPhantomZones.done";
@@ -214,11 +214,9 @@ async function main(): Promise<void> {
         const letters = [...new Set(notCheckedZones.map((z) => z.controllerLetter))];
 
         // Load the controllers for this wet check's customer, scoped by the
-        // wet check's branchName. `property_controllers` is branch-scoped:
-        // the customer-level bucket stores branchName='' (empty string). A wet
-        // check with branchName=null also means customer-level, so we
-        // normalize null → '' before filtering — matching the storage layer's
-        // branchKey() convention.
+        // wet check's branchName. Task #1857: use irrigation_controllers (single
+        // source of truth). The customer-level bucket has branchName='' (empty
+        // string); null branchName normalizes to '' — matching prior behaviour.
         const wcRows = await db.execute<{ company_id: number; customer_id: number; branch_name: string | null }>(sql`
           SELECT company_id, customer_id, branch_name FROM wet_checks WHERE id = ${row.id}
         `);
@@ -235,21 +233,22 @@ async function main(): Promise<void> {
 
         const ctrlRows = await db
           .select({
-            controllerLetter: propertyControllers.controllerLetter,
-            zoneCount: propertyControllers.zoneCount,
+            controllerLetter: irrigationControllers.letter,
+            zoneCount: irrigationControllers.totalZones,
           })
-          .from(propertyControllers)
+          .from(irrigationControllers)
           .where(
             and(
-              eq(propertyControllers.companyId, wc.company_id),
-              eq(propertyControllers.customerId, wc.customer_id),
-              eq(propertyControllers.branchName, branchKey),
-              inArray(propertyControllers.controllerLetter, letters),
+              eq(irrigationControllers.companyId, wc.company_id),
+              eq(irrigationControllers.customerId, wc.customer_id),
+              eq(irrigationControllers.branchName, branchKey),
+              isNotNull(irrigationControllers.letter),
+              inArray(irrigationControllers.letter, letters),
             ),
           );
 
-        // (companyId, customerId, branchName, controllerLetter) is unique in
-        // property_controllers, so ctrlRows has at most one row per letter.
+        // (companyId, customerId, branchName, letter) has a unique index in
+        // irrigation_controllers, so ctrlRows has at most one row per letter.
         const zoneCountByLetter = new Map(
           ctrlRows.map((c) => [c.controllerLetter, c.zoneCount]),
         );
