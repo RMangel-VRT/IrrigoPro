@@ -1,0 +1,30 @@
+Must fix before accepting #1856
+
+Step 1 specifies letter: text("letter").notNull().default("") and creates the unique index in the same migration.
+
+In Postgres, NULLs in a unique index are treated as distinct, but empty strings are not. Every existing controller gets "", so the moment you create a unique index on (companyId, customerId, branchName, letter), your six-controller customer has six rows all holding "" — and index creation fails outright. Even if it somehow got created, every insert before the backfill would collide on "".
+
+The ordering is also inverted: the index is created in step 1, the backfill is step 6.
+
+Correct sequence:
+
+Add letter as nullable — text("letter"), no notNull, no default.
+Run the backfill so every row has a real letter.
+Then create the unique index.
+Optionally add notNull afterwards, once nothing is null.
+
+My spec had it nullable for exactly this reason. Worth telling Replit explicitly, because "notNull default empty string plus unique index" is a plausible-looking change that silently breaks.
+
+#1857 has a milder version of the same thing — step 1 says "replace the unique index, register and run the migration," step 2 says don't create the index until the backfill reports zero ambiguous rows. Make it explicit: add column, backfill, then swap the index.
+
+Smaller corrections
+
+Step 7 cites code that doesn't exist. It says extractLetter is at lines 48-60 in irrigation-controller-resolver.ts and is called as extractLetter(ctrl.name) ?? String.fromCharCode(65 + index). Actual: the function is at line 24, resolveWetCheckControllers is at line 41, and there is no ?? String.fromCharCode fallback — it's a bare extractLetter(ctrl.name) at line 58. Replit will notice when it opens the file, but the invented fallback could send it looking for a second bug that isn't there.
+
+Line numbers drift ~5 throughout — schema references say 1809/1457/1354 where the real values are 1804/1452/1349. Harmless.
+
+setTotalControllers should be setCustomerControllerCount in the relevant-files list.
+
+Missing from both
+
+Neither ticket has a Definition of Done with proof attachments — Rule 7. Your spec files have them: file:line citations, screenshots, backfill output, test output, grep proof. That section didn't survive into the tickets. Worth pasting back in, especially the grep proof for #1856 (no derived-letter code remains) and the backfill output for both.

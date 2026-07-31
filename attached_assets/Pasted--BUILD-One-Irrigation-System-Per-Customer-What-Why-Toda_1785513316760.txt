@@ -1,0 +1,149 @@
+# BUILD — One Irrigation System Per Customer
+
+**What & Why**
+Today a customer's irrigation system is described by four separate stores that nothing reconciles: `irrigation_controllers` (canonical), `property_controllers` (legacy, half-maintained), `customers.total_controllers` (an integer that is wrong by design for branch-level controllers), and a disconnected Google-Sheets prototype (`property_zones` / `zones` / `field_work_sessions`) that has no tenancy at all. On top of that, every downstream record identifies a controller by a **letter string** rather than a foreign key — which is how a duplicate letter silently destroyed wet-check zone data (see `FIX - Controller Letter Is Real Data`).
+
+This ticket makes **`irrigation_controllers` + `irrigation_profile_zones` the single source of truth** for what equipment a customer has, keys operational records to the controller **row**, and deletes the stores that compete with it.
+
+Background: `AUDIT - Per-Customer Irrigation Data Model`.
+
+## Sequencing
+
+Build **after** `FIX - Controller Letter Is Real Data`, which adds the `letter` column, auto-assignment from A, editability, the unique index, and moves the wet-check submit path off `property_controllers`. That fix is the live-bug stopgap; this is the structural consolidation. Where the two overlap, this spec supersedes:
+
+- The letter fix's unique index on `wet_check_zone_records (wet_check_id, controller_letter, zone_number)` is **replaced** by an index on `controller_id` (Slice 1 below).
+
+## The target model
+
+| Fact | Home | Notes |
+|---|---|---|
+| A customer's controllers | `irrigation_controllers` | scoped (companyId, customerId, branchName) |
+| A controller's identity in the field | `letter` (A–Z) | display label only, editable, unique per scope |
+| A controller's zones | `irrigation_profile_zones` | row count must equal `total_zones` |
+| How many controllers | `COUNT(*)` of `irrigation_controllers` | derived, never stored |
+| Which controller a zone record belongs to | `wet_check_zone_records.controller_id` | foreign key |
+| Which controller a document referred to | frozen `controller_letter` text + nullable `controller_id` | historical snapshot |
+
+## Slice 1 — Zone records key on the controller row
+
+Add to `wet_check_zone_records` (`schema.ts:1452`):
+
+- `controllerId: integer("controller_id").references(() => irrigationControllers.id)` — the real link.
+- Replace `uniq_wet_check_zone` (currently `(wetCheckId, controllerLetter, zoneNumber)`, `schema.ts:1476`) with **`(wetCheckId, controllerId, zoneNumber)`**.
+- Keep `controller_letter` as a denormalized display label so existing reads and PDFs keep working, but it stops being an identity.
+
+After this, two controllers sharing a letter is merely cosmetic — their zone records are still distinct rows. The class of bug that caused this ticket becomes structurally impossible rather than index-prevented.
+
+**Blast radius is small** — findings (`wet_check_findings.zoneRecordId`, `schema.ts:1489`) and zone photos (`:1627`) already reference zone records by foreign key, so nothing downstream needs to change. Only six places match zone records by letter and need rewriting:
+
+- `storage.ts:7864` and `:8003` — mark zone records not-applicable when a controller is removed
+- `storage.ts:8603` — ordering (order by controller `letter`, then `zoneNumber`, via a join)
+- `storage.ts:8743` — the implicit-N/A fill (already being rewritten by the letter fix's Slice 4)
+- `storage.ts:9281` — upsert-match on insert
+- `scripts/backfill-trim-phantom-zones.ts:176`
+
+**Backfill:** for every existing zone record, resolve `controller_id` by matching `(wet_check.companyId, wet_check.customerId, wet_check.branchName, controller_letter)` against `irrigation_controllers.letter`. Records that resolve to **more than one** controller (the collided ones) or to **none** must be reported, not guessed — write them to the migration output with wet check id, letter, and zone number. Do not create the new unique index until the backfill leaves zero ambiguous rows.
+
+## Slice 2 — Documents keep their snapshot, gain a link
+
+`controller_letter` is stored as text on six document tables: `billing_sheets` (`schema.ts:241`), `estimates` (`:503`), `estimate_items` (`:578`), `work_orders` (`:770`), `work_order_items` (`:843`), `work_order_zone_photos` (`:1652`).
+
+- **Leave the existing text alone.** An issued estimate must keep saying what it said when it was issued; re-lettering a controller two years later must not silently change a historical document.
+- Add a **nullable** `controller_id` to each, populated going forward at creation time from the controller the record was derived from.
+- No backfill of past documents, and no rewriting of past letters. The nullable column simply starts filling in.
+- Rendering keeps using the stored text. `controller_id` is for traceability and future reporting, not display.
+
+## Slice 3 — Retire `property_controllers`
+
+The letter fix's Slice 4 already moves the wet-check submit path onto `irrigation_controllers`. That leaves `setCustomerControllerCount` (`storage.ts:7955`) and `ensurePropertyControllers` (`:7752`) as the last writers, plus the legacy fallback in `buildWetCheckGrid` (`wet-check-grid.ts:69`).
+
+- Migrate `setCustomerControllerCount` to operate on `irrigation_controllers`: shrinking removes controllers by letter within scope, keeps the existing `ControllerHasZonesError` confirmation guard, and keeps the behaviour of marking zone records on in-progress wet checks as `not_applicable` (`storage.ts:7991`) — now resolved by `controller_id`.
+- Delete `ensurePropertyControllers` and the legacy branch of `buildWetCheckGrid`. Note the two defaults that never agreed — column default **100** (`schema.ts:1363`) vs inserted **12** (`storage.ts:7774`); both disappear with the table.
+- Drop the `property_controllers` table **last**, after the letter backfill has consumed its `controller_letter` values (the letter fix uses them as backfill input).
+
+## Slice 4 — `customers.total_controllers` becomes derived
+
+`schema.ts:81`, synced only when `branchName === ""` (`irrigation-profile-routes.ts:351`, `:481`; `storage.ts:8018`), so it is wrong by construction for any customer with branch-level controllers — yet it drives the controller count in `irrigation-system-card.tsx:42` and the fallback count in `wet-check-grid.ts:71`.
+
+- Every read becomes `COUNT(*)` of `irrigation_controllers` for the relevant (company, customer, branch) scope.
+- Remove the three sync writes.
+- Leave the column in place for one release (stop writing, stop reading), then drop it in a follow-up so a rollback doesn't lose anything.
+
+## Slice 5 — Delete the `property_zones` prototype (decided: delete outright)
+
+Three tables with **no `company_id` column at all** — `property_zones` (`schema.ts:586`), `zones` (`:595`), `field_work_sessions` (`:604`) — exposed by `GET /api/property-zones` (`routes.ts:8228`) under `requireAuthentication` with no tenant filter. Any authenticated user of any company can read every company's property list and addresses. The headline feature never worked: `syncPropertyZonesFromGoogleSheets` (`storage.ts:3098`) logs the URL and returns.
+
+Delete:
+
+- Tables `property_zones`, `zones`, `field_work_sessions` and their insert/select types.
+- Routes `/api/property-zones` (GET list, GET by id, POST, POST sync-google-sheets) at `routes.ts:8228`–`:8280`, plus the `/api/field-work-sessions` routes those pages post to.
+- Storage methods `getPropertyZones`, `getPropertyZone`, `createPropertyZone`, `updatePropertyZone`, `deletePropertyZone`, `syncPropertyZonesFromGoogleSheets`, `getZones`, `createZone`, `updateZone`, `deleteZone`, and the field-work-session methods (`storage.ts:3066`–`~3130`).
+- Pages `pages/field-tech.tsx` (416 lines) and `pages/field-portal.tsx` (326 lines), and their routes in `App.tsx:510`, `:525` and `company-admin-app.tsx:195`, `:229`.
+- The `propertyZones` / `zones` seed data in `seed.ts:122`, `:142`.
+
+Neither page appears in the sidebar (`components/layout`), so nothing in navigation breaks — they were orphans under Rule 3. Verify no other component imports them before removing, and confirm nothing else references `field_work_sessions`.
+
+## Do not touch: site maps
+
+The `controllers` and `irrigation_zones` tables back the live `/site-maps` feature. They are **explicitly out of scope for this ticket and are not to be modified, linked, renamed, or deleted.**
+
+- Do not add a foreign key from them to `irrigation_controllers`.
+- Do not change their columns, routes (`site-map-routes.ts`), storage methods, or the `/site-maps` and `/customers/:id/site-maps` pages.
+- Do not treat them as duplicates to clean up. They are a separate, working feature.
+
+They model the same physical equipment as the irrigation profile and can disagree with it. That is a known, accepted condition and is not being addressed now.
+
+## Multi-tenancy (Rule 1)
+
+Every new lookup resolves scope from the record's own (company, customer, branch) — never from caller context. The zone-record backfill joins through `wet_checks` to get company and customer, so a letter can never resolve to another company's controller. Slice 5 removes the only irrigation-area endpoints that had no tenant filter at all.
+
+## Decisions
+
+- **Zone records key on `controller_id`; letter is a label** (decided) — makes the collision structurally impossible.
+- **Documents freeze their letter text, gain a nullable `controller_id`** (decided) — history stays honest.
+- **`property_controllers` dropped** (decided) — after the letter backfill consumes its values.
+- **`total_controllers` derived** (decided) — stop writing, stop reading, drop the column later.
+- **`property_zones` prototype deleted outright** (decided, no row count) — closes the tenancy hole.
+- **Site maps are not part of this work** (decided) — `controllers` / `irrigation_zones` and the `/site-maps` feature stay exactly as they are.
+
+## Done looks like
+
+- `irrigation_controllers` + `irrigation_profile_zones` are the only description of a customer's system.
+- A wet-check zone record points at a controller row; duplicate letters cannot merge zone data.
+- Historical estimates, work orders, and billing sheets still display the letter they were issued with.
+- No table named `property_controllers`, `property_zones`, `zones`, or `field_work_sessions` remains.
+- Controller counts are computed, never stored, and are correct for branch-level customers.
+- No endpoint in the irrigation area returns data without a company filter.
+
+## Tests
+
+- Two controllers deliberately given the same letter → their zone records remain distinct rows; both are addressable; findings attach to the right one.
+- Re-lettering a controller → live zone records follow it (they key on id); an already-issued estimate still shows the old letter.
+- Deleting a controller with zones → confirmation guard still fires; on confirm, in-progress wet-check zone records for that controller become `not_applicable`, resolved by `controller_id`.
+- Zone-record backfill: unambiguous rows resolve; ambiguous and unresolvable rows are **reported and the unique index is not created** until zero remain.
+- Controller count for a customer with both customer-level and branch-level controllers is correct on every surface.
+- Company isolation: the backfill never resolves a letter to another company's controller; a customer with the same letters in two companies stays separate.
+- After Slice 5, `/api/property-zones` returns 404 and no import of the deleted pages remains.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the `controller_id` column + new unique index, each rewritten letter-match site, the document `controller_id` additions, the `setCustomerControllerCount` migration, the derived count, and every deletion in Slice 5.
+- [ ] Backfill output: zone records resolved, plus an explicit list of ambiguous/unresolvable rows (or "none").
+- [ ] Screenshot: the six-controller customer with A–F, correct header zone total, and a wet check showing distinct zones per controller.
+- [ ] Screenshot or output: a historical estimate still displaying its original letter after a controller was re-lettered.
+- [ ] Grep proof that `property_controllers`, `property_zones`, `zones`, and `field_work_sessions` have no remaining references.
+- [ ] Test output for the duplicate-letter isolation and backfill-ambiguity cases.
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+
+- `lib/db/src/schema/schema.ts` — `wet_check_zone_records`:1452 + unique index:1476; document tables at :241, :503, :578, :770, :843, :1652; `property_controllers`:1349; `property_zones`:586, `zones`:595, `field_work_sessions`:604; `customers.total_controllers`:81
+- `artifacts/api-server/src/storage.ts` — letter-match sites :7864, :8003, :8603, :8743, :9281; `setCustomerControllerCount`:7955; `ensurePropertyControllers`:7752; property-zone methods :3066–:3130; `total_controllers` sync :8018
+- `artifacts/api-server/src/wet-check-grid.ts` — legacy branch :69
+- `artifacts/api-server/src/routes/routes.ts` — `/api/property-zones` :8228–:8280
+- `artifacts/api-server/src/routes/irrigation-profile-routes.ts` — count syncs :351, :481
+- `artifacts/api-server/src/scripts/backfill-trim-phantom-zones.ts` — letter match :176
+- `artifacts/api-server/src/seed.ts` — prototype seed data :122, :142
+- `artifacts/irrigopro/src/pages/field-tech.tsx`, `pages/field-portal.tsx` (delete)
+- `artifacts/irrigopro/src/App.tsx` :510, :525; `components/company-admin-app.tsx` :195, :229 (route removal)
+- `artifacts/irrigopro/src/components/customers/irrigation-system-card.tsx` :42 (derived count)

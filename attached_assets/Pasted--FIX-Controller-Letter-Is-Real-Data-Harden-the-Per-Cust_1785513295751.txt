@@ -1,0 +1,149 @@
+# FIX — Controller Letter Is Real Data + Harden the Per-Customer Irrigation System
+
+**Status: live field bug.** Wet-check zone records are keyed by a controller letter that is not stored anywhere — it is recomputed from the controller's **name** on every read. A customer with descriptively-named controllers gets colliding letters, and colliding letters mean colliding zone records.
+
+**What & Why**
+`irrigation_controllers` has no letter column (`schema.ts:1804`). Every surface that shows a letter calls some variant of:
+
+```js
+name.trim().split(/\s+/).pop()?.slice(-1).toUpperCase()
+```
+
+— the **last character of the last word** of the name. That works only for names shaped like "Controller A", which is what the seeding migration creates (`import-irrigation-profile-from-property-controllers.ts:155`). The moment a manager renames a controller to something meaningful, the letter silently changes.
+
+Observed live on one customer with six controllers:
+
+| Controller name | Last word | Derived letter |
+|---|---|---|
+| Hunter Clock - East | East | **T** |
+| Hunter Clock - West | West | **T** |
+| Rainbird - 136th SouthEast | SouthEast | **T** |
+| Rainbird - Broadlands Lane | Lane | **E** |
+| Rainbird - West | West | **T** |
+| Rainbird Clock - East | East | **T** |
+
+Five controllers collapse to "T". `wet_check_zone_records` has a unique index on **(wet_check_id, controller_letter, zone_number)** (`schema.ts:1476`), so on a wet check covering this property, "T · Zone 1" can exist only once — but five controllers each have a zone 1. Zone data is being merged or dropped in the field right now. The same letter flows into findings, estimates, work orders, PDFs, and customer emails, where "Clock T · Zone 14" is ambiguous across five controllers.
+
+The letter must become **stored data**: auto-assigned, editable, unique, and independent of the name.
+
+> **Build this first.** A follow-on ticket, `BUILD - One Irrigation System Per Customer`, then keys wet-check zone records to `controller_id` (a real foreign key) and retires `property_controllers`, `customers.total_controllers`, and the `property_zones` prototype. When it lands it **replaces** the `wet_check_zone_records` unique index this ticket relies on. Do not build the two concurrently. Background for both: `AUDIT - Per-Customer Irrigation Data Model`.
+
+## Slice 1 — Store the letter (the fix)
+
+Add to `irrigation_controllers`:
+
+- `letter: text("letter")` — a single uppercase character `A`–`Z`.
+- Unique index on **(companyId, customerId, branchName, letter)**, matching the existing `uniq_irr_ctrl_name` scope (`schema.ts:1830`). Two controllers on the same property can never share a letter again — the collision becomes impossible at the database level, not just unlikely.
+
+Assignment rules:
+
+- **Auto-assign on create**: the next unused letter in `A, B, C, …` within that (company, customer, branch) scope. Gaps are reused — if B was deleted, the next controller created takes B, not G. Fail cleanly past Z (26 is already the app-wide controller ceiling, `MAX_CONTROLLERS` in `irrigation-system-card.tsx:19` and the 1–26 clamp in `wet-check-grid.ts:71`).
+- **Editable**: a manager can change a controller's letter. Validate single character, `A`–`Z`, uppercase it, and reject a letter already taken in that scope with a clear message naming the controller that holds it. Renaming a controller must **never** change its letter.
+- **Ordering**: list controllers by `letter`, not by `name`. `ensureIrrigationControllers` currently returns `.orderBy(name, id)` (`storage.ts:10873`) — that ordering determines display order and will not match the letters otherwise.
+
+Backfill for existing rows, per (company, customer, branch):
+
+1. If a matching legacy `property_controllers` row exists for this customer+branch, prefer its `controller_letter` where that produces no collision.
+2. Otherwise assign `A, B, C, …` in **`id` order** (creation order), which is what a manager would expect.
+3. Backfill must be idempotent and must report what it assigned per customer.
+
+## Slice 2 — Retire the derived letter everywhere
+
+`extractLetter` exists in **three** places, character-for-character identical, and there are two more positional-letter generators. All of them go away in favour of reading `letter`:
+
+| Location | What it does now |
+|---|---|
+| `irrigation-controller-resolver.ts:24` | `extractLetter(name)` — feeds the wet-check grid and mobile picker |
+| `irrigation-controller-grid.tsx:119` | duplicate `extractLetter`; drives the blue badge (`:1332`) |
+| `irrigation-system-card.tsx:26` | duplicate `extractLetter`, plus `letterFor(index)` (`:22`) |
+| `wet-check-grid.ts:78` | positional `A + i` for legacy seed names |
+| `storage.ts:8748` | positional `A + i` from `wc.numControllers` (submit path — see Slice 4) |
+
+After this slice, **no code derives a letter from a name or an array index.** Grep proof required.
+
+**Related display bug, same root cause:** `irrigation-system-card.tsx:55` builds a `Map` keyed by the derived letter, then sums zones by looking up `A`–`F`. With five controllers deriving to "T", the map holds two entries and the header reads **"6 controllers · 40 zones"** for a property with 230 zones — 40 being the one controller that happened to derive "E". Reading the stored letter fixes the count as a side effect; add a test asserting the header total equals the sum of `totalZones`.
+
+## Slice 3 — One source of zone counts
+
+Three stores currently claim to know a controller's zone count, and they disagree:
+
+- `irrigation_controllers.totalZones` — what the profile UI edits.
+- `property_controllers.zoneCount` — legacy; **defaults to 12** in `ensurePropertyControllers` (`storage.ts:7774`) but **100** in the column default (`schema.ts:1363`). Those two defaults have never agreed.
+- The row count of `irrigation_profile_zones` for that controller — seeded on create (`storage.ts:10845`) and grown on increase (Task #1844, `storage.ts:10982`).
+
+Decide (recommended): **`irrigation_controllers.totalZones` is authoritative**, and `irrigation_profile_zones` rows must always match it. Task #1844 already seeds rows when the count increases; confirm the decrease path trims (it appears to, `storage.ts:~10975`) and add a consistency check that flags any controller whose zone-row count differs from `totalZones`.
+
+## Slice 4 — Fix the wet-check submit path
+
+`storage.ts:8738` (implicit-N/A fill on submit) is a second, incompatible letter system:
+
+- It builds `expectedLetters` positionally as `A, B, C…` from `wc.numControllers` — **not** from the controllers the tech actually saw.
+- It reads zone counts from **`property_controllers`**, filtered by company + customer only — **no branch filter** — so a multi-branch customer mixes locations.
+- Nothing writes `property_controllers` anymore when a controller is created through the irrigation profile (`irrigation-profile-routes.ts:291` writes `irrigation_controllers` and syncs `customers.totalControllers`, and never touches the legacy table). For any customer whose controllers were created after the profile UI shipped, this lookup finds **nothing**, `zoneCount` falls to `0`, and the implicit-N/A fill silently inserts zero rows.
+
+Rewrite it to read `irrigation_controllers` for the wet check's (company, customer, **branch**) and use the stored `letter` + `totalZones`. This is the path that decides what the manager sees as "every zone in scope", so it being quietly empty is its own bug.
+
+## Slice 5 — Show the letter with the name in the field
+
+The mobile controller picker renders "Controller T (40 zones)" six times because `resolveWetCheckControllers` returns only `{ letter, zoneCount, notes }` (`irrigation-controller-resolver.ts:17`). Techs cannot tell which controller they are standing at.
+
+Return the controller `name` and `id` as well, and render **"A — Hunter Clock - East (40 zones)"**. Even with unique letters, a name is what a tech recognises on the property.
+
+## Multi-tenancy (Rule 1)
+
+The new unique index includes `companyId` and `branchName`. Letter assignment and validation resolve scope from the controller's own company + customer + branch, never from the caller's assumed context. The backfill runs per company.
+
+## Immediate mitigation (before this ships)
+
+`extractLetter` reads the last character of the last word, so **renaming each controller to end with a space and the desired letter** — "Hunter Clock - East A", "Hunter Clock - West B" — restores unique letters today with no deploy. Ugly, temporary, and safe to undo once `letter` is stored, because Slice 1 stops deriving anything from the name.
+
+## Decisions
+
+- **Letter is stored, auto-assigned from A, and editable** (decided — Randy, 2026-07-31).
+- **Uniqueness enforced by a DB index** on (company, customer, branch, letter), not by convention.
+- **Renaming never changes the letter** (decided) — that is the entire bug.
+- **No historical zone-record repair** (decided) — the affected wet check is being deleted; this fix is forward-looking.
+
+## Done looks like
+
+- Every controller has a stored letter; a property with six controllers shows A through F.
+- Renaming a controller does not change its letter or its zone records.
+- Two controllers on one property cannot share a letter — the database refuses.
+- The Irrigation System header zone total equals the sum of the controllers' zones.
+- The mobile picker shows the letter **and** the name.
+- Wet-check submit fills implicit-N/A rows from the real controllers, branch-correct.
+- No code path derives a letter from a name or an index.
+
+## Tests
+
+- Create three controllers → letters A, B, C. Delete B, create another → new one takes **B**.
+- Rename a controller to anything → letter unchanged, existing zone records still resolve.
+- Manually set a letter to one already in use → rejected, message names the holding controller.
+- Manually set a valid free letter → accepted; list reorders by letter.
+- Two controllers, same customer+branch, same letter → **database** rejects (index test, not just route test).
+- Same letter on two different customers, or two branches of one customer → allowed.
+- Six controllers named as in the table above → six distinct letters; header zone total equals the sum of `totalZones`.
+- Wet-check submit implicit-N/A fill uses `irrigation_controllers` for the correct branch and produces one row per (letter, zone) actually in scope.
+- Backfill: legacy `property_controllers` letters honoured when collision-free; otherwise `A…` by `id` order; running it twice changes nothing.
+- Company isolation on letter assignment, validation, and backfill.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the `letter` column + unique index, the assignment helper, the edit/validate route, the backfill, and every removed `extractLetter` / positional-letter generator.
+- [ ] Screenshot: the six-controller customer showing A–F, with a correct header zone total.
+- [ ] Screenshot: mobile controller picker showing letter + name.
+- [ ] Grep proof that no `extractLetter` or `String.fromCharCode("A"…)` letter derivation remains in controller display or wet-check paths.
+- [ ] Backfill output per customer: controller name → assigned letter.
+- [ ] Test output for the collision-rejection and gap-reuse cases.
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+
+- `lib/db/src/schema/schema.ts` (`irrigation_controllers`:1804 — add `letter` + unique index; `wet_check_zone_records`:1452 and its unique index:1476; `property_controllers`:1349)
+- `artifacts/api-server/src/irrigation-controller-resolver.ts` (`extractLetter`:24, `ResolvedController`:17 — add name/id)
+- `artifacts/api-server/src/storage.ts` (`ensureIrrigationControllers`:10805 + ordering:10873, implicit-N/A fill:8738, `ensurePropertyControllers`:7752, `setCustomerControllerCount`:7955)
+- `artifacts/api-server/src/wet-check-grid.ts` (positional letters:78)
+- `artifacts/api-server/src/routes/irrigation-profile-routes.ts` (controller create:291, totalControllers sync:351/481)
+- `artifacts/irrigopro/src/components/customers/irrigation-controller-grid.tsx` (`extractLetter`:119, badge:1332)
+- `artifacts/irrigopro/src/components/customers/irrigation-system-card.tsx` (`letterFor`:22, `extractLetter`:26, letter map:55, zone total:66)
+- `artifacts/irrigopro-mobile/app/wet-check/[id]/zone/[zoneRecordId].tsx` (`Controller ${letter}` label:250)
