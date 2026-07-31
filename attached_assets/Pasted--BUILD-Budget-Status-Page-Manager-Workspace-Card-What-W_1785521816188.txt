@@ -1,0 +1,120 @@
+# BUILD — Budget Status Page + Manager Workspace Card
+
+**What & Why**
+Raised by the irrigation crews: nobody in the field can see how a customer's month-to-date billing compares to their budget, so crews keep working on customers who are already over and leave headroom unused elsewhere. The information exists — it is just not anywhere a manager or a crew looks.
+
+This ticket puts a progress bar in front of both: month-to-date spend against the month's budget allocation, with the portion already worked but not yet billed shown distinctly, because that is the part that decides whether to keep going today.
+
+## Sequencing
+
+Build **third**, after:
+
+1. `FIX - One Budget Spend Calculation` — makes every surface agree on what "spent" means.
+2. `BUILD - Seasonal Budget Model` — provides the month allocation this page measures against.
+
+Both are prerequisites, not preferences. Without (1) this page becomes a fourth disagreeing number; without (2) there is no monthly allocation to draw a bar against.
+
+## Read-only, everywhere (standing rule)
+
+Neither the page nor the card edits anything. Budget goals, curves, month overrides, thresholds, and alert routing are edited **only** in the customer profile (`CustomerForm` → `BudgetAndAlertsCard`, anchored `id="budget-and-alerts"`).
+
+Every customer row gets a **quick link** that opens that customer's profile at the budget section. No inline editing, no quick-edit modal, no second form. This is a standing rule, not a preference for this screen.
+
+## Slice 1 — The shared bar component
+
+One component, used by both the page and the card, so they can never drift:
+
+- **Track** = the month's allocation (100% of the bar width).
+- **Solid segment** = invoiced.
+- **Tint segment** = work done, not yet billed (same hue, lighter).
+- **Cap marker** = a thin rule at 100% so overage is visually obvious.
+- Over 100%, the fill **clamps at the track width** and the status pill carries the true percentage — a bar that runs off the end is unreadable.
+- Status from the customer's existing thresholds (`budgetSoftThresholdPercent` 75, `budgetHardThresholdPercent` 100): below soft → **Go**, soft to hard → **Slow down**, at or above hard → **Stop**.
+- A customer with **no allocation** renders as **Unset** — a neutral empty track, never a full or zero bar.
+
+Colour carries meaning here, so the three states must also be distinguishable without colour: the pill text ("Go" / "Slow down" / "Stop") does that work, and must always be present.
+
+## Slice 2 — Budget status page
+
+New route in the sidebar. Rule 3: it must be reachable from navigation and be the one canonical component for this screen.
+
+- **Header: company roll-up.** All customers' combined spend against the sum of their month allocations, plus season-to-date against season-to-date target and the annual goal. This is the $300,000 plan in the sheet.
+- **Per-customer rows**, sorted worst-first by percentage of allocation. Each row shows the monthly bar, invoiced and pending amounts, the month's allocation, and a thinner **season-to-date** bar beneath so a manager can tell a bad month from a bad year.
+- **Filters:** status (Go / Slow down / Stop / Unset), and a toggle to hide customers with no budget set.
+- **Month selector**, defaulting to the current month, so a manager can look back.
+- Each row links to the customer profile budget section.
+- Show when the underlying spend data was last refreshed.
+
+## Slice 3 — Manager Workspace card
+
+A compact version on the Manager Workspace hub — no new route.
+
+- Header line: counts by status ("2 over cap · 3 approaching").
+- The **top few at-risk customers** only (worst-first, roughly four rows), each with the monthly bar.
+- Link to the full page.
+- Consistent with the Manager Workspace hub work already in progress; it is a card in that layout, not a new screen.
+
+## Slice 4 — Crew view and visibility
+
+Budget reads are currently restricted to `super_admin`, `company_admin`, and `billing_manager` (`budget-routes.ts:25`). `irrigation_manager` was **deliberately excluded** — the comment says they get pricing but not budget signals. That decision is being reversed, carefully.
+
+- **`irrigation_manager`** gains full access — dollars, caps, everything a billing manager sees.
+- **`field_tech`** gains a **restricted** view: the bar and the status word only. **No cap, no spend, no remaining, no annual goal — no dollar figures at all.** The percentage is not shown either; a percentage of a hidden number is still a leak by inference.
+- The restriction is enforced **server-side**. The tech-facing endpoint returns `{ customerId, customerName, status, fillPercent }` and nothing else. Do not send full budget data and hide it in the client — that is the pattern `applyPricingVisibility` already exists to avoid; follow it.
+- **Scope (decided):** techs see **all customers with a budget set**, sorted worst-first — not only their assigned customers. Crews self-direct where to go next, so the full list is the point.
+- Crew view is read-only and has no link into the customer profile editor.
+
+## Multi-tenancy (Rule 1)
+
+Every read is company-scoped from the caller's company, including the roll-up header, which must never aggregate across companies. `super_admin` passes an explicit company. The tech endpoint is scoped identically — a restricted payload is still a tenant-scoped one.
+
+## Decisions
+
+- **Spend = invoiced + work done not yet billed**, shown as two segments (decided).
+- **Advisory only** (decided) — nothing is blocked. A crew can still start work on an over-cap customer; the signal informs, the manager decides.
+- **Techs see status and bar, no dollars, no percentage** (decided).
+- **Techs see all customers with a budget**, not just their assignments (decided).
+- **Read-only; editing stays in the customer profile** (decided).
+- **Card and page both**, sharing one bar component (decided).
+
+## Done looks like
+
+- A manager opens the Manager Workspace and sees which customers are over budget without clicking anything.
+- The full page shows every customer ranked by budget risk, with a company roll-up against the month's target.
+- A crew sees Go / Slow down / Stop per customer with no dollar figures anywhere.
+- Work already done but not yet billed is visible as its own segment — the reason this was raised.
+- Nothing on either surface edits a budget; every row links to the customer profile.
+- A customer with no budget set reads as Unset, never as over.
+
+## Tests
+
+- Bar rendering: 40% invoiced + 20% pending on a $5,000 allocation shows two segments and a **Go** pill; 98% + 18% clamps at the track and shows **Stop — 116%**.
+- Threshold boundaries: exactly 75% → Slow down; exactly 100% → Stop; 74.9% → Go. A customer with non-default thresholds uses their own values.
+- No allocation → **Unset**, neutral track, excluded from the "over cap" count in the header.
+- Company roll-up equals the sum of the visible customers' allocations and spend, and never includes another company.
+- Tech endpoint returns **no** cap, spend, remaining, or percentage — asserted on the response body, not the rendered output.
+- `irrigation_manager` sees full figures; `field_tech` does not; a role outside the set is refused.
+- Card and page render identical status and fill for the same customer (shared-component test).
+- Every customer row links to the profile budget anchor; no edit control exists on either surface.
+- Month selector: viewing a past month uses that month's allocation and that month's spend window.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the shared bar component, the page route and its nav entry, the Manager Workspace card, the tech endpoint, and the role gate change.
+- [ ] Screenshot: budget page with company roll-up and at least one customer in each of Go / Slow down / Stop / Unset.
+- [ ] Screenshot: Manager Workspace card.
+- [ ] Screenshot: crew view on a phone-width viewport, with no dollar figures visible.
+- [ ] Captured tech-endpoint response body proving no monetary fields are present.
+- [ ] Grep proof that neither surface contains a budget edit control.
+- [ ] Test output for the clamping, threshold-boundary, and unset cases.
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+
+- `artifacts/api-server/src/routes/budget-routes.ts` (visibility roles :25, `/budget-usage` :41 — add roll-up and tech-scoped reads)
+- `artifacts/api-server/src/routes/financial-pulse.ts` (customer summary :1361 — reuse the ranking approach)
+- `artifacts/api-server/src/financial-pulse-math.ts` (`rankCustomers` budget_risk ordering :736–751)
+- `artifacts/irrigopro/src/pages/` (new budget status page + nav registration in `App.tsx` and `components/company-admin-app.tsx`)
+- `artifacts/irrigopro/src/components/customer-form.tsx` (`BudgetAndAlertsCard` :877, anchor `id="budget-and-alerts"` :904 — link target)
+- `artifacts/irrigopro/src/pages/customer-profile.tsx` (`BudgetCard` :951 — reuse the shared bar)
+- Manager Workspace hub component (card placement — coordinate with the in-progress hub work)

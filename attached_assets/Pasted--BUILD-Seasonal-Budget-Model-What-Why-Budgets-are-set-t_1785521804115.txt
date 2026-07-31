@@ -1,0 +1,137 @@
+# BUILD — Seasonal Budget Model
+
+**What & Why**
+Budgets are set today in a spreadsheet, not in IrrigoPro. The real model is an **annual irrigation-billing goal per customer, distributed across a seven-month season on a fixed curve**:
+
+| Apr | May | Jun | Jul | Aug | Sep | Oct |
+|---|---|---|---|---|---|---|
+| 0% | 10% | 20% | 20% | 20% | 20% | 10% |
+
+Every row in the 2026 sheet follows it exactly. College Hills $7,500 → 0 / 750 / 1,500 / 1,500 / 1,500 / 1,500 / 750. Huntington Trails $30,000 → 0 / 3,000 / 6,000 / 6,000 / 6,000 / 6,000 / 3,000. Company goal: $300,000 across roughly 50 customers.
+
+The current schema cannot express this. `customers.monthlyBudgetCap` is a single flat number and `annualBudgetCap` is an unrelated second figure — there is no way to say "July is 20% of the annual goal." So a manager cannot see, in the app, whether a customer is tracking against the plan the business actually runs on.
+
+This ticket moves that spreadsheet into the product.
+
+## Sequencing
+
+Build **after** `FIX - One Budget Spend Calculation`, which makes all three surfaces agree on what "spent" means. This ticket changes what spend is measured **against**; that one fixes the measuring. Building this first would spread a wrong number across a new UI.
+
+## Where this is edited (standing rule)
+
+**All budget editing lives in the customer profile** — the existing `CustomerForm` dialog, `BudgetAndAlertsCard` (`customer-form.tsx:877`, anchored `id="budget-and-alerts"`). The budget status page built in the follow-on ticket is **read-only** and links here.
+
+Do not add an inline editor, a quick-edit modal, or a second budget form anywhere else. One place to edit a customer detail, everywhere else reads.
+
+## The model
+
+**Company level** — the default season curve, set once:
+
+- `budget_season_curves` or a JSON column on the company profile: an ordered list of `{ month: 1–12, percent: number }`. Default seeded to Apr 0, May 10, Jun 20, Jul 20, Aug 20, Sep 20, Oct 10.
+- Percentages must total 100. Months outside the season are simply absent (not zero rows), except April, which is explicitly 0% in the current curve and should stay visible so a manager can see the season starts there.
+
+**Customer level:**
+
+- `annualBudgetGoal: decimal(12,2)` on `customers` — the "2026 Total Goal" figure.
+- `budgetSeasonCurveOverride: jsonb | null` — same shape as the company curve; null means use the company default.
+- New table `customer_budget_months`:
+  - `companyId`, `customerId`, `year` (int), `month` (1–12)
+  - `amount: decimal(12,2)`
+  - `isManualOverride: boolean default false`
+  - unique on `(companyId, customerId, year, month)`
+  - This is the authoritative monthly figure. Generated from goal × curve, then editable.
+
+**`monthlyBudgetCap` and `annualBudgetCap` are retired.** `annualBudgetCap` is replaced by `annualBudgetGoal`; `monthlyBudgetCap` is replaced by the per-month row. Migrate existing values (see Backfill), stop reading the old columns, drop them in a follow-up.
+
+Thresholds (`budgetSoftThresholdPercent` 75, `budgetHardThresholdPercent` 100), alert recipients, channels, and the customer-notify toggle are **unchanged** — they now apply against the month's allocation instead of a flat cap.
+
+## Slice 1 — Schema + generation
+
+1. Add the company curve, `annualBudgetGoal`, `budgetSeasonCurveOverride`, and `customer_budget_months`.
+2. Generation helper: given (customer, year), resolve the effective curve (override, else company default), multiply by `annualBudgetGoal`, and upsert one row per season month. **Rows with `isManualOverride = true` are never overwritten** by regeneration.
+3. Rounding: allocate to whole cents and put any remainder on the **last** season month so the generated months always sum exactly to the goal. State the rule in code comments — an off-by-a-cent budget is a support call.
+4. Regeneration triggers: changing `annualBudgetGoal`, changing the curve, or an explicit "regenerate" action. Each regeneration preserves manual overrides and reports what changed.
+
+## Slice 2 — Customer profile editing
+
+In `BudgetAndAlertsCard`:
+
+- **Annual goal** input, replacing the two cap fields.
+- **Season curve** selector: "Company default" or "Custom for this customer", with the custom editor showing the seven month percentages and validating that they total 100.
+- **Month grid** — seven cells, Apr through Oct, showing the generated amount. Each is editable; an edited cell is visibly marked as an override and can be reset to generated.
+- **Sum indicator (decided: goal is locked, drift is shown).** When the months no longer total the annual goal, show a plain notice — "Months total $14,400 — $400 over the annual goal." Do **not** silently rebalance and do **not** block saving. The manager may genuinely want July higher without changing the yearly goal.
+- Year selector so next season can be planned before it starts. Default to the current year.
+- Role gate unchanged: budget configuration remains restricted to the roles that can already edit it (`customer-form.tsx:690` — everyone else sees the read-only stub).
+
+## Slice 3 — Reads
+
+- `GET /api/customers/:id/budget-usage` returns the **current month's allocation** from `customer_budget_months` as the cap, plus season-to-date target (sum of allocations for elapsed season months, current month included) and season-to-date spend.
+- A company roll-up read: for a given month, the sum of all customers' allocations and the sum of their spend, for the page header in the follow-on ticket.
+- **No rollover** (decided): each month stands alone. Underspend in June does not raise July's allocation. Season-to-date is reported alongside so the manager can see whether the year is tracking, but it never changes the monthly number.
+- Months with no allocation row (customer has no goal, or the month is outside the season) report as **unset**, not zero — a customer without a budget must not read as 100% over.
+
+## Backfill
+
+- For each customer with a non-null `annualBudgetCap`, set `annualBudgetGoal` to that value and generate the current year's months from the company default curve.
+- For each customer with `monthlyBudgetCap` set but no annual figure, seed `annualBudgetGoal` as null and create **manual-override** rows for the current season at that flat monthly value — preserving today's behaviour rather than inventing a goal.
+- Report per customer what was migrated and what was generated. Idempotent.
+
+**No import.** The 2026 goals are entered by hand in the customer profile (decided). There is no CSV importer, no sheet parser, and no bulk-paste tool in this ticket — do not build one.
+
+That makes the entry path itself worth getting right: for a typical customer a manager types **one number** (the annual goal) and the curve produces all seven months. The goal field should be the first thing in the section, accept a plain number as well as a formatted one ("14000" and "$14,000.00" both work), and show the generated months immediately so the manager can confirm before saving.
+
+## Multi-tenancy (Rule 1)
+
+`customer_budget_months` carries `companyId` and every query filters on it. The company curve is per company. Generation, regeneration, and the roll-up read resolve scope from the customer's own company, never from caller context.
+
+## Decisions
+
+- **Annual goal × season curve generates monthly allocations** (decided).
+- **Curve is a company default, overridable per customer** (decided).
+- **Months are individually editable; the annual goal stays locked and drift is shown** (decided).
+- **No rollover; season-to-date shown alongside** (decided).
+- **All editing in the customer profile only** (decided) — other views are read-only with links.
+- **`monthlyBudgetCap` / `annualBudgetCap` retired** (decided) — migrate, stop reading, drop later.
+- **Goals are entered manually; no importer** (decided) — one number per customer, the curve does the rest.
+
+## Done looks like
+
+- A customer's 2026 goal is entered once and produces the same seven monthly figures the spreadsheet does.
+- A manager can override a single month without changing the annual goal, and sees when the two no longer agree.
+- Budget usage reports against the current month's allocation, with season-to-date alongside.
+- A customer with no goal reads as unset everywhere, never as over.
+- Budget editing exists in exactly one place in the app.
+
+## Tests
+
+- $7,500 goal on the default curve produces 0 / 750 / 1,500 / 1,500 / 1,500 / 1,500 / 750 and sums to exactly $7,500.
+- A goal that does not divide evenly (e.g. $10,001) still sums exactly to the goal, with the remainder on the last season month.
+- A custom curve totalling other than 100 is rejected with a clear message.
+- Editing July to $3,200 leaves the other months and the annual goal untouched, marks July as an override, and surfaces the drift notice.
+- Regenerating after a goal change preserves the July override and updates every other month.
+- Resetting an override restores the generated value.
+- A month outside the season, and a customer with no goal, both report **unset** — not zero, not over.
+- Season-to-date target for July equals May + June + July allocations.
+- Backfill: a customer with `annualBudgetCap` migrates and generates; a customer with only `monthlyBudgetCap` gets manual-override rows at that value; running twice changes nothing.
+- Goal entry accepts `14000`, `14,000`, and `$14,000.00` and produces the same seven months for each.
+- Company isolation on generation, reads, and the roll-up.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the schema additions, the generation helper, the rounding rule, the profile editor, and the reads.
+- [ ] Screenshot: a customer profile showing annual goal, curve selector, seven month cells with one override, and the drift notice.
+- [ ] Output proving a $7,500 goal reproduces the spreadsheet row exactly.
+- [ ] Backfill output per customer.
+- [ ] Grep proof that nothing reads `monthlyBudgetCap` or `annualBudgetCap` anymore.
+- [ ] Test output for the rounding, override-preservation, and unset cases.
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+
+- `lib/db/src/schema/schema.ts` (`customers` budget fields :107–117; new `customer_budget_months`; company curve)
+- `artifacts/api-server/src/budget-status.ts` (period helpers — extend for season windows)
+- `artifacts/api-server/src/routes/budget-routes.ts` (`/budget-usage` :41)
+- `artifacts/api-server/src/services/budget-alert-service.ts` (cap resolution :446–451 — now per-month)
+- `artifacts/api-server/src/routes/financial-pulse.ts` (cap parsing :1425–1428)
+- `artifacts/irrigopro/src/components/customer-form.tsx` (`BudgetAndAlertsCard` :877, zod schema :48–75, defaults :138–148)
+- `artifacts/irrigopro/src/pages/customer-profile.tsx` (`BudgetCard` :951 — read-only display of the new model)

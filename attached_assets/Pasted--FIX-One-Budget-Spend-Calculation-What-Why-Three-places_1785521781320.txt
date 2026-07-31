@@ -1,0 +1,107 @@
+# FIX — One Budget Spend Calculation
+
+**What & Why**
+Three places in the codebase compute "how much has this customer spent this month," and they disagree. The customer-profile Budget card, the alert dispatcher, and the Financial Pulse customer summary each hand-rolled the same loop with different exclusions, so the same customer on the same day shows different numbers on different screens — and alerts fire off the lowest of the three.
+
+This has to be one function before any new budget UI is built, or the new budget page becomes a fourth answer.
+
+## Current state (confirmed in code)
+
+| Surface | Excludes | Includes |
+|---|---|---|
+| `GET /api/customers/:id/budget-usage` (`budget-routes.ts:90`) | draft, cancelled, superseded | invoices only |
+| `checkBudgetThresholds` (`budget-alert-service.ts:471`) | draft, cancelled, superseded | invoices only |
+| Financial Pulse customer summary (`financial-pulse.ts:1396`) | `INVOICE_EXCLUDED_STATUSES` — draft, cancelled, superseded, **merged, failed** | invoices **+ uninvoiced wet-check billings by workDate** |
+
+Two real consequences:
+
+- **Merged invoices double-count** in the first two. `merged` means the invoice was absorbed into a surviving one (`storage.ts:7062` sets it, with `mergedIntoInvoiceId`); the amount lives on the survivor. Counting both inflates spend. `failed` is likewise counted.
+- **Uninvoiced work is invisible to alerts.** Task #814 added uninvoiced wet-check billings to Financial Pulse only. A customer can read as over budget on Financial Pulse and never trigger an alert.
+
+The correct exclusion list already exists as `INVOICE_EXCLUDED_STATUSES` (`financial-pulse-math.ts:183`); the budget paths just never used it.
+
+## Slice 1 — One function
+
+New exported function, pure where possible and unit-testable without HTTP or a live DB:
+
+```ts
+computeCustomerSpend(
+  customerId: number,
+  companyId: number,
+  window: { start: Date; end: Date },
+): Promise<{
+  invoiced: number;          // non-terminal invoice totals in window, by createdAt
+  pendingNotBilled: number;  // uninvoiced wet-check billings in window, by workDate
+  total: number;             // invoiced + pendingNotBilled
+}>
+```
+
+- **Exclusions come from `INVOICE_EXCLUDED_STATUSES`** — draft, cancelled, superseded, merged, failed. Import it; do not re-declare the list.
+- **Invoices bucket by `createdAt`**, matching the existing dashboard rollups.
+- **Uninvoiced wet-check billings bucket by `workDate`** and are included only when `invoiceId` is null, matching the Task #814 logic at `financial-pulse.ts:1409`.
+- **Returns the split, not just the total.** Every caller needs both numbers — the new budget page renders them as two bar segments, and returning only a sum would force callers to recompute.
+- **Company-scoped** (Rule 1): callers pass `companyId` and the query filters on it. See Slice 3.
+
+## Slice 2 — All three surfaces call it
+
+- `budget-routes.ts:88–102` — delete the inline loop; call the shared function. The response gains `monthlyInvoiced` / `monthlyPendingNotBilled` alongside the existing `monthlySpend` (now the total), same for annual. Existing fields keep their names so the customer-profile Budget card doesn't break.
+- `budget-alert-service.ts:469–484` — delete the inline loop; call the shared function. **This changes alert behaviour deliberately:** alerts now fire on invoiced + pending, so a customer whose uninvoiced work crosses a threshold gets an alert they previously never got. Expect a burst of alerts on first deploy — see Rollout.
+- `financial-pulse.ts:1396–1418` — delete the inline loop; call the shared function. Numbers here should not change; that surface was already correct. If they do change, the discrepancy is the merged/failed exclusion, which is a fix.
+
+## Slice 3 — Close the tenancy hole in the alert service
+
+`budget-alert-service.ts:468` calls `storage.getInvoicesByCustomer(customer.id, null)` — `null` means **no company scope** (`storage.ts:6819`). The read route two files away does this correctly. Pass `customer.companyId`. Rule 1.
+
+## Rollout — the alert burst
+
+Because alerts now see uninvoiced work, customers already over threshold on pending-not-billed will fire on the first run after deploy. The dedup index on `customer_budget_alert_events` means each fires **once** per (customer, period, threshold, period) and then goes quiet — this is a one-time catch-up, not an ongoing flood.
+
+Still, it should not arrive unannounced. Before deploying, run a **read-only preview** (a Super Admin diagnostic or a logged dry run) listing which customers would newly cross soft or hard thresholds under the new calculation. Randy reviews that list first.
+
+## Out of scope
+
+- The seasonal budget model (annual goal spread across Apr–Oct) — that is `BUILD - Seasonal Budget Model`. This ticket keeps the existing `monthlyBudgetCap` / `annualBudgetCap` fields exactly as they are and only fixes how **spend** is measured.
+- Any UI change beyond the additive response fields.
+- Push-channel wiring, recipient validation, and the alert dedup reset — separate concerns noted in `AUDIT - Per-Customer Budget System`.
+
+## Decisions
+
+- **Spend = invoiced + work done not yet billed** (decided) — a crew deciding whether to keep working needs to see work already performed, not just what has been invoiced.
+- **`INVOICE_EXCLUDED_STATUSES` is the single exclusion list** (decided) — no hand-rolled copies.
+- **The function returns the split** (decided) — callers need both numbers.
+
+## Done looks like
+
+- One function computes customer spend; no surface has its own loop.
+- The customer profile, Financial Pulse, and alerts show the same number for the same customer on the same day.
+- Merged and failed invoices no longer inflate budget spend anywhere.
+- Alerts account for uninvoiced work.
+- The alert service is company-scoped.
+
+## Tests
+
+- A customer with one `merged` invoice: spend excludes it; before the fix it was counted (regression test).
+- A `failed` invoice is excluded; `draft`, `cancelled`, `superseded` remain excluded.
+- An uninvoiced wet-check billing inside the window is counted in `pendingNotBilled`; one already attached to an invoice is **not** double-counted.
+- Window boundaries: an invoice created on the first instant of the month is in; the last instant of the prior month is out. Same for wet-check `workDate`.
+- All three surfaces return identical `total` for the same customer and window.
+- An alert fires for a customer pushed over threshold by pending-not-billed alone.
+- Company isolation: the alert service cannot read another company's invoices; a customer id from company B returns nothing for a company A caller.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the shared function and each of the three call sites that replaced an inline loop.
+- [ ] Grep proof that no budget surface still hand-rolls a status exclusion list.
+- [ ] Screenshot or output showing the same customer's spend matching across the customer profile and Financial Pulse.
+- [ ] Preview output listing customers that would newly cross a threshold, reviewed before deploy.
+- [ ] Test output for the merged-invoice regression and the pending-not-billed alert case.
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+
+- `artifacts/api-server/src/budget-status.ts` (pure helpers — good home for the shared function, or a sibling module)
+- `artifacts/api-server/src/routes/budget-routes.ts` (inline loop :88–102)
+- `artifacts/api-server/src/services/budget-alert-service.ts` (inline loop :469–484, unscoped fetch :468)
+- `artifacts/api-server/src/routes/financial-pulse.ts` (inline loop :1396–1418, WCB inclusion :1409)
+- `artifacts/api-server/src/financial-pulse-math.ts` (`INVOICE_EXCLUDED_STATUSES`:183)
+- Tests: `budget-status.test.ts`, `budget-routes.test.ts`, `budget-alert-service.test.ts`, `financial-pulse-customer-summary.test.ts`
