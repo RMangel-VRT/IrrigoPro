@@ -8,6 +8,10 @@ import { z } from "zod/v4";
 import { insertCustomerSchema } from "@workspace/db";
 import { withDbRetry } from "@workspace/db";
 import { storage } from "../storage";
+import {
+  generateBudgetMonths,
+  applyMonthOverride,
+} from "../services/generate-budget-months";
 
 export interface RegisterCustomerRoutesDeps {
   requireAuthentication: RequestHandler;
@@ -77,6 +81,25 @@ export function registerCustomerRoutes(
   app.put("/api/customers/:id", requireAuthentication, requireCustomerEditAccess, async (req, res) => {
     try {
       const id = parseInt(String(req.params.id));
+
+      // Task #1865 — extract budget-generation fields that live outside the
+      // insertCustomerSchema (they are post-save side effects, not columns).
+      const rawBudgetYear = req.body?.budgetYear;
+      const budgetYear =
+        typeof rawBudgetYear === "number" && Number.isFinite(rawBudgetYear)
+          ? rawBudgetYear
+          : new Date().getFullYear();
+      const budgetMonthOverrides = req.body?.budgetMonthOverrides as
+        | Record<string, string | number>
+        | null
+        | undefined;
+      // Whether to trigger regeneration: present whenever the form includes
+      // the annual-goal fields (even if unchanged — generateBudgetMonths is
+      // idempotent for non-override months).
+      const hasBudgetFields =
+        "annualBudgetGoal" in (req.body ?? {}) ||
+        "budgetSeasonCurveOverride" in (req.body ?? {});
+
       let customerData = insertCustomerSchema.partial().parse(req.body);
       // Only billing_manager may write billingNotes (use authenticated role, not raw header)
       if ('billingNotes' in customerData && req.authenticatedUserRole !== 'billing_manager') {
@@ -88,6 +111,47 @@ export function registerCustomerRoutes(
         res.status(404).json({ message: "Customer not found" });
         return;
       }
+
+      // Task #1865 — regenerate monthly allocations when budget fields change.
+      // generateBudgetMonths is idempotent: it skips isManualOverride rows and
+      // only upserts generated rows, so running it on every PUT is safe.
+      if (hasBudgetFields) {
+        try {
+          await generateBudgetMonths(id, budgetYear);
+        } catch (budgetErr) {
+          // Validation error (e.g. curve not 100%) — propagate to client.
+          if (budgetErr instanceof Error && budgetErr.message.includes("Season curve")) {
+            res.status(400).json({ message: budgetErr.message });
+            return;
+          }
+          req.log.warn({ err: budgetErr, customerId: id }, "budget month generation failed (non-fatal)");
+        }
+      }
+
+      // Apply per-month manual overrides from the form.
+      if (budgetMonthOverrides && typeof budgetMonthOverrides === "object") {
+        for (const [monthStr, rawAmount] of Object.entries(budgetMonthOverrides)) {
+          const month = parseInt(monthStr, 10);
+          const amountStr = String(rawAmount ?? "").replace(/[$,\s]/g, "");
+          const amount = parseFloat(amountStr);
+          if (
+            Number.isFinite(month) &&
+            month >= 1 &&
+            month <= 12 &&
+            Number.isFinite(amount) &&
+            amount >= 0
+          ) {
+            await applyMonthOverride({
+              customerId: id,
+              companyId: customer.companyId,
+              year: budgetYear,
+              month,
+              amount,
+            });
+          }
+        }
+      }
+
       res.json(applyBillingNotesVisibility(req, customer));
     } catch (error) {
       if (error instanceof z.ZodError) {

@@ -1,9 +1,10 @@
 // Task #687 — Financial Pulse Slice 1.
+// Task #1865 — Seasonal Budget Model: cap resolution now uses
+// customerBudgetMonths for monthly allocations (retired flat cap columns
+// are preserved in schema.ts for a future cleanup migration).
 //
 // GET /api/customers/:id/budget-usage — read-only visibility endpoint
-// powering the "Budget & Alerts" card on the customer profile and the
-// live preview in the customer-edit form. Out of scope here: firing the
-// alerts themselves (Slice 2) and the /financial-pulse page (Slice 3).
+// GET /api/budget/company-summary    — company roll-up for status page
 
 import type { Express, RequestHandler } from "express";
 import {
@@ -16,8 +17,11 @@ import {
 import { computeCustomerSpend } from "../budget-spend";
 import { storage } from "../storage";
 import { db } from "../db";
-import { customers as customersTable } from "@workspace/db/schema";
-import { eq, isNotNull, or } from "drizzle-orm";
+import {
+  customers as customersTable,
+  customerBudgetMonths,
+} from "@workspace/db/schema";
+import { and, eq, inArray } from "drizzle-orm";
 import { getRecentBudgetAlertEvents } from "../services/budget-alert-service";
 
 export interface RegisterBudgetRoutesDeps {
@@ -38,6 +42,10 @@ function parseDecimal(raw: unknown): number | null {
   const n = typeof raw === "number" ? raw : parseFloat(String(raw));
   return Number.isFinite(n) ? n : null;
 }
+
+// Season months for the default irrigation curve (Apr–Oct). Used to compute
+// season-to-date targets when no custom curve is configured.
+const DEFAULT_SEASON_MONTH_RANGE = { first: 4, last: 10 };
 
 export function registerBudgetRoutes(
   app: Express,
@@ -80,55 +88,114 @@ export function registerBudgetRoutes(
         const { monthKey, yearKey } = getPeriodKeys(now);
         const monthWin = getMonthWindow(now);
         const yearWin = getYearWindow(now);
+        const currentYear = now.getFullYear();
+        const currentMonth = now.getMonth() + 1; // 1-12
 
-        // Use the shared computeCustomerSpend function so budget-routes,
-        // budget-alert-service, and financial-pulse all agree on the number.
-        // company scope: super_admin passes null (global), everyone else is
-        // scoped to their own company.
-        const spendCompanyId = role === "super_admin" ? null : (callerCompanyId ?? null);
-        const [monthSpend, yearSpend] = await Promise.all([
+        const spendCompanyId =
+          role === "super_admin" ? null : (callerCompanyId ?? null);
+
+        // ── Task #1865: resolve monthly allocation from customerBudgetMonths ──
+        // If no row exists (no goal set or month outside season), return null
+        // — never treat absence as zero.
+        const [monthRow] = await db
+          .select({ amount: customerBudgetMonths.amount })
+          .from(customerBudgetMonths)
+          .where(
+            and(
+              eq(customerBudgetMonths.customerId, id),
+              eq(customerBudgetMonths.year, currentYear),
+              eq(customerBudgetMonths.month, currentMonth),
+            ),
+          );
+        const monthlyAllocation = monthRow
+          ? parseDecimal(monthRow.amount)
+          : null;
+
+        // ── Season-to-date target: sum allocations for elapsed season months ─
+        const elapsedSeasonMonths: number[] = [];
+        for (
+          let m = DEFAULT_SEASON_MONTH_RANGE.first;
+          m <= Math.min(currentMonth, DEFAULT_SEASON_MONTH_RANGE.last);
+          m++
+        ) {
+          elapsedSeasonMonths.push(m);
+        }
+        let seasonToDateTarget = 0;
+        if (elapsedSeasonMonths.length > 0) {
+          const seasonRows = await db
+            .select({ amount: customerBudgetMonths.amount })
+            .from(customerBudgetMonths)
+            .where(
+              and(
+                eq(customerBudgetMonths.customerId, id),
+                eq(customerBudgetMonths.year, currentYear),
+                inArray(customerBudgetMonths.month, elapsedSeasonMonths),
+              ),
+            );
+          seasonToDateTarget = seasonRows.reduce(
+            (s, r) => s + (parseDecimal(r.amount) ?? 0),
+            0,
+          );
+        }
+
+        // ── Spend computations ────────────────────────────────────────────────
+        // Season-to-date spend: from April 1 through end of current month.
+        const seasonStart = new Date(currentYear, 3, 1); // April 1
+        const seasonTDEnd = new Date(currentYear, currentMonth, 1); // exclusive
+
+        const [monthSpend, yearSpend, seasonTDSpendResult] = await Promise.all([
           computeCustomerSpend(id, spendCompanyId, monthWin),
           computeCustomerSpend(id, spendCompanyId, yearWin),
+          computeCustomerSpend(id, spendCompanyId, {
+            start: seasonStart,
+            end: seasonTDEnd,
+          }),
         ]);
+
+        const seasonToDateSpend = seasonTDSpendResult.total;
 
         const soft = customer.budgetSoftThresholdPercent ?? 75;
         const hard = customer.budgetHardThresholdPercent ?? 100;
+
+        // ── Monthly period: cap = this month's allocation (null = unset) ─────
         const monthly = computePeriodUsage(
-          parseDecimal(customer.monthlyBudgetCap),
+          monthlyAllocation,
           monthSpend.total,
           soft,
           hard,
           monthKey,
         );
+
+        // ── Annual period: cap = customer's annualBudgetGoal ─────────────────
+        const annualGoal = parseDecimal((customer as any).annualBudgetGoal);
         const annual = computePeriodUsage(
-          parseDecimal(customer.annualBudgetCap),
+          annualGoal,
           yearSpend.total,
           soft,
           hard,
           yearKey,
         );
 
-        // Flat response shape — slice 1 contract (unchanged field names):
-        //   customerId, softThresholdPercent, hardThresholdPercent,
-        //   currentMonthKey, currentYearKey,
-        //   monthly{Cap,Spend,Percent,Status},
-        //   annual{Cap,Spend,Percent,Status}
-        // Task #1864 adds the invoiced/pendingNotBilled breakdown fields so
-        // the Budget card can show uninvoiced work separately without a
-        // breaking change (existing consumers only read the existing fields).
         res.json({
           customerId: id,
           softThresholdPercent: soft,
           hardThresholdPercent: hard,
           currentMonthKey: monthKey,
           currentYearKey: yearKey,
-          monthlyCap: monthly.cap,
+          // Monthly allocation (null = unset; month outside season or no goal)
+          monthlyAllocation,
+          monthlyCap: monthlyAllocation, // kept for backward compat
           monthlySpend: monthly.spend,
           monthlyInvoiced: monthSpend.invoiced,
           monthlyPendingNotBilled: monthSpend.pendingNotBilled,
           monthlyPercent: monthly.percent,
           monthlyStatus: monthly.status,
-          annualCap: annual.cap,
+          // Season-to-date
+          seasonToDateTarget,
+          seasonToDateSpend,
+          // Annual
+          annualGoal,
+          annualCap: annualGoal, // kept for backward compat
           annualSpend: annual.spend,
           annualInvoiced: yearSpend.invoiced,
           annualPendingNotBilled: yearSpend.pendingNotBilled,
@@ -191,22 +258,122 @@ export function registerBudgetRoutes(
     },
   );
 
+  // Task #1865 — Company budget roll-up for the budget status page header.
+  // GET /api/budget/company-summary?year=YYYY&month=MM
+  // Returns sum of all customers' allocations and spend for the given month,
+  // scoped to the caller's company.
+  app.get(
+    "/api/budget/company-summary",
+    requireAuthentication,
+    async (req: any, res) => {
+      try {
+        const role = req.authenticatedUserRole as string | undefined;
+        if (!role || !VISIBILITY_ROLES.has(role)) {
+          res.status(403).json({ message: "Forbidden" });
+          return;
+        }
+
+        const callerCompanyId = req.authenticatedUserCompanyId as
+          | number
+          | null
+          | undefined;
+        if (role !== "super_admin" && callerCompanyId == null) {
+          res.status(403).json({ message: "No company context" });
+          return;
+        }
+
+        const now = new Date();
+        const rawYear = req.query.year as string | undefined;
+        const rawMonth = req.query.month as string | undefined;
+        const year = rawYear ? parseInt(rawYear, 10) : now.getFullYear();
+        const month = rawMonth ? parseInt(rawMonth, 10) : now.getMonth() + 1;
+
+        if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) {
+          res.status(400).json({ message: "Invalid year or month" });
+          return;
+        }
+
+        // Company scope: super_admin may pass ?companyId=N; others are locked
+        // to their own company.
+        let companyId: number | null = callerCompanyId ?? null;
+        if (role === "super_admin" && req.query.companyId) {
+          const n = parseInt(String(req.query.companyId), 10);
+          if (!Number.isFinite(n) || n <= 0) {
+            res.status(400).json({ message: "Invalid companyId" });
+            return;
+          }
+          companyId = n;
+        }
+
+        // Sum all allocations for the month across all company customers.
+        const allocationRows = companyId != null
+          ? await db
+              .select({ amount: customerBudgetMonths.amount })
+              .from(customerBudgetMonths)
+              .where(
+                and(
+                  eq(customerBudgetMonths.companyId, companyId),
+                  eq(customerBudgetMonths.year, year),
+                  eq(customerBudgetMonths.month, month),
+                ),
+              )
+          : await db
+              .select({ amount: customerBudgetMonths.amount })
+              .from(customerBudgetMonths)
+              .where(
+                and(
+                  eq(customerBudgetMonths.year, year),
+                  eq(customerBudgetMonths.month, month),
+                ),
+              );
+
+        const totalAllocation = allocationRows.reduce(
+          (s, r) => s + (parseDecimal(r.amount) ?? 0),
+          0,
+        );
+
+        // Compute total spend for the month across all scoped customers.
+        const monthWin = {
+          start: new Date(year, month - 1, 1),
+          end: new Date(year, month, 1),
+        };
+
+        // Get customer IDs in scope for spend computation.
+        const scopedCustomers = companyId != null
+          ? await db
+              .select({ id: customersTable.id })
+              .from(customersTable)
+              .where(eq(customersTable.companyId, companyId))
+          : await db.select({ id: customersTable.id }).from(customersTable);
+
+        let totalSpend = 0;
+        for (const { id: custId } of scopedCustomers) {
+          const spend = await computeCustomerSpend(
+            custId,
+            companyId,
+            monthWin,
+          );
+          totalSpend += spend.total;
+        }
+
+        res.json({
+          year,
+          month,
+          companyId,
+          totalAllocation,
+          totalSpend,
+          customersWithAllocation: allocationRows.length,
+        });
+      } catch (error) {
+        console.error("Error computing company budget summary:", error);
+        res.status(500).json({ message: "Failed to compute company summary" });
+      }
+    },
+  );
+
   // Task #1864 — Dry-run budget threshold preview (Super Admin only).
-  //
-  // Read-only diagnostic: lists every customer that would be in
-  // "approaching" or "over" status under the new computeCustomerSpend
-  // calculation. Run this before deploying the alert service change to
-  // understand which customers would newly receive alerts on the first
-  // post-deploy invoice finalization.
-  //
-  // GET /api/admin/budget-threshold-preview
-  //   ?companyId=N  — optional; filter to a single company
-  //
-  // This route is intentionally NOT registered in the staging/prod
-  // environment automatically — it must be reviewed and removed once
-  // the deployment window has passed. The dedup index ensures each
-  // alert fires only once per period, but a burst of first-time fires
-  // should be reviewed before going live.
+  // Task #1865 — updated to use customerBudgetMonths for monthly cap and
+  //              annualBudgetGoal for annual cap.
   app.get(
     "/api/admin/budget-threshold-preview",
     requireAuthentication,
@@ -233,16 +400,39 @@ export function registerBudgetRoutes(
         const { monthKey, yearKey } = getPeriodKeys(now);
         const monthWin = getMonthWindow(now);
         const yearWin = getYearWindow(now);
+        const currentYear = now.getFullYear();
+        const currentMonth = now.getMonth() + 1;
 
-        // Load all customers that have at least one budget cap set.
+        // Load all customers in scope.
         const allCustomers = filterCompanyId != null
           ? await db
               .select()
               .from(customersTable)
-              .where(
-                eq(customersTable.companyId, filterCompanyId),
-              )
+              .where(eq(customersTable.companyId, filterCompanyId))
           : await db.select().from(customersTable);
+
+        // Load monthly allocations for all customers in one query.
+        const customerIds = allCustomers.map((c) => c.id);
+        const allocationMap = new Map<number, number>();
+        if (customerIds.length > 0) {
+          const allocRows = await db
+            .select({
+              customerId: customerBudgetMonths.customerId,
+              amount: customerBudgetMonths.amount,
+            })
+            .from(customerBudgetMonths)
+            .where(
+              and(
+                inArray(customerBudgetMonths.customerId, customerIds),
+                eq(customerBudgetMonths.year, currentYear),
+                eq(customerBudgetMonths.month, currentMonth),
+              ),
+            );
+          for (const r of allocRows) {
+            const n = parseDecimal(r.amount);
+            if (n != null) allocationMap.set(r.customerId, n);
+          }
+        }
 
         const results: Array<{
           customerId: number;
@@ -259,8 +449,8 @@ export function registerBudgetRoutes(
         }> = [];
 
         for (const customer of allCustomers) {
-          const monthlyCap = parseDecimal(customer.monthlyBudgetCap);
-          const annualCap = parseDecimal(customer.annualBudgetCap);
+          const monthlyCap = allocationMap.get(customer.id) ?? null;
+          const annualCap = parseDecimal((customer as any).annualBudgetGoal);
           if (monthlyCap == null && annualCap == null) continue;
 
           const soft = customer.budgetSoftThresholdPercent ?? 75;

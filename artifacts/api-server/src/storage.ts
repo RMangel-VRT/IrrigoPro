@@ -1451,6 +1451,85 @@ export class DatabaseStorage implements IStorage {
   // server accepts requests. Failures throw and crash startup.
   async initialize(): Promise<void> {
     await this.backfillControllerLetters();
+    await this.applySeasonalBudgetSchema();
+  }
+
+  // Startup migration (Task #1865): apply Seasonal Budget Model DDL.
+  // Adds budget_season_curve to companies, annual_budget_goal and
+  // budget_season_curve_override to customers, and creates the
+  // customer_budget_months table with its indexes. All statements use
+  // IF NOT EXISTS so this is safe to run multiple times.
+  private async applySeasonalBudgetSchema(): Promise<void> {
+    const MIGRATION_KEY = 'seasonal-budget-model-v1';
+    try {
+      await db.execute(sql`
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      const marker = await db.execute(
+        sql`SELECT value FROM app_settings WHERE key = ${MIGRATION_KEY}`
+      );
+      if (marker.rows.length > 0 && marker.rows[0].value === 'completed') {
+        console.log(`[MIGRATION] '${MIGRATION_KEY}': already completed, skipping`);
+        return;
+      }
+
+      // companies: add per-company season curve (default Apr–Oct 0/10/20/20/20/20/10)
+      await db.execute(sql`
+        ALTER TABLE companies
+          ADD COLUMN IF NOT EXISTS budget_season_curve jsonb
+            DEFAULT '[{"month":4,"percent":0},{"month":5,"percent":10},{"month":6,"percent":20},{"month":7,"percent":20},{"month":8,"percent":20},{"month":9,"percent":20},{"month":10,"percent":10}]'::jsonb
+      `);
+
+      // customers: add annual goal + optional curve override
+      await db.execute(sql`
+        ALTER TABLE customers
+          ADD COLUMN IF NOT EXISTS annual_budget_goal decimal(12,2)
+      `);
+      await db.execute(sql`
+        ALTER TABLE customers
+          ADD COLUMN IF NOT EXISTS budget_season_curve_override jsonb
+      `);
+
+      // Monthly allocation table
+      await db.execute(sql`
+        CREATE TABLE IF NOT EXISTS customer_budget_months (
+          id              serial PRIMARY KEY,
+          company_id      integer NOT NULL REFERENCES companies(id),
+          customer_id     integer NOT NULL REFERENCES customers(id),
+          year            integer NOT NULL,
+          month           integer NOT NULL CHECK (month >= 1 AND month <= 12),
+          amount          decimal(12,2) NOT NULL,
+          is_manual_override boolean NOT NULL DEFAULT false,
+          created_at      timestamp NOT NULL DEFAULT now(),
+          updated_at      timestamp NOT NULL DEFAULT now(),
+          CONSTRAINT customer_budget_months_unique
+            UNIQUE (company_id, customer_id, year, month)
+        )
+      `);
+
+      await db.execute(sql`
+        CREATE INDEX IF NOT EXISTS customer_budget_months_customer_year_idx
+          ON customer_budget_months (customer_id, year, month)
+      `);
+      await db.execute(sql`
+        CREATE INDEX IF NOT EXISTS customer_budget_months_company_year_idx
+          ON customer_budget_months (company_id, year, month)
+      `);
+
+      await db.execute(sql`
+        INSERT INTO app_settings (key, value) VALUES (${MIGRATION_KEY}, 'completed')
+        ON CONFLICT (key) DO UPDATE SET value = 'completed', updated_at = NOW()
+      `);
+      console.log(`[MIGRATION] '${MIGRATION_KEY}': seasonal budget schema applied`);
+    } catch (err) {
+      // Log but do not crash startup — the server can still handle non-budget
+      // requests even if this migration fails.
+      console.error(`[MIGRATION] '${MIGRATION_KEY}' failed:`, err);
+    }
   }
 
   // Startup migration (BS-2026-0023): repair uninvoiced billing sheets where partsSubtotal

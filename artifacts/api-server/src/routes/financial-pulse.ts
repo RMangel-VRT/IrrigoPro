@@ -14,6 +14,7 @@ import { getMonthWindow, getYearWindow } from "../budget-status";
 import {
   billingSheets,
   customers,
+  customerBudgetMonths,
   invoiceItems,
   invoices,
   users,
@@ -161,6 +162,35 @@ async function loadCustomers(
   const rows = companyId == null
     ? await db.select().from(customers)
     : await db.select().from(customers).where(eq(customers.companyId, companyId));
+
+  // Task #1865 — load this month's budget allocation from customerBudgetMonths.
+  // The old flat cap columns are preserved in schema.ts but no longer read here.
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth() + 1;
+  const customerIds = rows.map((r) => r.id);
+
+  const allocationMap = new Map<number, number | null>();
+  if (customerIds.length > 0) {
+    const allocationRows = await db
+      .select({
+        customerId: customerBudgetMonths.customerId,
+        amount: customerBudgetMonths.amount,
+      })
+      .from(customerBudgetMonths)
+      .where(
+        and(
+          inArray(customerBudgetMonths.customerId, customerIds),
+          eq(customerBudgetMonths.year, currentYear),
+          eq(customerBudgetMonths.month, currentMonth),
+        ),
+      );
+    for (const a of allocationRows) {
+      const n = parseFloat(String(a.amount));
+      allocationMap.set(a.customerId, Number.isFinite(n) ? n : null);
+    }
+  }
+
   return rows.map((c) => ({
     id: c.id,
     companyId: c.companyId,
@@ -168,8 +198,9 @@ async function loadCustomers(
     emergencyLaborRate: c.emergencyLaborRate ?? null,
     name: c.name ?? null,
     hiddenFromBilling: c.hiddenFromBilling ?? false,
-    monthlyBudgetCap: c.monthlyBudgetCap ?? null,
-    annualBudgetCap: c.annualBudgetCap ?? null,
+    // monthlyAllocation: null when no customerBudgetMonths row exists for
+    // this customer in the current month (goal unset or outside season).
+    monthlyAllocation: allocationMap.get(c.id) ?? null,
     budgetSoftThresholdPercent: c.budgetSoftThresholdPercent ?? null,
     budgetHardThresholdPercent: c.budgetHardThresholdPercent ?? null,
   }));
@@ -1403,13 +1434,27 @@ export function registerFinancialPulseRoutes(
         const monthSpend = budgetMonthSpend.total;
         const yearSpend = budgetYearSpend.total;
 
-        const parseCap = (v: unknown): number | null => {
+        // Task #1865 — resolve monthly allocation from customerBudgetMonths
+        // (not from the retired columns). Annual cap from annualBudgetGoal.
+        const budgetCurrentMonth = now.getMonth() + 1;
+        const budgetCurrentYear = now.getFullYear();
+        const [monthAllocRow] = await db
+          .select({ amount: customerBudgetMonths.amount })
+          .from(customerBudgetMonths)
+          .where(
+            and(
+              eq(customerBudgetMonths.customerId, customerId),
+              eq(customerBudgetMonths.year, budgetCurrentYear),
+              eq(customerBudgetMonths.month, budgetCurrentMonth),
+            ),
+          );
+        const parseN = (v: unknown): number | null => {
           if (v == null || v === "") return null;
           const n = typeof v === "number" ? v : parseFloat(String(v));
           return Number.isFinite(n) && n > 0 ? n : null;
         };
-        const monthlyCap = parseCap(c.monthlyBudgetCap);
-        const annualCap = parseCap(c.annualBudgetCap);
+        const monthlyCap = monthAllocRow ? parseN(monthAllocRow.amount) : null;
+        const annualCap = parseN((c as any).annualBudgetGoal);
         const soft = c.budgetSoftThresholdPercent ?? 75;
         const hard = c.budgetHardThresholdPercent ?? 100;
         const classify = (
