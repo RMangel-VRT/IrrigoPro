@@ -7,12 +7,17 @@
 
 import type { Express, RequestHandler } from "express";
 import {
+  classifyBudgetPercent,
   computePeriodUsage,
   getMonthWindow,
   getPeriodKeys,
   getYearWindow,
 } from "../budget-status";
+import { computeCustomerSpend } from "../budget-spend";
 import { storage } from "../storage";
+import { db } from "../db";
+import { customers as customersTable } from "@workspace/db/schema";
+import { eq, isNotNull, or } from "drizzle-orm";
 import { getRecentBudgetAlertEvents } from "../services/budget-alert-service";
 
 export interface RegisterBudgetRoutesDeps {
@@ -76,53 +81,41 @@ export function registerBudgetRoutes(
         const monthWin = getMonthWindow(now);
         const yearWin = getYearWindow(now);
 
-        // Pull all invoices for this customer once and bucket in JS —
-        // the per-customer list is small enough that the extra
-        // round-trip of two separate SUMs isn't worth the storage
-        // method churn. Bucket by `createdAt` to match the canonical
-        // dashboard "This Month Billed" rollup
-        // (`getThisMonthBilledForCompany`) so the two surfaces always
-        // agree on what counts as "this month".
-        const invoices = await storage.getInvoicesByCustomer(id, role === 'super_admin' ? null : (callerCompanyId ?? null));
-
-        let monthSpend = 0;
-        let yearSpend = 0;
-        for (const inv of invoices) {
-          if (inv.status === "draft" || inv.status === "cancelled" || inv.status === "superseded") continue;
-          const total = parseDecimal(inv.totalAmount) ?? 0;
-          const when = inv.createdAt instanceof Date
-            ? inv.createdAt
-            : new Date(inv.createdAt as unknown as string);
-          if (when >= yearWin.start && when < yearWin.end) {
-            yearSpend += total;
-            if (when >= monthWin.start && when < monthWin.end) {
-              monthSpend += total;
-            }
-          }
-        }
+        // Use the shared computeCustomerSpend function so budget-routes,
+        // budget-alert-service, and financial-pulse all agree on the number.
+        // company scope: super_admin passes null (global), everyone else is
+        // scoped to their own company.
+        const spendCompanyId = role === "super_admin" ? null : (callerCompanyId ?? null);
+        const [monthSpend, yearSpend] = await Promise.all([
+          computeCustomerSpend(id, spendCompanyId, monthWin),
+          computeCustomerSpend(id, spendCompanyId, yearWin),
+        ]);
 
         const soft = customer.budgetSoftThresholdPercent ?? 75;
         const hard = customer.budgetHardThresholdPercent ?? 100;
         const monthly = computePeriodUsage(
           parseDecimal(customer.monthlyBudgetCap),
-          monthSpend,
+          monthSpend.total,
           soft,
           hard,
           monthKey,
         );
         const annual = computePeriodUsage(
           parseDecimal(customer.annualBudgetCap),
-          yearSpend,
+          yearSpend.total,
           soft,
           hard,
           yearKey,
         );
 
-        // Flat response shape — slice 1 contract:
+        // Flat response shape — slice 1 contract (unchanged field names):
         //   customerId, softThresholdPercent, hardThresholdPercent,
         //   currentMonthKey, currentYearKey,
         //   monthly{Cap,Spend,Percent,Status},
         //   annual{Cap,Spend,Percent,Status}
+        // Task #1864 adds the invoiced/pendingNotBilled breakdown fields so
+        // the Budget card can show uninvoiced work separately without a
+        // breaking change (existing consumers only read the existing fields).
         res.json({
           customerId: id,
           softThresholdPercent: soft,
@@ -131,10 +124,14 @@ export function registerBudgetRoutes(
           currentYearKey: yearKey,
           monthlyCap: monthly.cap,
           monthlySpend: monthly.spend,
+          monthlyInvoiced: monthSpend.invoiced,
+          monthlyPendingNotBilled: monthSpend.pendingNotBilled,
           monthlyPercent: monthly.percent,
           monthlyStatus: monthly.status,
           annualCap: annual.cap,
           annualSpend: annual.spend,
+          annualInvoiced: yearSpend.invoiced,
+          annualPendingNotBilled: yearSpend.pendingNotBilled,
           annualPercent: annual.percent,
           annualStatus: annual.status,
         });
@@ -190,6 +187,145 @@ export function registerBudgetRoutes(
         res
           .status(500)
           .json({ message: "Failed to load budget alert events" });
+      }
+    },
+  );
+
+  // Task #1864 — Dry-run budget threshold preview (Super Admin only).
+  //
+  // Read-only diagnostic: lists every customer that would be in
+  // "approaching" or "over" status under the new computeCustomerSpend
+  // calculation. Run this before deploying the alert service change to
+  // understand which customers would newly receive alerts on the first
+  // post-deploy invoice finalization.
+  //
+  // GET /api/admin/budget-threshold-preview
+  //   ?companyId=N  — optional; filter to a single company
+  //
+  // This route is intentionally NOT registered in the staging/prod
+  // environment automatically — it must be reviewed and removed once
+  // the deployment window has passed. The dedup index ensures each
+  // alert fires only once per period, but a burst of first-time fires
+  // should be reviewed before going live.
+  app.get(
+    "/api/admin/budget-threshold-preview",
+    requireAuthentication,
+    async (req: any, res) => {
+      try {
+        const role = req.authenticatedUserRole as string | undefined;
+        if (role !== "super_admin") {
+          res.status(403).json({ message: "Forbidden — super_admin only" });
+          return;
+        }
+
+        const rawCompanyId = req.query.companyId as string | undefined;
+        let filterCompanyId: number | null = null;
+        if (rawCompanyId != null && rawCompanyId !== "") {
+          const n = parseInt(rawCompanyId, 10);
+          if (!Number.isFinite(n) || n <= 0) {
+            res.status(400).json({ message: "Invalid companyId" });
+            return;
+          }
+          filterCompanyId = n;
+        }
+
+        const now = new Date();
+        const { monthKey, yearKey } = getPeriodKeys(now);
+        const monthWin = getMonthWindow(now);
+        const yearWin = getYearWindow(now);
+
+        // Load all customers that have at least one budget cap set.
+        const allCustomers = filterCompanyId != null
+          ? await db
+              .select()
+              .from(customersTable)
+              .where(
+                eq(customersTable.companyId, filterCompanyId),
+              )
+          : await db.select().from(customersTable);
+
+        const results: Array<{
+          customerId: number;
+          companyId: number;
+          name: string;
+          period: "monthly" | "annual";
+          periodKey: string;
+          cap: number;
+          invoiced: number;
+          pendingNotBilled: number;
+          total: number;
+          percent: number;
+          status: "approaching" | "over";
+        }> = [];
+
+        for (const customer of allCustomers) {
+          const monthlyCap = parseDecimal(customer.monthlyBudgetCap);
+          const annualCap = parseDecimal(customer.annualBudgetCap);
+          if (monthlyCap == null && annualCap == null) continue;
+
+          const soft = customer.budgetSoftThresholdPercent ?? 75;
+          const hard = customer.budgetHardThresholdPercent ?? 100;
+          const companyId = customer.companyId;
+
+          const [mSpend, ySpend] = await Promise.all([
+            monthlyCap != null
+              ? computeCustomerSpend(customer.id, companyId, monthWin)
+              : Promise.resolve(null),
+            annualCap != null
+              ? computeCustomerSpend(customer.id, companyId, yearWin)
+              : Promise.resolve(null),
+          ]);
+
+          if (monthlyCap != null && mSpend != null && monthlyCap > 0) {
+            const percent = mSpend.total / monthlyCap;
+            const status = classifyBudgetPercent(percent, soft, hard);
+            if (status === "approaching" || status === "over") {
+              results.push({
+                customerId: customer.id,
+                companyId,
+                name: customer.name ?? "(unnamed)",
+                period: "monthly",
+                periodKey: monthKey,
+                cap: monthlyCap,
+                invoiced: mSpend.invoiced,
+                pendingNotBilled: mSpend.pendingNotBilled,
+                total: mSpend.total,
+                percent: Math.round(percent * 100),
+                status,
+              });
+            }
+          }
+          if (annualCap != null && ySpend != null && annualCap > 0) {
+            const percent = ySpend.total / annualCap;
+            const status = classifyBudgetPercent(percent, soft, hard);
+            if (status === "approaching" || status === "over") {
+              results.push({
+                customerId: customer.id,
+                companyId,
+                name: customer.name ?? "(unnamed)",
+                period: "annual",
+                periodKey: yearKey,
+                cap: annualCap,
+                invoiced: ySpend.invoiced,
+                pendingNotBilled: ySpend.pendingNotBilled,
+                total: ySpend.total,
+                percent: Math.round(percent * 100),
+                status,
+              });
+            }
+          }
+        }
+
+        results.sort((a, b) => b.percent - a.percent);
+        res.json({
+          generatedAt: now.toISOString(),
+          totalCustomersScanned: allCustomers.length,
+          customersAtOrNearThreshold: results.length,
+          rows: results,
+        });
+      } catch (error) {
+        console.error("Error generating budget threshold preview:", error);
+        res.status(500).json({ message: "Failed to generate preview" });
       }
     },
   );

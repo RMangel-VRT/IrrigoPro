@@ -295,7 +295,11 @@ describe("budget-alert-service.checkBudgetThresholds", () => {
     await clearAlertRows(customerId);
     fakeState.customer = makeCustomer({ id: customerId });
 
+    // Clamp to the 1st before subtracting the month to avoid end-of-month
+    // overflow (e.g. July 31 - 1 month = "June 31" → July 1, which is the
+    // same month as thisMonth and defeats the periodKey distinction test).
     const lastMonth = new Date();
+    lastMonth.setDate(1);
     lastMonth.setMonth(lastMonth.getMonth() - 1);
     const inv1 = makeInvoice({
       id: 401,
@@ -452,5 +456,87 @@ describe("budget-alert-service.checkBudgetThresholds", () => {
     // Must not throw.
     await checkBudgetThresholds(inv as unknown as Invoice);
     (storage as any).getCustomer = prev;
+  });
+
+  // Task #1864 — pendingNotBilled (uninvoiced WCBs) alone crossing the
+  // threshold triggers an alert. Previously only invoiced amounts were
+  // counted, so a customer with only WCBs could show "over budget" on the
+  // dashboard without ever receiving an alert.
+  it("fires when uninvoiced wet-check billings alone push spend over threshold", async () => {
+    const customerId = 70009; // reuse slot; clearAlertRows called first
+    await clearAlertRows(customerId);
+    installDispatchers(); // reset push/email call lists
+
+    // Intercept db.select for the duration of checkBudgetThresholds so the
+    // WCB query inside computeCustomerSpend returns a $850 uninvoiced billing
+    // (invoiceId=null). We restore the real implementation immediately after
+    // so the assertion query hits the real dev DB.
+    // ESM module exports are sealed so we cannot patch computeCustomerSpend
+    // directly — instead we shim db.select on the db object.
+    const realSelect = (db as any).select.bind(db);
+    const wcbProxy: any = new Proxy({}, {
+      get(_t, prop) {
+        if (prop === "then") {
+          return (resolve: (v: any[]) => void) =>
+            resolve([{ invoiceId: null, totalAmount: "850.00", workDate: new Date() }]);
+        }
+        return () => wcbProxy;
+      },
+    });
+    (db as any).select = () => wcbProxy;
+
+    fakeState.customer = makeCustomer({ id: customerId });
+    // Invoice is $0 — all spend comes from the mocked WCB.
+    const inv = makeInvoice({ customerId, totalAmount: "0.00" as any });
+    fakeState.invoices = [inv];
+
+    await checkBudgetThresholds(inv as unknown as Invoice);
+
+    // Restore real db.select before running assertion queries.
+    (db as any).select = realSelect;
+
+    // 850 / 1000 monthly cap = 85% > 75% soft → must fire a soft alert.
+    assert.ok(
+      fakeState.notifications.some((n) => n.type === "budget_warning"),
+      "soft alert must fire when pendingNotBilled alone crosses soft threshold",
+    );
+
+    await clearAlertRows(customerId);
+    installDispatchers();
+  });
+
+  // Task #1864 — Company isolation: alert service must pass customer.companyId
+  // (not null) when querying invoices, so a multi-tenant database leak cannot
+  // read another company's invoices to inflate a customer's budget spend.
+  it("passes customer.companyId (not null) to getInvoicesByCustomer — company scoping", async () => {
+    const customerId = 70009; // reuse slot after clearAlertRows
+    await clearAlertRows(customerId);
+
+    let capturedCompanyId: number | null | undefined = undefined;
+    const originalGetInvoicesByCustomer = (storage as any).getInvoicesByCustomer;
+    (storage as any).getInvoicesByCustomer = async (
+      id: number,
+      companyId: number | null,
+    ) => {
+      capturedCompanyId = companyId;
+      return fakeState.invoices.filter((i) => i.customerId === id);
+    };
+
+    const COMPANY_ID = 55;
+    fakeState.customer = makeCustomer({ id: customerId, companyId: COMPANY_ID });
+    const inv = makeInvoice({ customerId, totalAmount: "800.00" as any });
+    fakeState.invoices = [inv];
+
+    await checkBudgetThresholds(inv as unknown as Invoice);
+
+    assert.equal(
+      capturedCompanyId,
+      COMPANY_ID,
+      `expected companyId=${COMPANY_ID} but got ${capturedCompanyId} — null would bypass company scoping`,
+    );
+
+    // Restore
+    (storage as any).getInvoicesByCustomer = originalGetInvoicesByCustomer;
+    await clearAlertRows(customerId);
   });
 });

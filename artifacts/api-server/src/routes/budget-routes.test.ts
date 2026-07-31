@@ -12,6 +12,24 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { registerBudgetRoutes } from "./budget-routes";
+import { db } from "../db";
+
+// Shim db.select to return empty WCBs so computeCustomerSpend's WCB leg
+// is deterministic (tests only configure invoice data via storage stubs).
+// Must be installed before any module that imports budget-spend is loaded.
+const _dbChain: any = new Proxy(
+  {},
+  {
+    get(_t, prop) {
+      if (prop === "then") {
+        return (resolve: (v: any[]) => void) => resolve([]);
+      }
+      return () => _dbChain;
+    },
+  },
+);
+const _realDbSelect = (db as any).select.bind(db);
+(db as any).select = () => _dbChain;
 
 interface StubCustomer {
   id: number;
@@ -197,6 +215,65 @@ describe("GET /api/customers/:id/budget-usage", () => {
     const body = (await res.json()) as any;
     assert.equal(body.monthlySpend, 1000);
     assert.equal(body.monthlyStatus, "over"); // 100% == hard threshold
+    await new Promise<void>((r) => server!.close(() => r()));
+    server = undefined;
+  });
+
+  it("excludes merged invoices from spend (regression: was counted before Task #1864)", async () => {
+    setSeed();
+    const now = new Date();
+    const im = now.getMonth() + 1;
+    const iy = now.getFullYear();
+    // The surviving invoice (paid) + the merged ghost — merged must NOT inflate spend.
+    state.invoices.push({
+      id: 10, customerId: 1, totalAmount: "500.00", status: "merged",
+      invoiceMonth: im, invoiceYear: iy, createdAt: now,
+    });
+    // Without fix: spend = 800 (paid+sent) + 500 (merged) = 1300 → over.
+    // With fix: spend = 800 → approaching.
+    const { app } = makeApp("company_admin", 10);
+    ({ server, base } = await startServer(app));
+    const res = await fetch(`${base}/api/customers/1/budget-usage`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as any;
+    assert.equal(body.monthlySpend, 800, "merged invoice must not inflate spend");
+    assert.equal(body.monthlyStatus, "approaching");
+    await new Promise<void>((r) => server!.close(() => r()));
+    server = undefined;
+  });
+
+  it("excludes failed invoices from spend", async () => {
+    setSeed();
+    const now = new Date();
+    const im = now.getMonth() + 1;
+    const iy = now.getFullYear();
+    state.invoices.push({
+      id: 11, customerId: 1, totalAmount: "9999.00", status: "failed",
+      invoiceMonth: im, invoiceYear: iy, createdAt: now,
+    });
+    const { app } = makeApp("company_admin", 10);
+    ({ server, base } = await startServer(app));
+    const res = await fetch(`${base}/api/customers/1/budget-usage`);
+    const body = (await res.json()) as any;
+    assert.equal(body.monthlySpend, 800, "failed invoice must not inflate spend");
+    await new Promise<void>((r) => server!.close(() => r()));
+    server = undefined;
+  });
+
+  it("response includes monthlyInvoiced and monthlyPendingNotBilled breakdown fields", async () => {
+    setSeed();
+    const { app } = makeApp("company_admin", 10);
+    ({ server, base } = await startServer(app));
+    const res = await fetch(`${base}/api/customers/1/budget-usage`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as any;
+    // WCBs stubbed to [] by the db shim so pendingNotBilled = 0.
+    assert.equal(typeof body.monthlyInvoiced, "number", "monthlyInvoiced must be numeric");
+    assert.equal(typeof body.monthlyPendingNotBilled, "number");
+    assert.equal(typeof body.annualInvoiced, "number");
+    assert.equal(typeof body.annualPendingNotBilled, "number");
+    // monthlySpend = monthlyInvoiced + monthlyPendingNotBilled
+    assert.equal(body.monthlySpend, body.monthlyInvoiced + body.monthlyPendingNotBilled);
     await new Promise<void>((r) => server!.close(() => r()));
     server = undefined;
   });

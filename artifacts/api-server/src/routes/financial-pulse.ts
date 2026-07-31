@@ -9,6 +9,8 @@
 import type { Express, Request, RequestHandler } from "express";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../db";
+import { computeCustomerSpend } from "../budget-spend";
+import { getMonthWindow, getYearWindow } from "../budget-status";
 import {
   billingSheets,
   customers,
@@ -1387,36 +1389,20 @@ export function registerFinancialPulseRoutes(
 
         // Budget objects — mirror /api/customers/:id/budget-usage
         // shape (monthlyCap/monthlySpend/monthlyPercent/monthlyStatus,
-        // same annual). spend is current-month/current-year, same as
-        // the Slice 1 BudgetCard.
-        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-        const yearStart = new Date(now.getFullYear(), 0, 1);
-        let monthSpend = 0;
-        let yearSpend = 0;
-        for (const inv of allInvoices) {
-          if (INVOICE_EXCLUDED_STATUSES.has(inv.status)) continue;
-          const d = inv.createdAt instanceof Date
-            ? inv.createdAt
-            : new Date(inv.createdAt as unknown as string);
-          if (Number.isNaN(d.getTime())) continue;
-          const total = typeof inv.totalAmount === "number"
-            ? inv.totalAmount
-            : parseFloat(String(inv.totalAmount));
-          if (!Number.isFinite(total)) continue;
-          if (d >= monthStart) monthSpend += total;
-          if (d >= yearStart) yearSpend += total;
-        }
-        // Task #814 — include uninvoiced WCBs in budget spend (by workDate).
-        for (const wcb of wcbSummaryRows) {
-          if (wcb.invoiceId != null) continue;
-          const d = wcb.workDate instanceof Date
-            ? wcb.workDate
-            : wcb.workDate ? new Date(wcb.workDate as unknown as string) : null;
-          if (!d || Number.isNaN(d.getTime())) continue;
-          const amt = toN(wcb.total);
-          if (d >= monthStart) monthSpend += amt;
-          if (d >= yearStart) yearSpend += amt;
-        }
+        // same annual). Task #1864: use computeCustomerSpend so this
+        // surface always agrees with budget-routes and budget-alert-service.
+        // Company scope: super_admin (scope.companyId == null) passes null;
+        // all others pass their tenant id from c.companyId.
+        const budgetCompanyId = scope.companyId != null ? scope.companyId : null;
+        const budgetMonthWin = getMonthWindow(now);
+        const budgetYearWin = getYearWindow(now);
+        const [budgetMonthSpend, budgetYearSpend] = await Promise.all([
+          computeCustomerSpend(customerId, budgetCompanyId, budgetMonthWin),
+          computeCustomerSpend(customerId, budgetCompanyId, budgetYearWin),
+        ]);
+        const monthSpend = budgetMonthSpend.total;
+        const yearSpend = budgetYearSpend.total;
+
         const parseCap = (v: unknown): number | null => {
           if (v == null || v === "") return null;
           const n = typeof v === "number" ? v : parseFloat(String(v));

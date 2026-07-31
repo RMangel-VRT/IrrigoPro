@@ -31,6 +31,7 @@ import {
   getPeriodKeys,
   getYearWindow,
 } from "../budget-status";
+import { computeCustomerSpend } from "../budget-spend";
 import { storage } from "../storage";
 import { EmailService } from "../email-service";
 import { logger } from "../lib/logger";
@@ -462,26 +463,17 @@ export async function checkBudgetThresholds(invoice: Invoice): Promise<void> {
     const monthWin = getMonthWindow(now);
     const yearWin = getYearWindow(now);
 
-    // Sum month-to-date and year-to-date totals for the customer,
-    // excluding draft / cancelled. Mirrors the budget-usage route
-    // bucketing and the "This Month Billed" dashboard rollup.
-    const allInvoices = await storage.getInvoicesByCustomer(customer.id, null);
-    let monthSpend = 0;
-    let yearSpend = 0;
-    for (const inv of allInvoices) {
-      if (inv.status === "draft" || inv.status === "cancelled" || inv.status === "superseded") continue;
-      const total = parseDecimal(inv.totalAmount) ?? 0;
-      const when =
-        inv.createdAt instanceof Date
-          ? inv.createdAt
-          : new Date(inv.createdAt as unknown as string);
-      if (when >= yearWin.start && when < yearWin.end) {
-        yearSpend += total;
-        if (when >= monthWin.start && when < monthWin.end) {
-          monthSpend += total;
-        }
-      }
-    }
+    // Use the shared computeCustomerSpend so alerts fire on the same
+    // number the Budget card and Financial Pulse show. Tenancy fix:
+    // pass customer.companyId (not null) so another company's invoices
+    // can never be read here. super_admin can pass null but the alert
+    // service always fires on behalf of a real customer with a company.
+    const [monthSpendResult, yearSpendResult] = await Promise.all([
+      computeCustomerSpend(customer.id, customer.companyId, monthWin),
+      computeCustomerSpend(customer.id, customer.companyId, yearWin),
+    ]);
+    const monthSpend = monthSpendResult.total;
+    const yearSpend = yearSpendResult.total;
 
     const channelsRaw = customer.budgetAlertChannels as
       | { inApp?: boolean; push?: boolean; email?: boolean }
