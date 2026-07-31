@@ -159,7 +159,7 @@ import {
   deriveIssueGroup,
   WET_CHECK_ISSUE_TYPE_SEED,
 } from "@workspace/db";
-import { db } from "./db";
+import { db, pool } from "./db";
 import { sql, eq, like, ilike, desc, and, gte, lte, or, isNull, isNotNull, inArray, gt } from "drizzle-orm";
 import { logger } from "./lib/logger";
 import bcrypt from "bcrypt";
@@ -1253,6 +1253,16 @@ export interface IStorage {
     branchName?: string,
   ): Promise<IrrigationController[]>;
 
+  /**
+   * Task #1856 — Returns the lowest unused letter (A–Z) for a new controller
+   * in the given (company, customer, branch) scope.
+   */
+  nextControllerLetter(
+    companyId: number,
+    customerId: number,
+    branchName?: string,
+  ): Promise<string>;
+
   getIrrigationController(
     companyId: number | null,
     id: number,
@@ -1487,6 +1497,17 @@ export class DatabaseStorage implements IStorage {
     this.initializeUsers();
     this.repairDivergedBillingSheets();
     this.applyCompanyIdColumns();
+    // NOTE: backfillControllerLetters is intentionally NOT called here.
+    // It is called via initialize() in app.ts BEFORE the server starts listening,
+    // so the NOT NULL + unique index constraints are in place before any
+    // controller-create request is processed.
+  }
+
+  // Called and awaited in app.ts before registerRoutes() so the NOT NULL +
+  // unique index on irrigation_controllers.letter are in place before the
+  // server accepts requests. Failures throw and crash startup.
+  async initialize(): Promise<void> {
+    await this.backfillControllerLetters();
   }
 
   // Startup migration (BS-2026-0023): repair uninvoiced billing sheets where partsSubtotal
@@ -1652,6 +1673,183 @@ export class DatabaseStorage implements IStorage {
       console.log(`[MIGRATION] '${MIGRATION_KEY}': completed`);
     } catch (err) {
       console.error(`[MIGRATION] '${MIGRATION_KEY}' failed:`, err);
+    }
+  }
+
+  // Startup migration (Task #1856): backfill NULL letters on irrigation_controllers,
+  // then harden the column with NOT NULL + unique index.
+  //
+  // Called and awaited via initialize() BEFORE the server starts listening, so
+  // all DDL is in place before any controller-create request is processed.
+  // Failures throw and crash startup — same philosophy as a failed schema migration.
+  //
+  // Race safety: ALL operations run on a SINGLE pg.PoolClient, pinning the entire
+  // sequence to one PostgreSQL session. pg_advisory_lock is session-scoped, so the
+  // lock is guaranteed to span every step. A second concurrent instance blocks on
+  // pg_advisory_lock, then sees the verified-complete state and returns immediately.
+  //
+  // Design rule: the fast path on a "completed" marker MUST verify the DDL invariants
+  // (NOT NULL + unique index) are actually present before returning. If app_settings
+  // is restored from a snapshot that predates the DDL, the invariants must be applied
+  // before the server serves requests — the marker alone is not sufficient.
+  private async backfillControllerLetters(): Promise<void> {
+    const MIGRATION_KEY = 'controller-letter-backfill-v1';
+    const ADVISORY_LOCK_ID = 1856001; // unique integer for this migration
+    const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+    // Ensure app_settings table exists (safe without the advisory lock — CREATE IF NOT
+    // EXISTS is internally serialised by Postgres).
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    // ── Acquire a dedicated connection — all subsequent operations use `client` ─
+    // Required so pg_advisory_lock (session-scoped) is held across every step.
+    const client = await pool.connect();
+    try {
+      await client.query(`SELECT pg_advisory_lock($1)`, [ADVISORY_LOCK_ID]);
+
+      // Check the completion marker AND verify both DDL invariants are actually in
+      // place. A restored snapshot may have the marker but lack the DDL, so we
+      // cannot return on the marker alone.
+      const markerRow = await client.query<{ value: string }>(
+        `SELECT value FROM app_settings WHERE key = $1`, [MIGRATION_KEY]
+      );
+      const markerDone = markerRow.rows.length > 0 && markerRow.rows[0].value === 'completed';
+
+      const colInfo = await client.query<{ is_nullable: string }>(
+        `SELECT is_nullable FROM information_schema.columns
+         WHERE table_name='irrigation_controllers' AND column_name='letter'`
+      );
+      const notNullOk = colInfo.rows.length > 0 && colInfo.rows[0].is_nullable === 'NO';
+
+      const idxExists = await client.query(
+        `SELECT 1 FROM pg_indexes WHERE tablename='irrigation_controllers' AND indexname='uniq_irr_ctrl_letter'`
+      );
+      const indexOk = idxExists.rows.length > 0;
+
+      if (markerDone && notNullOk && indexOk) {
+        console.log(`[MIGRATION] '${MIGRATION_KEY}': already completed (DDL verified), skipping`);
+        return;
+      }
+
+      // ── Step 1: Ensure the letter column exists ─────────────────────────────
+      await client.query(`ALTER TABLE irrigation_controllers ADD COLUMN IF NOT EXISTS letter text`);
+
+      // ── Step 2: Backfill NULL letters (skipped when marker is set, meaning the
+      //    data was already backfilled; we only re-apply missing DDL in that case) ─
+      if (!markerDone) {
+        const nullRows = await client.query<{
+          id: string; company_id: string; customer_id: string;
+          branch_name: string; name: string;
+        }>(
+          `SELECT id, company_id, customer_id, COALESCE(branch_name,'') AS branch_name, name
+           FROM irrigation_controllers WHERE letter IS NULL
+           ORDER BY company_id, customer_id, branch_name, id`
+        );
+
+        if (nullRows.rows.length > 0) {
+          const pcRows = await client.query<{
+            company_id: string; customer_id: string;
+            branch_name: string; controller_letter: string;
+          }>(
+            `SELECT company_id, customer_id, COALESCE(branch_name,'') AS branch_name, controller_letter
+             FROM property_controllers
+             ORDER BY company_id, customer_id, branch_name, controller_letter`
+          );
+          const pcHints = new Map<string, Set<string>>();
+          for (const pc of pcRows.rows) {
+            const key = `${pc.company_id}:${pc.customer_id}:${pc.branch_name}`;
+            const s = pcHints.get(key) ?? new Set<string>();
+            s.add(pc.controller_letter);
+            pcHints.set(key, s);
+          }
+
+          const assignedRows = await client.query<{
+            company_id: string; customer_id: string; branch_name: string; letter: string;
+          }>(
+            `SELECT company_id, customer_id, COALESCE(branch_name,'') AS branch_name, letter
+             FROM irrigation_controllers WHERE letter IS NOT NULL`
+          );
+          const assignedLetters = new Map<string, Set<string>>();
+          for (const r of assignedRows.rows) {
+            const key = `${r.company_id}:${r.customer_id}:${r.branch_name}`;
+            const s = assignedLetters.get(key) ?? new Set<string>();
+            s.add(r.letter);
+            assignedLetters.set(key, s);
+          }
+
+          for (const row of nullRows.rows) {
+            const scopeKey = `${row.company_id}:${row.customer_id}:${row.branch_name}`;
+            const used = assignedLetters.get(scopeKey) ?? new Set<string>();
+            const hints = pcHints.get(scopeKey) ?? new Set<string>();
+
+            let chosen: string | undefined;
+            for (const hint of hints) {
+              if (!used.has(hint)) { chosen = hint; break; }
+            }
+            if (!chosen) {
+              for (const candidate of ALPHABET) {
+                if (!used.has(candidate)) { chosen = candidate; break; }
+              }
+            }
+            if (!chosen) {
+              throw new Error(`[MIGRATION] '${MIGRATION_KEY}': id=${row.id} "${row.name}" — all 26 letters in use`);
+            }
+            used.add(chosen);
+            assignedLetters.set(scopeKey, used);
+            await client.query(`UPDATE irrigation_controllers SET letter = $1 WHERE id = $2`, [chosen, row.id]);
+            console.log(`[MIGRATION] '${MIGRATION_KEY}': id=${row.id} name="${row.name}" → ${chosen}`);
+          }
+        }
+
+        // Assert 0 NULLs remain before hardening
+        const nullCheck = await client.query<{ cnt: string }>(
+          `SELECT COUNT(*)::int AS cnt FROM irrigation_controllers WHERE letter IS NULL`
+        );
+        const nullCount = Number(nullCheck.rows[0].cnt);
+        if (nullCount > 0) {
+          throw new Error(`[MIGRATION] '${MIGRATION_KEY}': ${nullCount} NULL letter(s) remain after backfill`);
+        }
+      }
+
+      // ── Step 3: SET NOT NULL (idempotent — also applied when marker exists
+      //    but DDL was missing, e.g. snapshot restore) ──────────────────────────
+      if (!notNullOk) {
+        await client.query(`ALTER TABLE irrigation_controllers ALTER COLUMN letter SET NOT NULL`);
+        console.log(`[MIGRATION] '${MIGRATION_KEY}': SET NOT NULL applied`);
+      }
+
+      // ── Step 4: Create unique index if missing ──────────────────────────────
+      if (!indexOk) {
+        await client.query(
+          `CREATE UNIQUE INDEX uniq_irr_ctrl_letter ON irrigation_controllers (company_id, customer_id, branch_name, letter)`
+        );
+        console.log(`[MIGRATION] '${MIGRATION_KEY}': unique index created`);
+      }
+
+      // ── Step 5: Mark done ───────────────────────────────────────────────────
+      if (!markerDone) {
+        await client.query(
+          `INSERT INTO app_settings (key, value) VALUES ($1, 'completed')
+           ON CONFLICT (key) DO UPDATE SET value='completed', updated_at=NOW()`,
+          [MIGRATION_KEY]
+        );
+        console.log(`[MIGRATION] '${MIGRATION_KEY}': completed`);
+      } else if (!notNullOk || !indexOk) {
+        console.log(`[MIGRATION] '${MIGRATION_KEY}': DDL invariants re-applied after snapshot restore`);
+      }
+
+      await client.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_ID]);
+    } catch (err) {
+      await client.query(`SELECT pg_advisory_unlock($1)`, [ADVISORY_LOCK_ID]).catch(() => {});
+      throw err; // propagate — crashes startup as intended
+    } finally {
+      client.release();
     }
   }
 
@@ -8622,12 +8820,32 @@ export class DatabaseStorage implements IStorage {
       .where(eq(estimates.originWetCheckId, id))
       .limit(1);
 
+    // Task #1856: include resolved controllers so mobile/web can display
+    // letter + name without a separate API call.
+    const irrigCtrls = await db
+      .select({
+        letter: irrigationControllers.letter,
+        name: irrigationControllers.name,
+        totalZones: irrigationControllers.totalZones,
+      })
+      .from(irrigationControllers)
+      .where(and(
+        eq(irrigationControllers.companyId, companyId),
+        eq(irrigationControllers.customerId, wc.customerId),
+        eq(irrigationControllers.branchName, wc.branchName ?? ""),
+        isNotNull(irrigationControllers.letter),
+      ))
+      .orderBy(irrigationControllers.letter, irrigationControllers.id);
+
     return {
       ...wc,
       zoneRecords: zoneRecords.map(zr => ({ ...zr, findings: findingsByZone.get(zr.id) ?? [] })),
       photos,
       originatedEstimateId: originatedEstimate?.id ?? null,
       originatedWorkOrderId: originatedEstimate?.workOrderId ?? null,
+      controllers: irrigCtrls
+        .filter(c => c.letter != null)
+        .map(c => ({ letter: c.letter as string, name: c.name, zoneCount: c.totalZones ?? null })),
     };
   }
 
@@ -8735,27 +8953,52 @@ export class DatabaseStorage implements IStorage {
       // Implicit N/A: for every (controller letter × zoneNumber 1..zoneCount)
       // pair that has NO zone record on this wet check, insert one as N/A so
       // the manager review sees an explicit row for every zone in scope.
-      const ctrls = await tx.select().from(propertyControllers).where(and(
-        eq(propertyControllers.companyId, companyId),
-        eq(propertyControllers.customerId, wc.customerId),
+      //
+      // Task #1856: read from irrigation_controllers (branch-correct, stored letter)
+      // rather than property_controllers (unfiltered, positional letters).
+      // Fall back to property_controllers only when no irrigation profile exists.
+      const branchKey = wc.branchName ?? "";
+      const irrigCtrls = await tx.select({
+        letter: irrigationControllers.letter,
+        totalZones: irrigationControllers.totalZones,
+      }).from(irrigationControllers).where(and(
+        eq(irrigationControllers.companyId, companyId),
+        eq(irrigationControllers.customerId, wc.customerId),
+        eq(irrigationControllers.branchName, branchKey),
+        isNotNull(irrigationControllers.letter),
       ));
+
+      // Legacy fallback: use property_controllers when no irrigation profile exists.
+      type CtrlEntry = { letter: string; zoneCount: number };
+      let ctrlEntries: CtrlEntry[];
+      if (irrigCtrls.length > 0) {
+        ctrlEntries = irrigCtrls
+          .filter(c => c.letter != null)
+          .map(c => ({ letter: c.letter as string, zoneCount: c.totalZones ?? 0 }));
+      } else {
+        const legacyCtrls = await tx.select().from(propertyControllers).where(and(
+          eq(propertyControllers.companyId, companyId),
+          eq(propertyControllers.customerId, wc.customerId),
+        ));
+        const filtered = legacyCtrls.filter(c => (c.branchName ?? "") === branchKey);
+        ctrlEntries = filtered.map(c => ({
+          letter: c.controllerLetter,
+          zoneCount: c.zoneCount ?? 0,
+        }));
+      }
+
       const existing = await tx.select({
         letter: wetCheckZoneRecords.controllerLetter,
         zone: wetCheckZoneRecords.zoneNumber,
       }).from(wetCheckZoneRecords).where(eq(wetCheckZoneRecords.wetCheckId, id));
       const seen = new Set(existing.map(r => `${r.letter}#${r.zone}`));
       const toInsert: InsertWetCheckZoneRecord[] = [];
-      const expectedLetters: string[] = Array.from({ length: wc.numControllers }, (_, i) =>
-        String.fromCharCode("A".charCodeAt(0) + i),
-      );
-      for (const letter of expectedLetters) {
-        const ctrl = ctrls.find(c => c.controllerLetter === letter);
-        const zoneCount = ctrl?.zoneCount ?? 0;
-        for (let z = 1; z <= zoneCount; z++) {
-          if (!seen.has(`${letter}#${z}`)) {
+      for (const ctrl of ctrlEntries) {
+        for (let z = 1; z <= ctrl.zoneCount; z++) {
+          if (!seen.has(`${ctrl.letter}#${z}`)) {
             toInsert.push({
               wetCheckId: id,
-              controllerLetter: letter,
+              controllerLetter: ctrl.letter,
               zoneNumber: z,
               status: "not_applicable",
             } as InsertWetCheckZoneRecord);
@@ -10799,13 +11042,49 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(irrigationControllers)
       .where(and(...conditions))
-      .orderBy(irrigationControllers.name, irrigationControllers.id);
+      // Task #1856: order by stored letter (A–Z) instead of name so the
+      // list is stable regardless of how descriptive the controller names are.
+      // NULLs sort last (pre-backfill rows) — they won't appear after the
+      // NOT NULL migration hardens the column.
+      .orderBy(irrigationControllers.letter, irrigationControllers.id);
+  }
+
+  /**
+   * Task #1856 — Return the lowest unused letter (A–Z) for a controller in the
+   * given (company, customer, branch) scope. Letters are read from the stored
+   * `letter` column only (not derived from names). Throws if all 26 are taken.
+   */
+  async nextControllerLetter(
+    companyId: number,
+    customerId: number,
+    branchName?: string,
+  ): Promise<string> {
+    const branch = typeof branchName === "string" ? branchName.trim() : "";
+    const rows = await db
+      .select({ letter: irrigationControllers.letter })
+      .from(irrigationControllers)
+      .where(and(
+        eq(irrigationControllers.companyId, companyId),
+        eq(irrigationControllers.customerId, customerId),
+        eq(irrigationControllers.branchName, branch),
+        isNotNull(irrigationControllers.letter),
+      ));
+    const usedLetters = new Set<string>(
+      rows.map(r => r.letter).filter((l): l is string => l != null),
+    );
+    const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for (const candidate of ALPHABET) {
+      if (!usedLetters.has(candidate)) return candidate;
+    }
+    throw new Error(
+      `All 26 controller letters are in use for scope (company ${companyId}, customer ${customerId}, branch "${branch}")`,
+    );
   }
 
   async ensureIrrigationControllers(
     companyId: number,
     customerId: number,
-    configs: Array<{ name: string; zoneCount: number | null }>,
+    configs: Array<{ name: string; zoneCount: number | null; letter?: string }>,
     branchName?: string | null,
   ): Promise<IrrigationController[]> {
     const branch = typeof branchName === "string" ? branchName.trim() : "";
@@ -10822,9 +11101,33 @@ export class DatabaseStorage implements IStorage {
       );
 
     const haveNames = new Set(existing.map((c) => c.name));
+    // Track assigned letters so gap-reuse within this batch works correctly.
+    const usedLetters = new Set<string>(
+      existing.map(c => c.letter).filter((l): l is string => l != null),
+    );
 
     for (const config of configs) {
       if (haveNames.has(config.name)) continue;
+
+      // Assign the next available letter for this scope.
+      let letter = config.letter;
+      if (!letter || usedLetters.has(letter)) {
+        // Prefer the requested letter if free; otherwise pick the next gap.
+        const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        for (const candidate of ALPHABET) {
+          if (!usedLetters.has(candidate)) {
+            letter = candidate;
+            break;
+          }
+        }
+      }
+      if (!letter) {
+        // All 26 letters are in use — hard limit matches MAX_CONTROLLERS = 26.
+        throw new Error(
+          `ensureIrrigationControllers: cannot create controller "${config.name}" — all 26 letters (A–Z) are already in use for this property.`,
+        );
+      }
+      usedLetters.add(letter);
 
       const [inserted] = await db
         .insert(irrigationControllers)
@@ -10833,6 +11136,7 @@ export class DatabaseStorage implements IStorage {
           customerId,
           branchName: branch,
           name: config.name,
+          letter,
           totalZones: config.zoneCount ?? null,
           isActive: true,
           lastUpdatedAt: new Date(),
@@ -10871,7 +11175,8 @@ export class DatabaseStorage implements IStorage {
           eq(irrigationControllers.branchName, branch),
         ),
       )
-      .orderBy(irrigationControllers.name, irrigationControllers.id);
+      // Task #1856: order by stored letter so controllers are stable.
+      .orderBy(irrigationControllers.letter, irrigationControllers.id);
   }
 
   async getIrrigationController(
@@ -10906,15 +11211,45 @@ export class DatabaseStorage implements IStorage {
   async createIrrigationController(
     data: InsertIrrigationController,
   ): Promise<IrrigationController> {
-    const [ctrl] = await db
-      .insert(irrigationControllers)
-      .values({
-        ...data,
-        lastUpdatedAt: data.lastUpdatedAt ?? new Date(),
-        updatedAt: new Date(),
-      })
-      .returning();
-    return ctrl;
+    // Task #1856: auto-assign a letter if one was not provided by the caller.
+    // Retry up to 3 times on unique-index violation (23505) — rare concurrent
+    // creation race where two requests both see the same free letter and try
+    // to insert simultaneously. The unique index on (company, customer, branch,
+    // letter) will reject the second; we retry with the next free gap.
+    const branch = typeof data.branchName === "string" ? data.branchName.trim() : "";
+    let letter = data.letter;
+    const MAX_RETRIES = 3;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (!letter) {
+        letter = await this.nextControllerLetter(data.companyId, data.customerId, branch);
+      }
+      try {
+        const [ctrl] = await db
+          .insert(irrigationControllers)
+          .values({
+            ...data,
+            branchName: branch,
+            letter,
+            lastUpdatedAt: data.lastUpdatedAt ?? new Date(),
+            updatedAt: new Date(),
+          })
+          .returning();
+        return ctrl;
+      } catch (err: any) {
+        // Unique index violation on letter within scope — retry with next free letter
+        const isUniqueViolation =
+          err?.code === "23505" ||
+          (typeof err?.message === "string" && err.message.includes("uniq_irr_ctrl_letter"));
+        if (isUniqueViolation && attempt < MAX_RETRIES) {
+          letter = undefined; // force re-pick on next iteration
+          lastErr = err;
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastErr ?? new Error("createIrrigationController: failed after retries");
   }
 
   async updateIrrigationController(
@@ -11288,6 +11623,13 @@ export class DatabaseStorage implements IStorage {
     // Build lookup maps for existing data
     const existingCtrlByName = new Map(existingCtrlList.map((c) => [c.name, c]));
 
+    // Task #1856: track which letters are already in use so we can assign
+    // the next free letter to each newly-created controller in commit mode.
+    // This Set is mutated during the commit-mode loop below.
+    const csvUsedLetters = new Set<string>(
+      existingCtrlList.map(c => c.letter).filter((l): l is string => l != null),
+    );
+
     // ── Build the diff ────────────────────────────────────────────────────────
     const controllerDiffs: IrrigationImportControllerDiff[] = [];
 
@@ -11457,6 +11799,22 @@ export class DatabaseStorage implements IStorage {
 
         if (ctrlDiff.action === "create") {
           // ── Create new controller ────────────────────────────────────────
+          // Task #1856: assign the next free letter before inserting so the
+          // NOT NULL + unique constraint on (company, customer, branch, letter)
+          // is satisfied. csvUsedLetters tracks both existing and newly-created
+          // controllers within this import run.
+          const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+          let ctrlLetter: string | undefined;
+          for (const candidate of ALPHABET) {
+            if (!csvUsedLetters.has(candidate)) { ctrlLetter = candidate; break; }
+          }
+          if (!ctrlLetter) {
+            throw new Error(
+              `CSV import: cannot create controller "${ctrlName}" — all 26 letters (A–Z) are already in use for this property. Remove an existing controller first.`,
+            );
+          }
+          csvUsedLetters.add(ctrlLetter);
+
           const [newCtrl] = await q
             .insert(irrigationControllers)
             .values({
@@ -11464,6 +11822,7 @@ export class DatabaseStorage implements IStorage {
               customerId,
               branchName,
               name: ctrlName,
+              letter: ctrlLetter,
               location: group.location,
               brand: group.brand,
               model: group.model,

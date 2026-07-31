@@ -16312,7 +16312,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           companyId: ctrl.companyId,
           customerId: ctrl.customerId,
           branchName: branchParam || null,
-          controllerLetter: ctrl.name.trim().split(/\s+/).pop()?.slice(-1).toUpperCase() ?? ctrl.name.slice(0, 1).toUpperCase(),
+          // Task #1856: use stored letter, not derived from name
+          controllerLetter: ctrl.letter,
           zoneCount: ctrl.totalZones,
           notes: ctrl.notes ?? null,
         }));
@@ -16342,7 +16343,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         companyId: ctrl.companyId,
         customerId: ctrl.customerId,
         branchName: null,
-        controllerLetter: ctrl.name.trim().split(/\s+/).pop()?.slice(-1).toUpperCase() ?? ctrl.name.slice(0, 1).toUpperCase(),
+        // Task #1856: use stored letter, not derived from name
+        controllerLetter: ctrl.letter,
         zoneCount: ctrl.totalZones,
         notes: ctrl.notes ?? null,
       })));

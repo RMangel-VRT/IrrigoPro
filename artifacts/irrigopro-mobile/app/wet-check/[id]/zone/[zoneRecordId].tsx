@@ -93,6 +93,8 @@ type WetCheckDetail = {
   status: string;
   zoneRecords: WetCheckZoneRecord[];
   photos: WetCheckPhoto[];
+  /** Task #1856: resolved controllers from irrigation_controllers (letter + name + zone count). */
+  controllers?: Array<{ letter: string; name: string; zoneCount: number | null }>;
 };
 
 type IssueTypeConfig = {
@@ -246,8 +248,16 @@ export default function ZoneDetailScreen() {
     );
   }, [wc, zoneRecordId]);
 
+  // Task #1856: show letter + controller name + zone count in header.
+  const controllerForZone = useMemo(() => {
+    if (!wc?.controllers || !zone) return undefined;
+    return wc.controllers.find((c) => c.letter === zone.controllerLetter);
+  }, [wc, zone]);
+
   const headerTitle = zone
-    ? `Controller ${zone.controllerLetter} · Zone ${zone.zoneNumber ?? "?"}`
+    ? controllerForZone
+      ? `${controllerForZone.letter} — ${controllerForZone.name} (${controllerForZone.zoneCount ?? "?"} zones) · Zone ${zone.zoneNumber ?? "?"}`
+      : `Controller ${zone.controllerLetter} · Zone ${zone.zoneNumber ?? "?"}`
     : "Zone";
 
   // ─── Mutations ─────────────────────────────────────────────────────────

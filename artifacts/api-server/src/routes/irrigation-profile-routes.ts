@@ -73,7 +73,12 @@ export const createControllerBody = z.object({
   isActive: z.boolean().optional(),
 });
 
-export const updateControllerBody = createControllerBody.partial();
+export const updateControllerBody = createControllerBody.partial().extend({
+  // Task #1856: letter can be changed via the update route; it is NOT part of
+  // createControllerBody (auto-assigned on create). A-Z only, case-insensitive
+  // on input; server normalises to uppercase. Collision check done in the route.
+  letter: z.string().optional(),
+});
 
 export const createProgramBody = z.object({
   name: z.string().min(1).max(100),
@@ -266,9 +271,13 @@ export function registerIrrigationProfileRoutes(
           const branchFilter = branchName ?? "";
           const branchRows = legacyRows.filter((r) => (r.branchName ?? "") === branchFilter);
           if (branchRows.length > 0) {
-            const configs = branchRows.map((r) => ({
+            // Task #1856: carry the legacy controllerLetter forward so the
+          // allocator preserves non-sequential legacy assignments (e.g. A, C)
+          // rather than compacting them to A, B.
+          const configs = branchRows.map((r) => ({
               name: `Controller ${r.controllerLetter}`,
               zoneCount: r.zoneCount,
+              letter: r.controllerLetter,
             }));
             controllers = await storage.ensureIrrigationControllers(
               callerCompanyId,
@@ -433,11 +442,41 @@ export function registerIrrigationProfileRoutes(
       const userId = req.authenticatedUserId as number | undefined;
       const me = userId ? await storage.getUser(userId) : undefined;
 
+      // Task #1856 — letter change: validate + collision check before the update.
+      const patchData: typeof parsed.data = { ...parsed.data };
+      if (patchData.letter !== undefined) {
+        const normalized = patchData.letter.toUpperCase();
+        if (!/^[A-Z]$/.test(normalized)) {
+          return res.status(400).json({ message: "Letter must be a single uppercase character A–Z" });
+        }
+        // Collision check: another controller in the same (company, customer, branch) scope.
+        const callerCompanyIdForCheck = isSuperAdmin(role) ? null : callerCompanyId;
+        const currentCtrl = await storage.getIrrigationController(callerCompanyIdForCheck, id);
+        if (!currentCtrl) return notFound(res, "Controller");
+        const conflicting = await db
+          .select({ id: irrigationControllers.id, name: irrigationControllers.name })
+          .from(irrigationControllers)
+          .where(and(
+            eq(irrigationControllers.companyId, currentCtrl.companyId),
+            eq(irrigationControllers.customerId, currentCtrl.customerId),
+            eq(irrigationControllers.branchName, currentCtrl.branchName),
+            eq(irrigationControllers.letter, normalized),
+            sql`${irrigationControllers.id} <> ${id}`,
+          ));
+        if (conflicting.length > 0) {
+          return res.status(409).json({
+            message: `Letter ${normalized} is already used by "${conflicting[0].name}"`,
+            holdingController: conflicting[0].name,
+          });
+        }
+        patchData.letter = normalized;
+      }
+
       try {
         const updated = await storage.updateIrrigationController(
           isSuperAdmin(role) ? null : callerCompanyId,
           id,
-          { ...parsed.data },
+          { ...patchData },
           me ? { id: me.id, name: me.name } : undefined,
         );
         if (!updated) return notFound(res, "Controller");

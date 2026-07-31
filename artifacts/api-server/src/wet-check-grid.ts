@@ -16,6 +16,8 @@
 export interface IrrigationControllerRow {
   name: string;
   totalZones: number | null;
+  /** Stored letter (Task #1856). Present for profile-path rows after backfill. */
+  letter?: string | null;
 }
 
 export interface PropertyControllerRow {
@@ -27,12 +29,19 @@ export interface PropertyControllerRow {
 export interface GridSeedConfig {
   name: string;
   zoneCount: number | null;
+  /** Letter to store on the controller row. Sourced from property_controllers
+   *  in the legacy path so we honour existing stored letters rather than
+   *  re-deriving them positionally. */
+  letter?: string;
 }
 
 export interface GridResult {
   numControllers: number;
   seedConfigs: GridSeedConfig[];
 }
+
+// Alphabet constant — avoids String.fromCharCode(65+i) throughout this module.
+const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 /**
  * Build the seed-config array used to call `ensureIrrigationControllers`.
@@ -56,11 +65,14 @@ export function buildWetCheckGrid(
   if (irrigCtrls.length > 0) {
     // Profile path: count and zone configs come entirely from irrigation_controllers.
     // Zone counts are passed through as-is — null is NOT defaulted to 12.
+    // Letters come from the stored letter column (Task #1856); fall back to
+    // positional assignment only for pre-backfill rows where letter IS NULL.
     return {
       numControllers: irrigCtrls.length,
-      seedConfigs: irrigCtrls.map(ctrl => ({
+      seedConfigs: irrigCtrls.map((ctrl, index) => ({
         name: ctrl.name,
         zoneCount: ctrl.totalZones ?? null,
+        letter: ctrl.letter ?? ALPHABET[index],
       })),
     };
   }
@@ -68,16 +80,22 @@ export function buildWetCheckGrid(
   // Legacy path: keep the exact behaviour that existed before this module was
   // introduced. Count = clamp(customers.totalControllers, 1, 26).
   // Zone counts come from property_controllers rows that match the branch bucket.
+  // Letters are read directly from property_controllers.controllerLetter so we
+  // never re-derive them positionally.
   const numControllers = Math.max(1, Math.min(26, Number(totalControllers ?? 1)));
-  const pcMap = new Map(
-    legacyPCs
-      .filter(r => (r.branchName ?? "") === branchKey)
-      .map(r => [r.controllerLetter, r]),
-  );
-  const seedConfigs = Array.from({ length: numControllers }, (_, i) => {
-    const letter = String.fromCharCode("A".charCodeAt(0) + i);
-    const pc = pcMap.get(letter);
-    return { name: `Controller ${letter}`, zoneCount: pc?.zoneCount ?? null } satisfies GridSeedConfig;
-  });
+  const pcsForBranch = legacyPCs
+    .filter(r => (r.branchName ?? "") === branchKey)
+    .sort((a, b) => a.controllerLetter.localeCompare(b.controllerLetter));
+
+  const seedConfigs: GridSeedConfig[] = [];
+  for (let i = 0; i < numControllers; i++) {
+    const letter = ALPHABET[i];
+    const pc = pcsForBranch.find(r => r.controllerLetter === letter);
+    seedConfigs.push({
+      name: `Controller ${letter}`,
+      zoneCount: pc?.zoneCount ?? null,
+      letter,
+    });
+  }
   return { numControllers, seedConfigs };
 }

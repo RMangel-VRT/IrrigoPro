@@ -154,11 +154,13 @@ async function loadBackfillCandidates(): Promise<BackfillRow[]> {
 async function seedController(row: LegacyControllerRow): Promise<void> {
   const controllerName = `Controller ${row.controllerLetter}`;
 
+  // Task #1856: include `letter` (NOT NULL + unique) from the legacy
+  // controllerLetter field so this migration does not violate the new constraint.
   const inserted = await db.execute<{ id: string }>(sql`
     INSERT INTO irrigation_controllers
-      (company_id, customer_id, branch_name, name, total_zones, is_active, created_at, updated_at)
+      (company_id, customer_id, branch_name, name, letter, total_zones, is_active, created_at, updated_at)
     VALUES
-      (${row.companyId}, ${row.customerId}, ${row.branchName}, ${controllerName}, ${row.zoneCount}, true, NOW(), NOW())
+      (${row.companyId}, ${row.customerId}, ${row.branchName}, ${controllerName}, ${row.controllerLetter}, ${row.zoneCount}, true, NOW(), NOW())
     ON CONFLICT (company_id, customer_id, branch_name, name) DO NOTHING
     RETURNING id
   `);

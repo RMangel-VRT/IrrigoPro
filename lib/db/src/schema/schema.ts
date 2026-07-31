@@ -1713,6 +1713,9 @@ export type WetCheckWithDetails = WetCheck & {
   // originatedWorkOrderId is also set when that estimate has been converted.
   originatedEstimateId?: number | null;
   originatedWorkOrderId?: number | null;
+  // Task #1856 — resolved controllers for this wet check (letter + name + zone count).
+  // Used by the mobile app to display the controller name in the zone header.
+  controllers?: Array<{ letter: string; name: string; zoneCount: number | null }>;
 };
 
 // Stable seed for issue_type_configs — applied per company on startup.
@@ -1815,6 +1818,11 @@ export const irrigationControllers = pgTable("irrigation_controllers", {
   // can use plain typed columns without COALESCE.
   branchName: text("branch_name").notNull().default(""),
   name: text("name").notNull(),
+  // Stored controller letter (A–Z). Auto-assigned on create, editable via
+  // the PATCH /letter endpoint. Nullable during the migration window
+  // (before the backfill + NOT NULL migration run). After Slice 1 of
+  // Task #1856 hardens the column, every row is guaranteed to have a letter.
+  letter: text("letter"),
   location: text("location"),
   brand: text("brand"),
   model: text("model"),
@@ -1834,6 +1842,12 @@ export const irrigationControllers = pgTable("irrigation_controllers", {
   // Controller name is unique within a customer+branch scope per company.
   uniqCtrlName: uniqueIndex("uniq_irr_ctrl_name")
     .on(table.companyId, table.customerId, table.branchName, table.name),
+  // Unique letter within scope — added after backfill hardens every row.
+  // NOTE: this index is created by the second migration (Task #1856 Slice 1
+  // step 6) after the backfill confirms every row has a non-null letter.
+  // The line below is intentionally commented out until that migration runs.
+  // uniqCtrlLetter: uniqueIndex("uniq_irr_ctrl_letter")
+  //   .on(table.companyId, table.customerId, table.branchName, table.letter),
 }));
 
 export const insertIrrigationControllerSchema = createInsertSchema(irrigationControllers);

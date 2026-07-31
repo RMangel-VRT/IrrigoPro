@@ -107,6 +107,8 @@ type WetCheckDetail = {
   notes: string | null;
   zoneRecords: WetCheckZoneRecord[];
   photos: WetCheckPhoto[];
+  /** Task #1856: resolved controllers from irrigation_controllers (letter + name + zone count). */
+  controllers?: Array<{ letter: string; name: string; zoneCount: number | null }>;
 };
 
 type PropertyController = {
@@ -290,13 +292,23 @@ export default function WetCheckDetailScreen() {
       apiRequest<PropertyController[]>(`/api/properties/${wcd!.customerId}/controllers`),
     staleTime: 5 * 60_000,
   });
+  // Task #1856: prefer zone counts from wcd.controllers (stored on irrigation_controllers).
+  // Fall back to the legacy property-controllers query for pre-profile customers.
   const zoneCountByLetter = useMemo(() => {
     const map = new Map<string, number>();
-    for (const c of controllersQuery.data ?? []) {
-      map.set(c.controllerLetter, c.zoneCount);
+    if (wcd?.controllers && wcd.controllers.length > 0) {
+      for (const c of wcd.controllers) {
+        if (c.zoneCount != null) map.set(c.letter, c.zoneCount);
+      }
+    } else {
+      for (const c of controllersQuery.data ?? []) {
+        map.set(c.controllerLetter, c.zoneCount);
+      }
     }
     return map;
-  }, [controllersQuery.data]);
+  }, [wcd, controllersQuery.data]);
+
+  const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
   const grouped = useMemo(() => {
     if (!wcd) return [] as Array<{ letter: string; zones: Array<WetCheckZoneRecord | null> }>;
@@ -305,15 +317,21 @@ export default function WetCheckDetailScreen() {
     for (const z of wcd.zoneRecords) {
       recordMap.set(`${z.controllerLetter}#${z.zoneNumber}`, z);
     }
-    // Derive which controller letters are in scope
-    const letters: string[] = [];
-    for (let i = 0; i < (wcd.numControllers ?? 0); i++) {
-      letters.push(String.fromCharCode("A".charCodeAt(0) + i));
-    }
+    // Task #1856: derive letters from stored controllers when available;
+    // fall back to positional A…N from numControllers for legacy data.
+    const baseLetters: string[] = wcd.controllers && wcd.controllers.length > 0
+      ? wcd.controllers.map(c => c.letter)
+      : Array.from({ length: wcd.numControllers ?? 0 }, (_, i) => ALPHABET[i]).filter(Boolean) as string[];
+    const letterSet = new Set(baseLetters);
+    // Supplement with any letters from existing zone records not already in the list
     for (const z of wcd.zoneRecords) {
-      if (!letters.includes(z.controllerLetter)) letters.push(z.controllerLetter);
+      if (!letterSet.has(z.controllerLetter)) {
+        letterSet.add(z.controllerLetter);
+        baseLetters.push(z.controllerLetter);
+      }
     }
-    letters.sort();
+    baseLetters.sort();
+    const letters = baseLetters;
     return letters.map((letter) => {
       // Determine zone count for this controller (fall back to max existing zone number)
       const zoneCount =
@@ -375,10 +393,14 @@ export default function WetCheckDetailScreen() {
       } else if (z.status === "not_applicable") na++;
       else notChecked++;  // existing not_checked records
     }
-    // Virtual zones (no record yet) also count as not-checked
+    // Virtual zones (no record yet) also count as not-checked.
+    // Task #1856: use stored letters from wcd.controllers; fall back to
+    // positional A…N from numControllers for legacy data.
     const recordedKeys = new Set(wcd.zoneRecords.map((z) => `${z.controllerLetter}#${z.zoneNumber}`));
-    for (let i = 0; i < (wcd.numControllers ?? 0); i++) {
-      const letter = String.fromCharCode("A".charCodeAt(0) + i);
+    const ctrlLetters = wcd.controllers && wcd.controllers.length > 0
+      ? wcd.controllers.map(c => c.letter)
+      : (Array.from({ length: wcd.numControllers ?? 0 }, (_, i) => ALPHABET[i]).filter(Boolean) as string[]);
+    for (const letter of ctrlLetters) {
       const zoneCount = zoneCountByLetter.get(letter) ?? 0;
       for (let z = 1; z <= zoneCount; z++) {
         if (!recordedKeys.has(`${letter}#${z}`)) notChecked++;

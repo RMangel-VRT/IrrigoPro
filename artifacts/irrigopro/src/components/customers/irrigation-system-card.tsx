@@ -19,17 +19,6 @@ import { IrrigationControllerGrid } from "./irrigation-controller-grid";
 const MAX_CONTROLLERS = 26;
 const MIN_CONTROLLERS = 1;
 
-function letterFor(index: number) {
-  return String.fromCharCode("A".charCodeAt(0) + index);
-}
-
-function extractLetter(name: string): string {
-  return (
-    name.trim().split(/\s+/).pop()?.slice(-1).toUpperCase() ??
-    name.slice(0, 1).toUpperCase()
-  );
-}
-
 interface IrrigationSystemCardProps {
   customer: Customer;
   canManageControllers: boolean;
@@ -49,23 +38,10 @@ export function IrrigationSystemCard({ customer, canManageControllers }: Irrigat
     queryFn: () => apiRequest(`/api/customers/${customerId}/controllers-profile`),
   });
 
-  const controllersByLetter = useMemo(() => {
-    const map = new Map<string, IrrigationController>();
-    for (const c of controllers) {
-      map.set(extractLetter(c.name), c);
-    }
-    return map;
-  }, [controllers]);
-
-  const letters = useMemo(
-    () => Array.from({ length: totalControllers }, (_, i) => letterFor(i)),
-    [totalControllers],
-  );
-
-  const totalZones = letters.reduce((sum, letter) => {
-    const row = controllersByLetter.get(letter);
-    const zones = row?.totalZones;
-    return zones != null ? sum + zones : sum;
+  // Zone total: sum totalZones directly from each controller row.
+  // No letter derivation — letters are stored on irrigation_controllers.letter.
+  const totalZones = controllers.reduce((sum, ctrl) => {
+    return ctrl.totalZones != null ? sum + ctrl.totalZones : sum;
   }, 0);
 
   const updateTotalControllers = useMutation({
@@ -100,8 +76,8 @@ export function IrrigationSystemCard({ customer, canManageControllers }: Irrigat
           </CardTitle>
           <div className="flex flex-wrap items-center gap-3">
             <div className="text-sm text-gray-600">
-              <span className="font-semibold text-gray-900">{totalControllers}</span>{" "}
-              {totalControllers === 1 ? "controller" : "controllers"}
+              <span className="font-semibold text-gray-900">{controllers.length || totalControllers}</span>{" "}
+              {(controllers.length || totalControllers) === 1 ? "controller" : "controllers"}
               <span className="mx-2 text-gray-300">•</span>
               <span className="font-semibold text-gray-900">{totalZones}</span>{" "}
               {totalZones === 1 ? "zone" : "zones"}

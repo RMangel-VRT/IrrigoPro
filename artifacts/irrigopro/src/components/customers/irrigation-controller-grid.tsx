@@ -116,13 +116,6 @@ function zoneTypeLabel(t: string): string {
   return ZONE_TYPES.find((z) => z.value === t)?.label ?? t;
 }
 
-function extractLetter(name: string): string {
-  return (
-    name.trim().split(/\s+/).pop()?.slice(-1).toUpperCase() ??
-    name.slice(0, 1).toUpperCase()
-  );
-}
-
 // ── Day pill selector ────────────────────────────────────────────────────────
 
 function DayPillSelector({
@@ -1329,7 +1322,9 @@ function ControllerGridTile({
     setDraftZones((prev) => prev.map((z) => (z.id === updated.id ? updated : z)));
   }, []);
 
-  const letter = extractLetter(controller.name);
+  // Use the stored letter (Task #1856). Fall back to first character of name for
+  // pre-backfill rows that have letter IS NULL.
+  const letter = controller.letter ?? controller.name.slice(0, 1).toUpperCase();
   const zoneCount = controller.totalZones;
 
   const updateZoneCount = useMutation({

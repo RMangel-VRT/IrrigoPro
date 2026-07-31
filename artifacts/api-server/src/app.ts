@@ -5,6 +5,7 @@ import connectPgSimple from "connect-pg-simple";
 import pinoHttp from "pino-http";
 import { logger } from "./lib/logger";
 import { registerRoutes } from "./routes/routes";
+import { storage } from "./storage";
 import marketingRouter from "./routes/marketing";
 import fileUpload from "express-fileupload";
 import type { Server } from "http";
@@ -86,6 +87,13 @@ export async function createApp(): Promise<{ app: Express; httpServer: Server }>
   );
 
   app.use("/api", marketingRouter);
+
+  // Task #1856: run the controller-letter backfill + DDL hardening BEFORE the
+  // server starts accepting requests so no controller create can race a missing
+  // NOT NULL constraint or absent unique index.  Failures throw and crash startup
+  // (same philosophy as a failed DB schema migration).
+  await storage.initialize();
+
   const httpServer = await registerRoutes(app);
   return { app, httpServer };
 }
