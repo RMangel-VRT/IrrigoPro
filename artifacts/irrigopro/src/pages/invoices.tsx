@@ -139,6 +139,9 @@ interface Invoice {
   // instead of re-deriving due date client-side so aging buckets match the
   // server-side computeArAging logic exactly.
   effectiveDueDate?: string | null;
+  // Task #1848 — QBO void detection. Set when the sync loop detects the
+  // invoice was voided in QuickBooks. Null means no void detected.
+  qbVoidDetectedAt?: string | null;
 }
 
 const MONTH_NAMES = [
@@ -360,7 +363,7 @@ const AGING_OPTIONS: { value: AgingFilter; label: string }[] = [
   { value: "current", label: "Not yet due" },
   { value: "days30", label: "1–30 days overdue" },
   { value: "days60", label: "31–60 days overdue" },
-  { value: "days90Plus", label: "61–90+ days overdue" },
+  { value: "days90Plus", label: "60+ days overdue" },
 ];
 
 function parseAging(search: string): AgingFilter {
@@ -643,7 +646,16 @@ export default function InvoicesPage() {
       isAutoSyncRef.current = false;
 
       if (result?.throttled) {
-        // Always silent when throttled — auto or manual
+        // Auto-trigger: always silent when throttled (background operation).
+        // Manual click: show a toast with how long until the next sync is available.
+        if (!wasAuto) {
+          const secs = result?.nextAllowedIn ?? 0;
+          const mins = Math.ceil(secs / 60);
+          toast({
+            title: "Recently synced",
+            description: `Next refresh available in ${mins} minute${mins !== 1 ? "s" : ""}.`,
+          });
+        }
         return;
       }
 
@@ -651,15 +663,17 @@ export default function InvoicesPage() {
 
       const paid = result?.paid ?? 0;
       const partial = result?.partiallyPaid ?? 0;
+      const voided = result?.qbVoided ?? 0;
       const hasChanges = paid > 0 || partial > 0;
 
       // Auto-trigger: only toast when something actually changed
-      if (wasAuto && !hasChanges) return;
+      if (wasAuto && !hasChanges && voided === 0) return;
 
-      const msg = hasChanges
-        ? `Updated ${paid} paid, ${partial} partially paid`
-        : "All invoices are up to date";
-      toast({ title: "Payment status refreshed from QuickBooks", description: msg });
+      const parts: string[] = [];
+      if (hasChanges) parts.push(`Updated ${paid} paid, ${partial} partially paid`);
+      else parts.push("All invoices are up to date");
+      if (voided > 0) parts.push(`${voided} voided in QuickBooks — review required`);
+      toast({ title: "Payment status refreshed from QuickBooks", description: parts.join(". ") });
     },
     onError: (err: Error) => {
       const wasAuto = isAutoSyncRef.current;
@@ -1530,8 +1544,18 @@ export default function InvoicesPage() {
                               {invoice.paymentStatus === "partially_paid" && (
                                 <Badge className="bg-amber-100 text-amber-800 text-xs" data-testid={`partial-badge-${invoice.id}`}>Partial</Badge>
                               )}
-                              {invoice.paymentSyncedAt && invoice.paymentStatus === "unpaid" && (
+                              {invoice.paymentSyncedAt && invoice.paymentStatus === "unpaid" && !invoice.qbVoidDetectedAt && (
                                 <Badge className="bg-gray-100 text-gray-700 text-xs" data-testid={`unpaid-badge-${invoice.id}`}>Unpaid</Badge>
+                              )}
+                              {invoice.qbVoidDetectedAt && (
+                                <Badge
+                                  className="bg-orange-100 text-orange-800 border border-orange-300 text-xs cursor-help"
+                                  title="This invoice was voided in QuickBooks but is still open in IrrigoPro. Void it here or restore it in QuickBooks."
+                                  data-testid={`qb-voided-badge-${invoice.id}`}
+                                >
+                                  <AlertCircle className="w-3 h-3 mr-1" />
+                                  Voided in QB
+                                </Badge>
                               )}
                               {renderQbIcon(invoice)}
                             </div>

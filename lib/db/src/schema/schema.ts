@@ -915,6 +915,11 @@ export const invoices = pgTable("invoices", {
   paymentStatus: text("payment_status").notNull().default("unpaid"),
   balance: decimal("balance", { precision: 10, scale: 2 }),
   paymentSyncedAt: timestamp("payment_synced_at"),
+  // Task #1848 — QBO void detection. Set when the sync loop detects that QBO
+  // has voided this invoice (TotalAmt=0, PrivateNote contains "Voided"). NULL
+  // means no void detected. Cleared when a later sync sees it is no longer voided.
+  // Never auto-changes `status` or `paymentStatus`; only surfaces for human review.
+  qbVoidDetectedAt: timestamp("qb_void_detected_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({

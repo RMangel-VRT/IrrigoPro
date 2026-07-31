@@ -173,6 +173,10 @@ function makeInvoice(over: Partial<StubInvoice> = {}): StubInvoice {
     mergedIntoInvoiceId: null as any,
     qbNote: null as any,
     billingType: 'monthly',
+    paymentStatus: "unpaid",
+    balance: null as any,
+    paymentSyncedAt: null as any,
+    qbVoidDetectedAt: null as any,
     createdAt: now,
     updatedAt: now,
   };

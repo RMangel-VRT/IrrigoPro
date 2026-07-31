@@ -4,6 +4,7 @@ import { reconcileInspectionPassMigration } from './reconcile-inspection-pass';
 import { invoiceRevisionBackfillMigration } from './invoice-revision-backfill';
 import { repairTicketTotalDriftMigration } from './repair-ticket-total-drift';
 import { backfillMergedInvoiceStatusMigration } from './backfill-merged-invoice-status';
+import { repairQbVoidMispaidMigration } from './repair-qb-void-mispaid';
 
 const REGISTRY = new Map<string, MigrationDefinition>([
   [repairTicketTotalDriftMigration.id, repairTicketTotalDriftMigration],
@@ -11,6 +12,7 @@ const REGISTRY = new Map<string, MigrationDefinition>([
   [reconcileInspectionPassMigration.id, reconcileInspectionPassMigration],
   [invoiceRevisionBackfillMigration.id, invoiceRevisionBackfillMigration],
   [backfillMergedInvoiceStatusMigration.id, backfillMergedInvoiceStatusMigration],
+  [repairQbVoidMispaidMigration.id, repairQbVoidMispaidMigration],
 ]);
 
 export function listMigrations(): MigrationDefinition[] {

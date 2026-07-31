@@ -29,6 +29,8 @@ interface Invoice {
   balance?: string | null;
   paymentSyncedAt?: string | null;
   isOverdue?: boolean;
+  // Task #1848 — QBO void detection timestamp.
+  qbVoidDetectedAt?: string | null;
 }
 
 const MONTH_NAMES = [
@@ -267,6 +269,16 @@ export function InvoiceList({ customerId, limit = 20, onOpenPdf }: InvoiceListPr
                     </Badge>
                   )}
                   {getPaymentStatusBadge(invoice)}
+                  {invoice.qbVoidDetectedAt && (
+                    <Badge
+                      className="bg-orange-100 text-orange-800 border border-orange-300 text-xs cursor-help"
+                      title="This invoice was voided in QuickBooks but is still open in IrrigoPro. Void it here or restore it in QuickBooks."
+                      data-testid={`qb-voided-badge-${invoice.id}`}
+                    >
+                      <AlertTriangle className="w-3 h-3 mr-1" />
+                      Voided in QB
+                    </Badge>
+                  )}
                   {invoice.billingType === 'standalone' && (
                     <Badge className="bg-indigo-100 text-indigo-800 text-xs">Standalone</Badge>
                   )}

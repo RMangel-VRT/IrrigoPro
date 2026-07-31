@@ -30,7 +30,10 @@ export interface PaymentSyncSummary {
   invoicesChecked: number;
   paid: number;
   partiallyPaid: number;
-  unchanged: number;
+  /** Invoices whose QBO balance still equals their total (no payment recorded). */
+  unpaid: number;
+  /** Invoices detected as voided in QBO this sync run. */
+  qbVoided: number;
   skippedNoQb: boolean;
   syncedAt: string;
 }
@@ -41,8 +44,12 @@ export function derivePaymentStatus(
   balance: number,
   totalAmt: number,
 ): PaymentStatus {
+  // Task #1848 — guard $0 invoices (e.g. fully-covered membership work, OR
+  // QBO-voided invoices) before the balance-zero "paid" check so we never
+  // auto-stamp a voided invoice as paid.
+  if (totalAmt <= 0) return "unpaid";
   if (balance <= 0) return "paid";
-  if (totalAmt > 0 && balance < totalAmt) return "partially_paid";
+  if (balance < totalAmt) return "partially_paid";
   return "unpaid";
 }
 
@@ -128,6 +135,17 @@ export function resetThrottleForTesting(companyId?: string): void {
   }
 }
 
+// ── Per-company in-flight guard ─────────────────────────────────────────────
+// Prevents two near-simultaneous requests for the same company from each
+// issuing a full QBO batch query. The second caller reuses the first caller's
+// Promise and receives an identical summary at no extra QBO cost.
+
+const inFlightByCompany = new Map<string, Promise<PaymentSyncSummary>>();
+
+export function resetInFlightForTesting(): void {
+  inFlightByCompany.clear();
+}
+
 // ── Terminal statuses — excluded from sync ─────────────────────────────────
 
 const SYNC_EXCLUDED_STATUSES = ["cancelled", "superseded", "merged", "failed", "draft"];
@@ -138,6 +156,8 @@ interface QbInvoiceBalance {
   Id: string;
   Balance: number;
   TotalAmt: number;
+  /** Raw PrivateNote from QBO; contains the word "Voided" when the invoice was voided in QB. */
+  PrivateNote?: string;
 }
 
 // Sentinel error class so syncPaymentStatusForCompany can distinguish
@@ -162,7 +182,7 @@ async function fetchQbBalances(
   for (let i = 0; i < qbIds.length; i += BATCH) {
     const chunk = qbIds.slice(i, i + BATCH);
     const idList = chunk.map((id) => `'${id}'`).join(", ");
-    const qlStr = `SELECT Id, Balance, TotalAmt FROM Invoice WHERE Id IN (${idList})`;
+    const qlStr = `SELECT Id, Balance, TotalAmt, PrivateNote FROM Invoice WHERE Id IN (${idList})`;
     const query = encodeURIComponent(qlStr);
 
     const resp = await makeRequest(
@@ -187,7 +207,7 @@ async function fetchQbBalances(
     }
 
     const data = (await resp.json()) as {
-      QueryResponse?: { Invoice?: Array<{ Id?: string; Balance?: number; TotalAmt?: number }> };
+      QueryResponse?: { Invoice?: Array<{ Id?: string; Balance?: number; TotalAmt?: number; PrivateNote?: string }> };
     };
     const items = data?.QueryResponse?.Invoice ?? [];
     for (const item of items) {
@@ -196,6 +216,7 @@ async function fetchQbBalances(
           Id: item.Id,
           Balance: typeof item.Balance === "number" ? item.Balance : parseFloat(String(item.Balance ?? 0)),
           TotalAmt: typeof item.TotalAmt === "number" ? item.TotalAmt : parseFloat(String(item.TotalAmt ?? 0)),
+          PrivateNote: item.PrivateNote,
         });
       }
     }
@@ -222,6 +243,22 @@ export async function syncPaymentStatusForCompany(
   companyId: string,
   deps: SyncPaymentStatusDeps,
 ): Promise<PaymentSyncSummary> {
+  // Task #1848 — concurrent sync guard: if a sync is already in flight for
+  // this company, return the same promise so only one QBO batch query fires.
+  const existing = inFlightByCompany.get(companyId);
+  if (existing) return existing;
+
+  const promise = _syncImpl(companyId, deps);
+  inFlightByCompany.set(companyId, promise);
+  return promise.finally(() => {
+    inFlightByCompany.delete(companyId);
+  });
+}
+
+async function _syncImpl(
+  companyId: string,
+  deps: SyncPaymentStatusDeps,
+): Promise<PaymentSyncSummary> {
   const db: any = deps._db ?? dbModule;
   const companyIdNum = parseInt(companyId, 10);
 
@@ -230,7 +267,8 @@ export async function syncPaymentStatusForCompany(
     invoicesChecked: 0,
     paid: 0,
     partiallyPaid: 0,
-    unchanged: 0,
+    unpaid: 0,
+    qbVoided: 0,
     skippedNoQb: false,
     syncedAt: new Date().toISOString(),
   };
@@ -242,12 +280,17 @@ export async function syncPaymentStatusForCompany(
     if (!raw || raw.connectionStatus === "reconnect_required") {
       summary.skippedNoQb = true;
       logger.warn({ companyId }, "[qb-payment-sync] No valid QBO connection; skipping sync");
+      // Task #1848 — stamp throttle even on skip so repeated mounts within
+      // the window don't re-run the integration lookup.
+      recordSyncTime(companyId, db);
       return summary;
     }
     integration = { realmId: raw.realmId, accessToken: raw.accessToken };
   } catch (err) {
     logger.warn({ err, companyId }, "[qb-payment-sync] Failed to look up QBO integration; skipping");
     summary.skippedNoQb = true;
+    // Task #1848 — stamp throttle on error-skip too.
+    recordSyncTime(companyId, db);
     return summary;
   }
 
@@ -259,6 +302,7 @@ export async function syncPaymentStatusForCompany(
       totalAmount: invoices.totalAmount,
       paymentStatus: invoices.paymentStatus,
       status: invoices.status,
+      qbVoidDetectedAt: invoices.qbVoidDetectedAt,
     })
     .from(invoices)
     .where(
@@ -306,11 +350,39 @@ export async function syncPaymentStatusForCompany(
     const qbData = balanceByQbId.get(qbId);
     if (!qbData) continue; // QBO doesn't know this invoice (void, etc.) — skip
 
+    // Task #1848 — detect QBO-voided invoices: TotalAmt=0 AND PrivateNote
+    // contains the word "Voided" (case-insensitive). This is the marker QBO
+    // writes when an invoice is voided in the QB UI.
+    const isQbVoided =
+      qbData.TotalAmt === 0 &&
+      typeof qbData.PrivateNote === "string" &&
+      qbData.PrivateNote.toLowerCase().includes("voided");
+
+    if (isQbVoided) {
+      // Surface for human review: stamp the detection timestamp on first
+      // detection; do NOT change status or paymentStatus so the invoice stays
+      // in AR and remains editable. Managers see a warning badge instead.
+      const voidUpdates: Record<string, unknown> = {
+        qbVoidDetectedAt: row.qbVoidDetectedAt ? row.qbVoidDetectedAt : now,
+        paymentSyncedAt: now,
+      };
+      await db.update(invoices).set(voidUpdates).where(eq(invoices.id, row.id));
+      summary.qbVoided++;
+      continue;
+    }
+
+    // Clear the void flag if a later sync shows the invoice is no longer voided.
+    const voidClearUpdate: Record<string, unknown> = {};
+    if (row.qbVoidDetectedAt) {
+      voidClearUpdate.qbVoidDetectedAt = null;
+    }
+
     // Use QBO's own TotalAmt (not local totalAmount) to avoid misclassification
     // when local totals drift from QBO (e.g. after corrections or manual edits in QBO).
     const newStatus = derivePaymentStatus(qbData.Balance, qbData.TotalAmt);
 
     const updates: Record<string, unknown> = {
+      ...voidClearUpdate,
       paymentStatus: newStatus,
       balance: qbData.Balance.toFixed(2),
       paymentSyncedAt: now,
@@ -323,7 +395,7 @@ export async function syncPaymentStatusForCompany(
     } else if (newStatus === "partially_paid") {
       summary.partiallyPaid++;
     } else {
-      summary.unchanged++;
+      summary.unpaid++;
     }
 
     await db

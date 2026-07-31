@@ -17,6 +17,7 @@ import {
   isThrottled,
   recordSyncTime,
   resetThrottleForTesting,
+  resetInFlightForTesting,
   syncPaymentStatusForCompany,
 } from "./qb-payment-sync.js";
 
@@ -43,9 +44,22 @@ describe("derivePaymentStatus", () => {
     assert.equal(derivePaymentStatus(600, 500), "unpaid");
   });
 
-  it("returns 'unpaid' when totalAmt is 0 and balance is 0", () => {
-    // $0 invoice fully balanced — treated as paid
-    assert.equal(derivePaymentStatus(0, 0), "paid");
+  it("returns 'unpaid' when totalAmt is 0 and balance is 0 (void / $0 invoice)", () => {
+    // Task #1848 — a $0 invoice (voided or fully-covered membership) must
+    // never be auto-stamped paid. The totalAmt ≤ 0 guard fires first.
+    assert.equal(derivePaymentStatus(0, 0), "unpaid");
+  });
+
+  it("returns 'unpaid' when totalAmt is 0 and balance is non-zero", () => {
+    assert.equal(derivePaymentStatus(100, 0), "unpaid");
+  });
+
+  it("returns 'paid' when balance is 0 and totalAmt is positive", () => {
+    assert.equal(derivePaymentStatus(0, 100), "paid");
+  });
+
+  it("returns 'partially_paid' when 0 < balance < totalAmt (positive total)", () => {
+    assert.equal(derivePaymentStatus(40, 100), "partially_paid");
   });
 });
 
@@ -175,7 +189,7 @@ function makeRequest(overrides: Partial<{
 }
 
 describe("syncPaymentStatusForCompany", () => {
-  beforeEach(() => resetThrottleForTesting());
+  beforeEach(() => { resetThrottleForTesting(); resetInFlightForTesting(); });
 
   it("returns skippedNoQb=true when no QB integration found", async () => {
     const result = await syncPaymentStatusForCompany("42", {
@@ -311,14 +325,14 @@ describe("syncPaymentStatusForCompany", () => {
     assert.equal(updates[0].status, undefined);
   });
 
-  it("marks unchanged=1 when QBO Balance matches totalAmt", async () => {
+  it("marks unpaid=1 when QBO Balance matches totalAmt", async () => {
     const updates: any[] = [];
     const fakeDb = {
       select: () => ({
         from: () => ({
           where: () =>
             Promise.resolve([
-              { id: 3, quickbooksInvoiceId: "QB-3", totalAmount: "300.00", paymentStatus: "unpaid", status: "generated" },
+              { id: 3, quickbooksInvoiceId: "QB-3", totalAmount: "300.00", paymentStatus: "unpaid", status: "generated", qbVoidDetectedAt: null },
             ]),
         }),
       }),
@@ -349,9 +363,160 @@ describe("syncPaymentStatusForCompany", () => {
       _db: fakeDb,
     });
 
-    assert.equal(result.unchanged, 1);
+    assert.equal(result.unpaid, 1);
     assert.equal(updates[0].paymentStatus, "unpaid");
     assert.equal(updates[0].status, undefined);
+  });
+
+  // ── Void detection tests ───────────────────────────────────────────────
+
+  it("sets qbVoidDetectedAt on first detection; does NOT change paymentStatus or status", async () => {
+    const updates: any[] = [];
+    const fakeDb = {
+      select: () => ({
+        from: () => ({
+          where: () =>
+            Promise.resolve([
+              { id: 10, quickbooksInvoiceId: "QB-V1", totalAmount: "500.00", paymentStatus: "unpaid", status: "sent", qbVoidDetectedAt: null },
+            ]),
+        }),
+      }),
+      update: () => ({
+        set: (vals: any) => ({
+          where: () => {
+            updates.push(vals);
+            return Promise.resolve();
+          },
+        }),
+      }),
+    };
+
+    const result = await syncPaymentStatusForCompany("99", {
+      makeRequest: makeRequest({
+        body: {
+          QueryResponse: {
+            Invoice: [{ Id: "QB-V1", Balance: 0, TotalAmt: 0, PrivateNote: "Voided" }],
+          },
+        },
+      }) as any,
+      getQbIntegration: async () => ({ realmId: "r1", accessToken: "t1", connectionStatus: "connected" }),
+      apiBase: "https://sandbox-quickbooks.api.intuit.com",
+      _db: fakeDb,
+    });
+
+    assert.equal(result.qbVoided, 1, "qbVoided counter should be 1");
+    assert.equal(result.paid, 0, "paid counter must not increment for voided invoices");
+    assert.ok(updates.length === 1, "should have exactly one DB update");
+    assert.ok(updates[0].qbVoidDetectedAt instanceof Date, "qbVoidDetectedAt should be set to a Date");
+    assert.equal(updates[0].paymentStatus, undefined, "paymentStatus must not be changed");
+    assert.equal(updates[0].status, undefined, "status must not be changed");
+  });
+
+  it("preserves existing qbVoidDetectedAt on repeat detection (first-detection semantics)", async () => {
+    const originalDate = new Date("2026-01-15T10:00:00Z");
+    const updates: any[] = [];
+    const fakeDb = {
+      select: () => ({
+        from: () => ({
+          where: () =>
+            Promise.resolve([
+              { id: 11, quickbooksInvoiceId: "QB-V2", totalAmount: "200.00", paymentStatus: "unpaid", status: "sent", qbVoidDetectedAt: originalDate },
+            ]),
+        }),
+      }),
+      update: () => ({
+        set: (vals: any) => ({
+          where: () => { updates.push(vals); return Promise.resolve(); },
+        }),
+      }),
+    };
+
+    await syncPaymentStatusForCompany("99", {
+      makeRequest: makeRequest({
+        body: { QueryResponse: { Invoice: [{ Id: "QB-V2", Balance: 0, TotalAmt: 0, PrivateNote: "Voided" }] } },
+      }) as any,
+      getQbIntegration: async () => ({ realmId: "r1", accessToken: "t1", connectionStatus: "connected" }),
+      apiBase: "https://sandbox-quickbooks.api.intuit.com",
+      _db: fakeDb,
+    });
+
+    // qbVoidDetectedAt should preserve the original timestamp (not be overwritten)
+    assert.deepEqual(updates[0].qbVoidDetectedAt, originalDate);
+  });
+
+  it("clears qbVoidDetectedAt when invoice is no longer voided on re-sync", async () => {
+    const updates: any[] = [];
+    const fakeDb = {
+      select: () => ({
+        from: () => ({
+          where: () =>
+            Promise.resolve([
+              { id: 12, quickbooksInvoiceId: "QB-V3", totalAmount: "300.00", paymentStatus: "unpaid", status: "sent", qbVoidDetectedAt: new Date() },
+            ]),
+        }),
+      }),
+      update: () => ({
+        set: (vals: any) => ({
+          where: () => { updates.push(vals); return Promise.resolve(); },
+        }),
+      }),
+    };
+
+    await syncPaymentStatusForCompany("99", {
+      makeRequest: makeRequest({
+        body: { QueryResponse: { Invoice: [{ Id: "QB-V3", Balance: 300, TotalAmt: 300, PrivateNote: "" }] } },
+      }) as any,
+      getQbIntegration: async () => ({ realmId: "r1", accessToken: "t1", connectionStatus: "connected" }),
+      apiBase: "https://sandbox-quickbooks.api.intuit.com",
+      _db: fakeDb,
+    });
+
+    assert.equal(updates[0].qbVoidDetectedAt, null, "void flag should be cleared when invoice is no longer voided");
+  });
+
+  it("does NOT set void flag for $0 invoice without 'Voided' in PrivateNote", async () => {
+    const updates: any[] = [];
+    const fakeDb = {
+      select: () => ({
+        from: () => ({
+          where: () =>
+            Promise.resolve([
+              { id: 13, quickbooksInvoiceId: "QB-ZERO", totalAmount: "0.00", paymentStatus: "unpaid", status: "sent", qbVoidDetectedAt: null },
+            ]),
+        }),
+      }),
+      update: () => ({
+        set: (vals: any) => ({
+          where: () => { updates.push(vals); return Promise.resolve(); },
+        }),
+      }),
+    };
+
+    const result = await syncPaymentStatusForCompany("99", {
+      makeRequest: makeRequest({
+        body: { QueryResponse: { Invoice: [{ Id: "QB-ZERO", Balance: 0, TotalAmt: 0, PrivateNote: "" }] } },
+      }) as any,
+      getQbIntegration: async () => ({ realmId: "r1", accessToken: "t1", connectionStatus: "connected" }),
+      apiBase: "https://sandbox-quickbooks.api.intuit.com",
+      _db: fakeDb,
+    });
+
+    assert.equal(result.qbVoided, 0, "no void flag for $0 invoice without Voided marker");
+    assert.equal(updates[0].paymentStatus, "unpaid", "paymentStatus should be 'unpaid' (not paid) for $0 invoice");
+  });
+
+  it("skips no-QBO company and stamps throttle timestamp (prevents repeated integration lookup)", async () => {
+    const result = await syncPaymentStatusForCompany("77", {
+      makeRequest: makeRequest() as any,
+      getQbIntegration: async () => null,
+      apiBase: "https://sandbox-quickbooks.api.intuit.com",
+      _db: makeFakeDb([]),
+    });
+
+    assert.equal(result.skippedNoQb, true);
+    // After the skip, the company should be throttled so repeated mounts
+    // don't re-run the integration lookup within the throttle window.
+    assert.equal(isThrottled("77"), true, "company should be throttled after no-QB skip");
   });
 
   it("skips invoices not returned by QBO (unknown/voided)", async () => {
@@ -453,5 +618,55 @@ describe("syncPaymentStatusForCompany", () => {
         return true;
       },
     );
+  });
+
+  it("two simultaneous sync requests for the same company issue only one QBO batch query", async () => {
+    // This exercises the per-company in-flight Promise guard. When two callers
+    // hit syncPaymentStatusForCompany for the same company concurrently, the
+    // second should attach to the first's in-flight Promise rather than issuing
+    // a second QBO request.
+    let qboQueryCount = 0;
+
+    // makeRequest that counts QBO calls and resolves asynchronously so both
+    // callers are guaranteed to be in flight before either returns.
+    let resolveQbo!: (v: any) => void;
+    const qboLatch = new Promise<any>((res) => { resolveQbo = res; });
+
+    const slowMakeRequest = async (_url: string, _opts: any) => {
+      qboQueryCount++;
+      return qboLatch;
+    };
+
+    const deps = {
+      makeRequest: slowMakeRequest as any,
+      getQbIntegration: async () => ({
+        realmId: "r-conc",
+        accessToken: "t-conc",
+        connectionStatus: "connected",
+      }),
+      apiBase: "https://sandbox-quickbooks.api.intuit.com",
+      _db: makeFakeDb([
+        { id: 77, quickbooksInvoiceId: "QB-77", totalAmount: "100.00", paymentStatus: "unpaid", status: "sent", qbVoidDetectedAt: null },
+      ]),
+    };
+
+    // Start both calls simultaneously before unlocking QBO.
+    const call1 = syncPaymentStatusForCompany("company-concurrent-test", deps);
+    const call2 = syncPaymentStatusForCompany("company-concurrent-test", deps);
+
+    // Allow the QBO call to complete once both callers are in flight.
+    resolveQbo({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({ QueryResponse: { Invoice: [{ Id: "QB-77", Balance: 100, TotalAmt: 100 }] } }),
+      text: async () => "{}",
+    });
+
+    const [r1, r2] = await Promise.all([call1, call2]);
+
+    assert.equal(qboQueryCount, 1, "QBO should only be queried once despite two simultaneous calls");
+    assert.equal(r1.invoicesChecked, r2.invoicesChecked, "both callers should see the same invoicesChecked");
+    assert.equal(r1.unpaid, r2.unpaid, "both callers should see the same unpaid count");
   });
 });

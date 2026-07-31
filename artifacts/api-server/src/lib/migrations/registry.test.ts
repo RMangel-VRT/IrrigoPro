@@ -45,6 +45,26 @@ describe("migration registry — static shape", () => {
     );
   });
 
+  it("contains repair-qb-void-mispaid-v1", () => {
+    const ids = listMigrations().map((m) => m.id);
+    assert.ok(
+      ids.includes("repair-qb-void-mispaid-v1"),
+      "missing repair-qb-void-mispaid-v1",
+    );
+  });
+
+  it("repair-qb-void-mispaid-v1 has the required MigrationDefinition shape", () => {
+    const m = getMigration("repair-qb-void-mispaid-v1");
+    assert.ok(m, "getMigration should return a definition");
+    assert.equal(m.id, "repair-qb-void-mispaid-v1");
+    assert.ok(m.title.length > 0, "title should be non-empty");
+    assert.ok(m.description.length > 0, "description should be non-empty");
+    assert.equal(typeof m.check, "function");
+    assert.equal(typeof m.preview, "function");
+    assert.equal(typeof m.run, "function");
+    assert.ok(!m.deprecated, "new migration must NOT be deprecated");
+  });
+
   it("does NOT contain reconcile-billing-sheet-invoice-totals-v1 (superseded)", () => {
     const ids = new Set(listMigrations().map((m) => m.id));
     assert.ok(
