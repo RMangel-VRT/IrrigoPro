@@ -22,6 +22,7 @@ import {
   UserCog,
   Repeat,
   Database,
+  TrendingUp,
   type LucideIcon,
 } from "lucide-react";
 
@@ -125,6 +126,7 @@ export const billingManagerNav: NavConfig = {
       defaultOpen: true,
       items: [
         { type: "leaf", label: "Manager Workspace", path: "/manager-workspace", icon: LayoutDashboard, badgeKey: "awaitingApproval" },
+        { type: "leaf", label: "Budget Status", path: "/budget-status", icon: TrendingUp },
         { type: "leaf", label: "Financial Pulse", path: "/financial-pulse", icon: Activity },
         { type: "leaf", label: "Command Center", path: "/billing/command-center", icon: ClipboardList },
         { type: "leaf", label: "Billing Sheets", path: "/billing-sheets", icon: ClipboardList },
@@ -180,6 +182,7 @@ export const billingManagerNav: NavConfig = {
 export const managerNav: NavConfig = {
   items: [
     { type: "leaf", label: "Manager Workspace", path: "/manager-workspace", icon: ClipboardCheck },
+    { type: "leaf", label: "Budget Status", path: "/budget-status", icon: TrendingUp },
     wetCheckGroup,
     {
       type: "group",
@@ -284,6 +287,7 @@ export const companyAdminNav: NavConfig = {
       icon: DollarSign,
       items: [
         { type: "leaf", label: "Manager Workspace", path: "/manager-workspace", icon: LayoutDashboard, badgeKey: "awaitingApproval" },
+        { type: "leaf", label: "Budget Status", path: "/budget-status", icon: TrendingUp },
         { type: "leaf", label: "Financial Pulse", path: "/financial-pulse", icon: Activity },
         { type: "leaf", label: "Command Center", path: "/billing/command-center", icon: ClipboardList },
         { type: "leaf", label: "Invoices", path: "/invoices", icon: Receipt },

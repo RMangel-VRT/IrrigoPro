@@ -28,13 +28,14 @@ export interface RegisterBudgetRoutesDeps {
   requireAuthentication: RequestHandler;
 }
 
-// Slice 1 spec: only super_admin / company_admin / billing_manager can
-// see a customer's budget usage. irrigation_manager is intentionally
-// NOT in this set — they get pricing data but not budget signals.
+// Task #1866 — Budget Status Page: irrigation_manager added to full
+// visibility set. Previously excluded (Slice 1 spec), now has full
+// budget figures to power the Budget Status page and card.
 const VISIBILITY_ROLES = new Set([
   "super_admin",
   "company_admin",
   "billing_manager",
+  "irrigation_manager",
 ]);
 
 function parseDecimal(raw: unknown): number | null {
@@ -367,6 +368,365 @@ export function registerBudgetRoutes(
       } catch (error) {
         console.error("Error computing company budget summary:", error);
         res.status(500).json({ message: "Failed to compute company summary" });
+      }
+    },
+  );
+
+  // Task #1866 — Full-visibility budget status endpoint.
+  // GET /api/budget/status?year=YYYY&month=MM
+  // Returns per-customer budget status for the caller's company, sorted
+  // worst-first. Accessible to VISIBILITY_ROLES (includes irrigation_manager).
+  app.get(
+    "/api/budget/status",
+    requireAuthentication,
+    async (req: any, res) => {
+      try {
+        const role = req.authenticatedUserRole as string | undefined;
+        if (!role || !VISIBILITY_ROLES.has(role)) {
+          res.status(403).json({ message: "Forbidden" });
+          return;
+        }
+
+        const callerCompanyId = req.authenticatedUserCompanyId as
+          | number
+          | null
+          | undefined;
+        if (role !== "super_admin" && callerCompanyId == null) {
+          res.status(403).json({ message: "No company context" });
+          return;
+        }
+
+        const now = new Date();
+        const rawYear = req.query.year as string | undefined;
+        const rawMonth = req.query.month as string | undefined;
+        const year = rawYear ? parseInt(rawYear, 10) : now.getFullYear();
+        const month = rawMonth ? parseInt(rawMonth, 10) : now.getMonth() + 1;
+
+        if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) {
+          res.status(400).json({ message: "Invalid year or month" });
+          return;
+        }
+
+        // Company scope.
+        let companyId: number | null = callerCompanyId ?? null;
+        if (role === "super_admin" && req.query.companyId) {
+          const n = parseInt(String(req.query.companyId), 10);
+          if (!Number.isFinite(n) || n <= 0) {
+            res.status(400).json({ message: "Invalid companyId" });
+            return;
+          }
+          companyId = n;
+        }
+
+        const monthWin = {
+          start: new Date(year, month - 1, 1),
+          end: new Date(year, month, 1),
+        };
+
+        // Season-to-date: April through end of `month` (or last season month).
+        const SEASON_FIRST = 4;
+        const SEASON_LAST = 10;
+        const seasonEndMonth = Math.min(month, SEASON_LAST);
+        const seasonStart = new Date(year, SEASON_FIRST - 1, 1);
+        const seasonEnd = new Date(year, seasonEndMonth, 1);
+
+        // Load all customers in scope.
+        const allCustomers = companyId != null
+          ? await db
+              .select()
+              .from(customersTable)
+              .where(eq(customersTable.companyId, companyId))
+          : await db.select().from(customersTable);
+
+        const customerIds = allCustomers.map((c) => c.id);
+
+        // Load monthly allocations for all customers in one query.
+        const allocationMap = new Map<number, number>();
+        if (customerIds.length > 0) {
+          const allocRows = await db
+            .select({
+              customerId: customerBudgetMonths.customerId,
+              amount: customerBudgetMonths.amount,
+            })
+            .from(customerBudgetMonths)
+            .where(
+              and(
+                inArray(customerBudgetMonths.customerId, customerIds),
+                eq(customerBudgetMonths.year, year),
+                eq(customerBudgetMonths.month, month),
+              ),
+            );
+          for (const r of allocRows) {
+            const n = parseDecimal(r.amount);
+            if (n != null) allocationMap.set(r.customerId, n);
+          }
+        }
+
+        // Load season-to-date allocations (Apr..month) for all customers.
+        const elapsedSeasonMonths: number[] = [];
+        for (let m = SEASON_FIRST; m <= seasonEndMonth; m++) {
+          elapsedSeasonMonths.push(m);
+        }
+        const seasonAllocMap = new Map<number, number>();
+        if (customerIds.length > 0 && elapsedSeasonMonths.length > 0) {
+          const sRows = await db
+            .select({
+              customerId: customerBudgetMonths.customerId,
+              amount: customerBudgetMonths.amount,
+            })
+            .from(customerBudgetMonths)
+            .where(
+              and(
+                inArray(customerBudgetMonths.customerId, customerIds),
+                eq(customerBudgetMonths.year, year),
+                inArray(customerBudgetMonths.month, elapsedSeasonMonths),
+              ),
+            );
+          for (const r of sRows) {
+            const n = parseDecimal(r.amount);
+            if (n != null) {
+              const prev = seasonAllocMap.get(r.customerId) ?? 0;
+              seasonAllocMap.set(r.customerId, prev + n);
+            }
+          }
+        }
+
+        // Build per-customer rows.
+        const rows: Array<{
+          customerId: number;
+          customerName: string;
+          allocation: number | null;
+          invoicedAmount: number;
+          pendingAmount: number;
+          totalSpend: number;
+          fillPercent: number | null;
+          status: "Go" | "Slow down" | "Stop" | "Unset";
+          softThresholdPercent: number;
+          hardThresholdPercent: number;
+          seasonToDateTarget: number;
+          seasonToDateSpend: number;
+          seasonToDateInvoiced: number;
+          seasonToDatePending: number;
+          annualGoal: number | null;
+        }> = [];
+
+        // Compute spend for all customers (sequentially to avoid overwhelming DB).
+        for (const customer of allCustomers) {
+          const soft = customer.budgetSoftThresholdPercent ?? 75;
+          const hard = customer.budgetHardThresholdPercent ?? 100;
+          const allocation = allocationMap.get(customer.id) ?? null;
+          const seasonTarget = seasonAllocMap.get(customer.id) ?? 0;
+
+          const [monthSpend, seasonSpend] = await Promise.all([
+            computeCustomerSpend(customer.id, companyId, monthWin),
+            computeCustomerSpend(customer.id, companyId, { start: seasonStart, end: seasonEnd }),
+          ]);
+
+          let fillPercent: number | null = null;
+          if (allocation !== null && allocation > 0) {
+            fillPercent = (monthSpend.total / allocation) * 100;
+          }
+
+          // Map internal status to crew-friendly labels.
+          let status: "Go" | "Slow down" | "Stop" | "Unset";
+          if (fillPercent === null) {
+            status = "Unset";
+          } else if (fillPercent >= hard) {
+            status = "Stop";
+          } else if (fillPercent >= soft) {
+            status = "Slow down";
+          } else {
+            status = "Go";
+          }
+
+          const annualGoal = parseDecimal((customer as any).annualBudgetGoal);
+
+          rows.push({
+            customerId: customer.id,
+            customerName: customer.name ?? "(unnamed)",
+            allocation,
+            invoicedAmount: monthSpend.invoiced,
+            pendingAmount: monthSpend.pendingNotBilled,
+            totalSpend: monthSpend.total,
+            fillPercent,
+            status,
+            softThresholdPercent: soft,
+            hardThresholdPercent: hard,
+            seasonToDateTarget: seasonTarget,
+            seasonToDateSpend: seasonSpend.total,
+            seasonToDateInvoiced: seasonSpend.invoiced,
+            seasonToDatePending: seasonSpend.pendingNotBilled,
+            annualGoal,
+          });
+        }
+
+        // Sort worst-first by fillPercent descending (null/unset last).
+        rows.sort((a, b) => {
+          if (a.fillPercent === null && b.fillPercent === null) return 0;
+          if (a.fillPercent === null) return 1;
+          if (b.fillPercent === null) return -1;
+          return b.fillPercent - a.fillPercent;
+        });
+
+        // Company roll-up.
+        const totalAllocation = rows.reduce((s, r) => s + (r.allocation ?? 0), 0);
+        const totalSpend = rows.reduce((s, r) => s + r.totalSpend, 0);
+        const totalInvoiced = rows.reduce((s, r) => s + r.invoicedAmount, 0);
+        const totalPending = rows.reduce((s, r) => s + r.pendingAmount, 0);
+        const customersWithAllocation = rows.filter((r) => r.allocation !== null).length;
+        const overCapCount = rows.filter((r) => r.status === "Stop").length;
+        const approachingCount = rows.filter((r) => r.status === "Slow down").length;
+        const seasonToDateTarget = rows.reduce((s, r) => s + r.seasonToDateTarget, 0);
+        const seasonToDateSpend = rows.reduce((s, r) => s + r.seasonToDateSpend, 0);
+
+        res.json({
+          year,
+          month,
+          companyId,
+          lastRefreshedAt: now.toISOString(),
+          rollup: {
+            totalAllocation,
+            totalSpend,
+            totalInvoiced,
+            totalPending,
+            customersWithAllocation,
+            overCapCount,
+            approachingCount,
+            seasonToDateTarget,
+            seasonToDateSpend,
+          },
+          rows,
+        });
+      } catch (error) {
+        console.error("Error computing budget status:", error);
+        res.status(500).json({ message: "Failed to compute budget status" });
+      }
+    },
+  );
+
+  // Task #1866 — Crew-only budget status endpoint.
+  // GET /api/budget/crew-status?year=YYYY&month=MM
+  // Returns per-customer status and fillPercent only. Gated to field_tech.
+  // MUST NOT include cap, spend, remaining, percent, invoicedAmount,
+  // pendingAmount, allocation, annualGoal, or any monetary value.
+  app.get(
+    "/api/budget/crew-status",
+    requireAuthentication,
+    async (req: any, res) => {
+      try {
+        const role = req.authenticatedUserRole as string | undefined;
+        if (role !== "field_tech") {
+          res.status(403).json({ message: "Forbidden — crew endpoint only" });
+          return;
+        }
+
+        const callerCompanyId = req.authenticatedUserCompanyId as
+          | number
+          | null
+          | undefined;
+        if (callerCompanyId == null) {
+          res.status(403).json({ message: "No company context" });
+          return;
+        }
+
+        const now = new Date();
+        const rawYear = req.query.year as string | undefined;
+        const rawMonth = req.query.month as string | undefined;
+        const year = rawYear ? parseInt(rawYear, 10) : now.getFullYear();
+        const month = rawMonth ? parseInt(rawMonth, 10) : now.getMonth() + 1;
+
+        if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) {
+          res.status(400).json({ message: "Invalid year or month" });
+          return;
+        }
+
+        const monthWin = {
+          start: new Date(year, month - 1, 1),
+          end: new Date(year, month, 1),
+        };
+
+        // Load all customers for the company.
+        const allCustomers = await db
+          .select()
+          .from(customersTable)
+          .where(eq(customersTable.companyId, callerCompanyId));
+
+        const customerIds = allCustomers.map((c) => c.id);
+
+        // Load monthly allocations.
+        const allocationMap = new Map<number, number>();
+        if (customerIds.length > 0) {
+          const allocRows = await db
+            .select({
+              customerId: customerBudgetMonths.customerId,
+              amount: customerBudgetMonths.amount,
+            })
+            .from(customerBudgetMonths)
+            .where(
+              and(
+                inArray(customerBudgetMonths.customerId, customerIds),
+                eq(customerBudgetMonths.year, year),
+                eq(customerBudgetMonths.month, month),
+              ),
+            );
+          for (const r of allocRows) {
+            const n = parseDecimal(r.amount);
+            if (n != null) allocationMap.set(r.customerId, n);
+          }
+        }
+
+        // Build crew rows — ONLY status and fillPercent exposed.
+        const rows: Array<{
+          customerId: number;
+          customerName: string;
+          status: "Go" | "Slow down" | "Stop" | "Unset";
+          fillPercent: number | null;
+        }> = [];
+
+        for (const customer of allCustomers) {
+          const soft = customer.budgetSoftThresholdPercent ?? 75;
+          const hard = customer.budgetHardThresholdPercent ?? 100;
+          const allocation = allocationMap.get(customer.id) ?? null;
+
+          let fillPercent: number | null = null;
+          let status: "Go" | "Slow down" | "Stop" | "Unset" = "Unset";
+
+          if (allocation !== null && allocation > 0) {
+            const monthSpend = await computeCustomerSpend(
+              customer.id,
+              callerCompanyId,
+              monthWin,
+            );
+            fillPercent = (monthSpend.total / allocation) * 100;
+            if (fillPercent >= hard) {
+              status = "Stop";
+            } else if (fillPercent >= soft) {
+              status = "Slow down";
+            } else {
+              status = "Go";
+            }
+          }
+
+          rows.push({
+            customerId: customer.id,
+            customerName: customer.name ?? "(unnamed)",
+            status,
+            fillPercent,
+          });
+        }
+
+        // Sort worst-first.
+        rows.sort((a, b) => {
+          if (a.fillPercent === null && b.fillPercent === null) return 0;
+          if (a.fillPercent === null) return 1;
+          if (b.fillPercent === null) return -1;
+          return b.fillPercent - a.fillPercent;
+        });
+
+        res.json({ year, month, rows });
+      } catch (error) {
+        console.error("Error computing crew budget status:", error);
+        res.status(500).json({ message: "Failed to compute crew budget status" });
       }
     },
   );

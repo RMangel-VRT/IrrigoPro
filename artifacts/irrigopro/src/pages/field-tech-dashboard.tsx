@@ -4,13 +4,91 @@ import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Package, ClipboardList, Plus } from "lucide-react";
+import { Package, ClipboardList, Plus, TrendingUp } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { apiRequest, useArrayQuery } from "@/lib/queryClient";
+import { apiRequest, useArrayQuery, adaptiveRefetchInterval } from "@/lib/queryClient";
 import type { WorkOrder } from "@workspace/db/schema";
 import { Link } from "wouter";
 import { BilledBadge } from "@/components/ui/billed-indicator";
 import { BillingSheetWizard } from "@/components/billing/billing-sheet-wizard";
+import { BudgetBar, type BudgetStatus } from "@/components/budget/BudgetBar";
+
+/** Map the server's string status to the BudgetBar's BudgetStatus enum. */
+function serverStatusToBudgetStatus(s: "Go" | "Slow down" | "Stop" | "Unset"): BudgetStatus {
+  switch (s) {
+    case "Go":        return "healthy";
+    case "Slow down": return "approaching";
+    case "Stop":      return "over";
+    case "Unset":     return "unset";
+  }
+}
+
+// ─── Crew budget types ────────────────────────────────────────────────────────
+interface CrewBudgetRow {
+  customerId: number;
+  customerName: string;
+  status: "Go" | "Slow down" | "Stop" | "Unset";
+  /** Display hint for bar width only — never shown as a text label. */
+  fillPercent: number | null;
+}
+interface CrewBudgetResponse {
+  year: number;
+  month: number;
+  rows: CrewBudgetRow[];
+}
+
+// ─── Crew Budget Section ──────────────────────────────────────────────────────
+function CrewBudgetSection() {
+  const now = new Date();
+  const { data, isLoading } = useQuery<CrewBudgetResponse | null>({
+    queryKey: [`/api/budget/crew-status?year=${now.getFullYear()}&month=${now.getMonth() + 1}`],
+    refetchInterval: adaptiveRefetchInterval(60_000),
+    staleTime: 30_000,
+  });
+
+  const rows = data?.rows ?? [];
+  // Only show customers with an allocation (non-Unset) or Stop/Slow down.
+  const relevant = rows.filter((r) => r.status !== "Unset").slice(0, 8);
+
+  if (isLoading || relevant.length === 0) return null;
+
+  return (
+    <Card className="border-2 hover:shadow-lg transition-all duration-200" data-testid="crew-budget-section">
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-3">
+          <div className="bg-amber-100 p-2 rounded-full flex-shrink-0">
+            <TrendingUp className="w-6 h-6 text-amber-600" />
+          </div>
+          <div>
+            <CardTitle className="text-lg text-gray-900">Budget Status</CardTitle>
+            <p className="text-gray-600 text-xs">Customer budget overview</p>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="pt-0">
+        <ul className="space-y-3" data-testid="crew-budget-list">
+          {relevant.map((row) => (
+            <li key={row.customerId} className="space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-medium text-gray-800 truncate">{row.customerName}</span>
+              </div>
+              {/* BudgetBar: fillPercent drives bar width; forcedStatus overrides
+                  local threshold re-computation so each customer's custom
+                  soft/hard thresholds (from the server) are honoured. */}
+              <BudgetBar
+                invoicedAmount={row.fillPercent !== null ? row.fillPercent : 0}
+                pendingAmount={0}
+                allocation={row.fillPercent !== null ? 100 : null}
+                forcedStatus={serverStatusToBudgetStatus(row.status)}
+                hideDollars
+              />
+            </li>
+          ))}
+        </ul>
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function FieldTechDashboard() {
   const [showBillingModal, setShowBillingModal] = useState(false);
@@ -150,6 +228,9 @@ export default function FieldTechDashboard() {
             </CardContent>
           </Card>
         </div>
+
+        {/* ── Crew Budget Status ──────────────────────────────────────── */}
+        <CrewBudgetSection />
 
         {/* Standalone Billing Sheet Modal */}
         <BillingSheetWizard
