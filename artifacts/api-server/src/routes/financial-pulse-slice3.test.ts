@@ -227,46 +227,46 @@ describe("Task #692 — sort=budget_risk ordering", () => {
       paidAt: null,
     });
     const custs: CustomerWithBudget[] = [
-      // c1 — over (150% of 1000 allocation)
+      // c1 — over (150% of 1000 cap)
       {
         id: 1,
         companyId: 1,
         name: "C1 over",
-        monthlyAllocation: 1000,
+        monthlyBudgetCap: "1000",
         budgetSoftThresholdPercent: 75,
         budgetHardThresholdPercent: 100,
       },
-      // c2 — approaching (80% of 1000 allocation)
+      // c2 — approaching (80% of 1000 cap)
       {
         id: 2,
         companyId: 1,
         name: "C2 approaching",
-        monthlyAllocation: 1000,
+        monthlyBudgetCap: "1000",
         budgetSoftThresholdPercent: 75,
         budgetHardThresholdPercent: 100,
       },
-      // c3 — healthy (20% of 1000 allocation)
+      // c3 — healthy (20% of 1000 cap)
       {
         id: 3,
         companyId: 1,
         name: "C3 healthy",
-        monthlyAllocation: 1000,
+        monthlyBudgetCap: "1000",
         budgetSoftThresholdPercent: 75,
         budgetHardThresholdPercent: 100,
       },
-      // c4 — unset (no allocation) with huge revenue, must NOT come first
+      // c4 — unset (no cap) with huge revenue, must NOT come first
       {
         id: 4,
         companyId: 1,
         name: "C4 no cap big",
-        monthlyAllocation: null,
+        monthlyBudgetCap: null,
       },
       // c5 — over by 200% — should beat c1
       {
         id: 5,
         companyId: 1,
         name: "C5 over harder",
-        monthlyAllocation: 1000,
+        monthlyBudgetCap: "1000",
         budgetSoftThresholdPercent: 75,
         budgetHardThresholdPercent: 100,
       },

@@ -971,7 +971,7 @@ function BudgetCard({ customerId }: { customerId: number }) {
       <CardContent>
         {bothUnset ? (
           <div className="text-sm text-gray-600">
-            <p className="mb-2">No budget goal set for this customer yet.</p>
+            <p className="mb-2">No budget caps set for this customer yet.</p>
             <Button type="button" variant="outline" size="sm"
               onClick={() => setLocation(`/customers?edit=${customerId}#budget-and-alerts`)}>
               Set a budget

@@ -586,10 +586,8 @@ export function computeArAging(
 }
 
 export interface BudgetFields {
-  // Task #1865 — replaced flat cap columns with allocation lookup.
-  // monthlyAllocation comes from customerBudgetMonths for the current month;
-  // null means no row exists (goal unset or month outside season).
-  monthlyAllocation?: number | null;
+  monthlyBudgetCap?: string | number | null;
+  annualBudgetCap?: string | number | null;
   budgetSoftThresholdPercent?: number | null;
   budgetHardThresholdPercent?: number | null;
 }
@@ -700,12 +698,16 @@ export function computeTopCustomers(input: {
     const r = byCust.get(c.id);
     const monthSpend = r?.monthSpend ?? 0;
     const yearSpend = r?.yearSpend ?? 0;
-    // Task #1865 — monthlyAllocation is populated from customerBudgetMonths
-    // by loadCustomers; null means no allocation set for this month.
-    const mCap = c.monthlyAllocation ?? null;
+    const mCap = c.monthlyBudgetCap == null || c.monthlyBudgetCap === ""
+      ? null
+      : toNum(c.monthlyBudgetCap);
+    const aCap = c.annualBudgetCap == null || c.annualBudgetCap === ""
+      ? null
+      : toNum(c.annualBudgetCap);
     const soft = c.budgetSoftThresholdPercent ?? 75;
     const hard = c.budgetHardThresholdPercent ?? 100;
     const mPct = mCap != null && mCap > 0 ? monthSpend / mCap : null;
+    const aPct = aCap != null && aCap > 0 ? yearSpend / aCap : null;
     out.push({
       customerId: c.id,
       name: c.name ?? `Customer #${c.id}`,
@@ -714,7 +716,7 @@ export function computeTopCustomers(input: {
       monthlySpend: monthSpend,
       monthlyUsedPct: mPct,
       monthlyStatus: classifyStatus(mPct, soft, hard),
-      annualCap: null, // Task #1865 — annual tracking moved to budget-routes; not used here
+      annualCap: aCap,
       annualSpend: yearSpend,
       annualUsedPct: aPct,
       annualStatus: classifyStatus(aPct, soft, hard),
@@ -1173,9 +1175,8 @@ export function computePulseCustomers(input: {
   const out: PulseCustomerRow[] = [];
   for (const c of custs) {
     if (c.hiddenFromBilling) continue;
-    // Task #1865 — monthlyAllocation is sourced from customerBudgetMonths;
-    // null means no seasonal allocation for this month.
-    const capN = c.monthlyAllocation ?? null;
+    const rawCap = c.monthlyBudgetCap;
+    const capN = rawCap == null || rawCap === "" ? null : toNum(rawCap) || null;
     const monthlySpend = monthlySpendByCust.get(c.id) ?? 0;
     const mPct = capN != null && capN > 0 ? monthlySpend / capN : null;
     const soft = c.budgetSoftThresholdPercent ?? 75;

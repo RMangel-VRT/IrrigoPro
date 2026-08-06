@@ -21,7 +21,6 @@ import {
   Wrench,
   ArrowRight,
 } from "lucide-react";
-import { BudgetStatusCard } from "@/components/budget/BudgetStatusCard";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -435,9 +434,6 @@ export default function ManagerWorkspacePage() {
           />
         </CardContent>
       </Card>
-
-      {/* ── Budget Status Card ────────────────────────────────────────────── */}
-      <BudgetStatusCard />
 
       {/* ── Launchpad ─────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-3 gap-3" data-testid="launchpad">

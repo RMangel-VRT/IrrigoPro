@@ -17,7 +17,6 @@
 import { db } from "../db";
 import {
   customerBudgetAlertEvents,
-  customerBudgetMonths,
   customers as customersTable,
   invoices as invoicesTable,
   users as usersTable,
@@ -445,36 +444,21 @@ export async function checkBudgetThresholds(invoice: Invoice): Promise<void> {
     const customer = await storage.getCustomer(invoice.customerId);
     if (!customer) return;
 
-    // Task #1865 — resolve monthly cap from customerBudgetMonths.
-    // Annual cap comes from customer.annualBudgetGoal.
-    const now: Date =
-      invoice.createdAt instanceof Date
-        ? invoice.createdAt
-        : new Date(invoice.createdAt as unknown as string);
-    const alertMonth = now.getMonth() + 1; // 1-12
-    const alertYear = now.getFullYear();
-
-    const [monthAllocationRow] = await db
-      .select({ amount: customerBudgetMonths.amount })
-      .from(customerBudgetMonths)
-      .where(
-        and(
-          eq(customerBudgetMonths.customerId, customer.id),
-          eq(customerBudgetMonths.year, alertYear),
-          eq(customerBudgetMonths.month, alertMonth),
-        ),
-      );
-
-    const monthlyCap = monthAllocationRow
-      ? parseDecimal(monthAllocationRow.amount)
-      : null;
-    const annualCap = parseDecimal((customer as any).annualBudgetGoal);
+    const monthlyCap = parseDecimal(customer.monthlyBudgetCap);
+    const annualCap = parseDecimal(customer.annualBudgetCap);
     if (monthlyCap == null && annualCap == null) return;
 
     const soft = customer.budgetSoftThresholdPercent ?? 75;
     const hard = customer.budgetHardThresholdPercent ?? 100;
 
-    // `now` is already set above (used to resolve alertMonth/alertYear).
+    // Use the invoice's createdAt as the "now" the task spec asks for
+    // (referred to as invoice.invoiceDate). The invoices table doesn't
+    // have an invoiceDate column — createdAt is the canonical billing
+    // timestamp used by the dashboard rollups, so we match that here.
+    const now: Date =
+      invoice.createdAt instanceof Date
+        ? invoice.createdAt
+        : new Date(invoice.createdAt as unknown as string);
     const { monthKey, yearKey } = getPeriodKeys(now);
     const monthWin = getMonthWindow(now);
     const yearWin = getYearWindow(now);

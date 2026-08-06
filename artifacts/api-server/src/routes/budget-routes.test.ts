@@ -14,51 +14,28 @@ import type { AddressInfo } from "node:net";
 import { registerBudgetRoutes } from "./budget-routes";
 import { db } from "../db";
 
-// Table-aware db.select shim.
-// - When customerBudgetMonths is selected, returns rows from state.monthlyAllocs.
-// - For every other table (WCBs used by computeCustomerSpend, etc.) returns [].
+// Shim db.select to return empty WCBs so computeCustomerSpend's WCB leg
+// is deterministic (tests only configure invoice data via storage stubs).
 // Must be installed before any module that imports budget-spend is loaded.
-function _makeMockChain(fromTableName?: string): any {
-  const chain: any = new Proxy(
-    {},
-    {
-      get(_t, prop) {
-        if (prop === "then") {
-          return (resolve: (v: any[]) => void) => {
-            if (fromTableName === "customer_budget_months") {
-              const now = new Date();
-              const month = now.getMonth() + 1;
-              const year = now.getFullYear();
-              const rows = Array.from(state.monthlyAllocs.entries()).map(
-                ([custId, amount]) => ({ customerId: custId, amount, year, month }),
-              );
-              resolve(rows);
-            } else {
-              resolve([]);
-            }
-          };
-        }
-        if (prop === "from") {
-          return (tbl: any) => {
-            const name =
-              tbl && typeof tbl === "object" && "_" in tbl
-                ? (tbl as any)._.name
-                : undefined;
-            return _makeMockChain(name);
-          };
-        }
-        return () => _makeMockChain(fromTableName);
-      },
+const _dbChain: any = new Proxy(
+  {},
+  {
+    get(_t, prop) {
+      if (prop === "then") {
+        return (resolve: (v: any[]) => void) => resolve([]);
+      }
+      return () => _dbChain;
     },
-  );
-  return chain;
-}
-(db as any).select = () => _makeMockChain();
+  },
+);
+const _realDbSelect = (db as any).select.bind(db);
+(db as any).select = () => _dbChain;
 
 interface StubCustomer {
   id: number;
   companyId: number;
-  annualBudgetGoal: string | null;
+  monthlyBudgetCap: string | null;
+  annualBudgetCap: string | null;
   budgetSoftThresholdPercent: number | null;
   budgetHardThresholdPercent: number | null;
 }
@@ -78,8 +55,6 @@ interface StubInvoice {
 const state = {
   customers: new Map<number, StubCustomer>(),
   invoices: [] as StubInvoice[],
-  // Task #1865: per-customer monthly allocation amounts (simulates customerBudgetMonths).
-  monthlyAllocs: new Map<number, string>(),
 };
 
 // Patch the real storage singleton so the route under test reads from
@@ -113,21 +88,19 @@ async function startServer(app: Express): Promise<{ server: Server; base: string
 function setSeed() {
   state.customers.clear();
   state.invoices.length = 0;
-  state.monthlyAllocs.clear();
-  // Customer 1: $1000/month allocation + $10000 annual goal.
   state.customers.set(1, {
     id: 1,
     companyId: 10,
-    annualBudgetGoal: "10000.00",
+    monthlyBudgetCap: "1000.00",
+    annualBudgetCap: "10000.00",
     budgetSoftThresholdPercent: 75,
     budgetHardThresholdPercent: 100,
   });
-  state.monthlyAllocs.set(1, "1000.00");
-  // Customer 2: no goal, no allocation → always "unset".
   state.customers.set(2, {
     id: 2,
     companyId: 20,
-    annualBudgetGoal: null,
+    monthlyBudgetCap: null,
+    annualBudgetCap: null,
     budgetSoftThresholdPercent: null,
     budgetHardThresholdPercent: null,
   });

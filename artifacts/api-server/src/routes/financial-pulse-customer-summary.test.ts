@@ -103,6 +103,8 @@ describe("Task #708 — /api/financial-pulse/customer/:id/summary", () => {
             companyId: 99,
             name: "Other tenant",
             hiddenFromBilling: false,
+            monthlyBudgetCap: null,
+            annualBudgetCap: null,
             budgetSoftThresholdPercent: 75,
             budgetHardThresholdPercent: 100,
           },
@@ -132,7 +134,8 @@ describe("Task #708 — /api/financial-pulse/customer/:id/summary", () => {
               companyId: 10,
               name: "Acme Co",
               hiddenFromBilling: false,
-              annualBudgetGoal: "12000.00",
+              monthlyBudgetCap: "1000.00",
+              annualBudgetCap: "12000.00",
               budgetSoftThresholdPercent: 75,
               budgetHardThresholdPercent: 100,
             },
@@ -168,12 +171,10 @@ describe("Task #708 — /api/financial-pulse/customer/:id/summary", () => {
     assert.equal(body.outstandingAr, 0);
     assert.equal(body.unbilledExposure, 0);
     assert.equal(body.lastInvoiceAt, null);
-    // Task #1865 — monthly cap now comes from customerBudgetMonths (no row
-    // inserted in this test), so monthly.cap is null and status is "unset".
-    // Annual cap comes from annualBudgetGoal on the customer row.
-    assert.equal(body.monthly.cap, null);
+    // monthly bucket — cap is set, spend 0, status healthy
+    assert.equal(body.monthly.cap, 1000);
     assert.equal(body.monthly.spend, 0);
-    assert.equal(body.monthly.status, "unset");
+    assert.equal(body.monthly.status, "healthy");
     assert.equal(body.annual.cap, 12000);
     assert.equal(body.annual.spend, 0);
     assert.equal(body.annual.status, "healthy");

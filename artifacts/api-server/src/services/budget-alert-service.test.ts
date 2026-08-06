@@ -19,7 +19,6 @@ import assert from "node:assert/strict";
 import { db } from "../db";
 import {
   customerBudgetAlertEvents,
-  customerBudgetMonths,
   customers as customersTable,
   type Invoice,
   type Customer,
@@ -87,9 +86,6 @@ async function cleanupRealCustomers() {
     .delete(customerBudgetAlertEvents)
     .where(inArray(customerBudgetAlertEvents.customerId, TEST_CUSTOMER_IDS));
   await db
-    .delete(customerBudgetMonths)
-    .where(inArray(customerBudgetMonths.customerId, TEST_CUSTOMER_IDS));
-  await db
     .delete(customersTable)
     .where(inArray(customersTable.id, TEST_CUSTOMER_IDS));
 }
@@ -132,14 +128,13 @@ function installDispatchers(opts?: { pushThrows?: boolean }) {
 
 function makeCustomer(over: Partial<Customer> = {}): Customer {
   // Cast through unknown — we only touch the fields the service reads.
-  // Task #1865: monthly cap is now read from customerBudgetMonths (real DB row
-  // inserted in before()); annual cap comes from annualBudgetGoal.
   const c: any = {
     id: 1,
     companyId: 10,
     name: "Big Lawn Co",
     email: "billing@biglawn.test",
-    annualBudgetGoal: "10000.00",
+    monthlyBudgetCap: "1000.00",
+    annualBudgetCap: "10000.00",
     budgetSoftThresholdPercent: 75,
     budgetHardThresholdPercent: 100,
     budgetAlertRecipientUserIds: [42],
@@ -204,22 +199,6 @@ describe("budget-alert-service.checkBudgetThresholds", () => {
     // is satisfied. Ids are unique to this test file.
     for (const id of [70001, 70002, 70003, 70004, 70005, 70006, 70007, 70008, 70009, 70010]) {
       await ensureRealCustomer(id);
-    }
-    // Task #1865 — insert customerBudgetMonths rows so the service can
-    // resolve a $1000/month allocation for each test customer.
-    // Customer 70005 is intentionally excluded (the "no cap" test case).
-    const now = new Date();
-    const currentMonth = now.getMonth() + 1;
-    const currentYear = now.getFullYear();
-    for (const id of [70001, 70002, 70003, 70004, 70006, 70007, 70008, 70009, 70010]) {
-      await db.execute(sql`
-        INSERT INTO customer_budget_months
-          (company_id, customer_id, year, month, amount, is_manual_override)
-        VALUES
-          (${TEST_COMPANY_ID}, ${id}, ${currentYear}, ${currentMonth}, 1000.00, false)
-        ON CONFLICT (company_id, customer_id, year, month)
-          DO UPDATE SET amount = 1000.00
-      `);
     }
   });
   after(async () => {
@@ -359,11 +338,10 @@ describe("budget-alert-service.checkBudgetThresholds", () => {
   it("does nothing when no cap is configured", async () => {
     const customerId = 70005;
     await clearAlertRows(customerId);
-    // No customerBudgetMonths row for 70005 (skipped in before() setup),
-    // and annualBudgetGoal is null → service must not fire.
     fakeState.customer = makeCustomer({
       id: customerId,
-      annualBudgetGoal: null as any,
+      monthlyBudgetCap: null as any,
+      annualBudgetCap: null as any,
     });
     const inv = makeInvoice({ customerId, totalAmount: "9999.00" as any });
     fakeState.invoices = [inv];
