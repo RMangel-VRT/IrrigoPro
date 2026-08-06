@@ -1,0 +1,171 @@
+# FIX — Complete the Irrigation Migration
+
+**Status: production is partially migrated and the code does not match the database.** This ticket finishes the migration rather than reverting it. No rollbacks.
+
+## What actually went wrong
+
+Tasks #1856 and #1857 were written on the assumption that `irrigation_controllers` was the populated, canonical store and `property_controllers` was a legacy remnant. **The opposite was true in production.** `irrigation_controllers` was only ever filled in lazily — a customer got rows when someone opened their Irrigation System card or started a wet check — so it sat empty while `property_controllers` carried every customer.
+
+Confirmed against the production database:
+
+| Table | Rows |
+|---|---|
+| `irrigation_controllers` | **0** |
+| `irrigation_profile_zones` | **0** |
+| `property_controllers` | **139** |
+| `wet_check_zone_records` | 11,201 (all `controller_id` NULL) |
+| customers / invoices / wet_checks | 116 / 131 / 150 — all intact |
+| **Active** customers (`hidden_from_billing = false`) | **37** — 33 with legacy controller rows, 4 without |
+
+Note the working set is 37, not 116 — the customer list carries a lot of inactive records, and any count that doesn't filter on `hidden_from_billing` will overstate the problem.
+
+So #1857 retired the table holding the data and kept the one that was empty. The result is billing-sheet 500s and two source files calling `storage.listPropertyControllers`, a method #1857 deleted.
+
+**The fix is to populate `irrigation_controllers` from `property_controllers` — the step that was never done — and then complete the migration in order.**
+
+## Current state (verified)
+
+**Code** (HEAD `d17ab484`): #1856 and #1857 both present. #1864 (`budget-spend.ts`) present. #1865 and #1866 were removed by an earlier rollback. Two orphaned callers of the deleted method at `irrigation-controller-resolver.ts:64` and `irrigation-profile-routes.ts:270`.
+
+**Database:** `irrigation_controllers.letter` exists and is **NOT NULL** with `uniq_irr_ctrl_letter` in place (applied by #1856's startup migration). `wet_check_zone_records.controller_id` exists and is nullable, added manually, entirely NULL. `uniq_wet_check_zone` is still the old letter-based index. Legacy tables (`property_controllers`, `property_zones`, `zones`, `field_work_sessions`, `field_work_items`) all still present. Document tables have **no** `controller_id` columns.
+
+**Already available and unregistered:** `import-irrigation-profile-from-property-controllers.ts` — migration id `import-irrigation-profile-from-property-controllers-v1`, "Seed irrigation profiles from legacy property controller data". It creates one `irrigation_controllers` row per `property_controllers` row, named `Controller {letter}`, and **already writes the `letter` column** (updated for #1856). This is the missing piece.
+
+## Step 1 — Fix the orphaned callers (code only, no database)
+
+Two files call `storage.listPropertyControllers`, which no longer exists:
+
+- `irrigation-controller-resolver.ts:64` — the legacy fallback branch in `resolveWetCheckControllers`
+- `irrigation-profile-routes.ts:270`
+
+**Delete both fallback branches.** Going forward, `irrigation_controllers` is populated for every customer that has controllers, so the fallback is dead weight.
+
+**Decision (measured): keep the `customers.totalControllers` seed path.**
+
+Scoped to the customers that matter — **active means `hidden_from_billing = false`**, which is the operational "show in billing" flag and is already used as the filter in financial-pulse:
+
+| | Count |
+|---|---|
+| Active customers | **37** |
+| Active with `property_controllers` rows | **33** |
+| Active with none | **4** |
+
+So Step 2's seed covers 33 of the 37 properties actually being worked. Four don't, and they need a path.
+
+#1857 removed the `totalControllers` fallback from `buildWetCheckGrid` entirely; only the comment at `wet-check-grid.ts:5` survives. Restore it:
+
+- Delete **only** the `property_controllers` fallback (`irrigation-controller-resolver.ts:64`, `irrigation-profile-routes.ts:270`).
+- For a customer with no `irrigation_controllers` rows, build seed configs from `clamp(customers.totalControllers, 1, 26)` and let `ensureIrrigationControllers` create them. It auto-assigns letters with collision retry (`storage.ts:10855`), so this is safe under #1856's NOT NULL + unique constraints.
+
+Also name those four before starting, so nobody is surprised later:
+
+```sql
+SELECT c.name, c.total_controllers
+FROM customers c
+WHERE NOT COALESCE(c.hidden_from_billing, false)
+  AND NOT EXISTS (SELECT 1 FROM property_controllers pc WHERE pc.customer_id = c.id)
+ORDER BY c.name;
+```
+
+If those four are real properties, the fallback handles them on first visit. If any is a placeholder that shouldn't be billed, hide it from billing and the number drops.
+
+**Gate: `pnpm typecheck` must pass before continuing.** That's the signal the code is internally consistent again. Do not touch the database until it does.
+
+## Step 2 — Register and run the seed migration
+
+Add `importIrrigationProfileFromPropertyControllersMigration` to `artifacts/api-server/src/lib/migrations/registry.ts` so it appears at `/admin/migrations` with preview and acknowledge, the same as `repair-qb-void-mispaid`.
+
+Then run it from that page. **Preview first** — it should report 139 controllers to create.
+
+**Gate:**
+
+```sql
+SELECT
+  (SELECT count(*) FROM irrigation_controllers) AS controllers,
+  (SELECT count(*) FROM property_controllers)   AS legacy,
+  (SELECT count(*) FROM irrigation_controllers WHERE letter IS NULL) AS missing_letter;
+```
+
+Expect `controllers = 139`, `legacy = 139`, `missing_letter = 0`. **Do not continue unless controllers equals legacy.**
+
+Note: `irrigation_profile_zones` stays at 0. That's fine — the wet-check grid reads `irrigation_controllers.totalZones`, not the zone rows. Per-zone detail is a feature nobody has populated and is not required here.
+
+## Step 3 — Backfill zone records
+
+The `controller_id` column already exists. Run migration `0016_zone_records_controller_backfill.sql`. It resolves each zone record by joining through `wet_checks` to (company, customer, branch) and matching `controller_letter` against `irrigation_controllers.letter`. With Step 2 done, those letters now exist and match.
+
+**Gate:**
+
+```sql
+SELECT count(*) FILTER (WHERE controller_id IS NOT NULL) AS linked,
+       count(*) FILTER (WHERE controller_id IS NULL)     AS unlinked,
+       count(*)                                          AS total
+FROM wet_check_zone_records;
+```
+
+Expect `unlinked = 0` (or a small, explainable number). **If `linked` is 0 again, stop and report — that means the join still isn't matching and something in Step 2 didn't take.**
+
+Note that 0016 does **not** abort on unresolvable rows despite what its header comment claims; it reports and leaves them NULL. Read the numbers, don't trust the comment.
+
+## Step 4 — Swap the unique index
+
+Run `0017_zone_records_swap_unique_index.sql`. Only after Step 3's gate passes — the new index is partial (`WHERE controller_id IS NOT NULL`), so running it while everything is NULL would leave zone records with no uniqueness protection at all.
+
+**Gate:**
+
+```sql
+SELECT indexdef FROM pg_indexes WHERE indexname = 'uniq_wet_check_zone';
+```
+
+Must mention `controller_id` and `WHERE (controller_id IS NOT NULL)`.
+
+## Step 5 — Document columns only
+
+Run **only the six `ALTER TABLE ... ADD COLUMN controller_id` statements** from `0018_document_controller_fk_drop_legacy.sql`: `billing_sheets`, `estimates`, `estimate_items`, `work_orders`, `work_order_items`, `work_order_zone_photos`.
+
+**Do not run the `DROP TABLE` statements.** `property_controllers` stays as a safety net.
+
+## Step 6 — Deploy and smoke test
+
+In order, and stop at the first failure:
+
+1. Open the Irrigation System card for an active customer **that has `property_controllers` rows** (33 of them) — expect letters and zone counts matching the legacy data.
+1b. Open the Irrigation System card for one of the **4 active customers with no legacy rows** — expect the `totalControllers` seed to create controllers on the spot.
+2. Open a billing sheet — this is the path that was 500ing.
+3. Start a wet check.
+4. Submit a wet check, then check the manager review shows every zone in scope.
+5. Create an estimate from a wet-check finding.
+
+## Step 7 — Later, not now
+
+Drop `property_controllers`, `property_zones`, `zones`, `field_work_sessions`, `field_work_items` **after a full billing cycle** with no incidents. Separate ticket. Nothing depends on that happening soon.
+
+## Rules for this ticket
+
+- **Every database step has a gate query. Run it, read it, and stop if the number is wrong.** The failure that caused this was running a backfill against an empty source table without checking the row count first.
+- **No `DROP TABLE` anywhere in this ticket.**
+- **Typecheck passes before any database change.**
+- Preserve `556f2794` (#1869 doubled labor hours) and `ba512c2c` (#1864 `computeCustomerSpend`).
+
+## Known loss, accepted
+
+The descriptive controller names — "Hunter Clock - East", "Rainbird - Broadlands Lane" — are gone. They existed only in `irrigation_controllers` rows that were emptied. Step 2 recreates controllers as `Controller A` through `Controller F`. Renaming them is manual and safe once the letter is stored data, because nothing derives the letter from the name anymore. That was the original bug and this migration is what fixes it.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `pnpm typecheck` output showing a clean pass after Step 1.
+- [ ] `file:line` for both removed fallback branches and the decision made about customers with no controllers.
+- [ ] Registry diff showing the seed migration registered.
+- [ ] Gate query output after each of Steps 2, 3, and 4.
+- [ ] Screenshot: a customer's Irrigation System card with correct letters and zone counts.
+- [ ] Screenshot: a billing sheet loading without error.
+- [ ] Confirmation that no `DROP TABLE` was executed.
+
+## Relevant files
+
+- `artifacts/api-server/src/irrigation-controller-resolver.ts` (fallback branch :64)
+- `artifacts/api-server/src/routes/irrigation-profile-routes.ts` (fallback :270)
+- `artifacts/api-server/src/lib/migrations/registry.ts` (register the seed migration)
+- `artifacts/api-server/src/lib/migrations/import-irrigation-profile-from-property-controllers.ts` (id `...-v1`, already writes `letter`)
+- `artifacts/api-server/src/storage.ts` (`ensureIrrigationControllers` :10855 — auto-assigns letters with collision retry)
+- `lib/db/migrations/0016_zone_records_controller_backfill.sql`, `0017_zone_records_swap_unique_index.sql`, `0018_document_controller_fk_drop_legacy.sql` (six ALTERs only)
