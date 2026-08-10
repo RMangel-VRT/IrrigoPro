@@ -16094,9 +16094,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
           res.status(404).json({ message: "Customer not found" });
           return;
         }
-        // Task #1857: irrigation_controllers is the single source of truth.
+        // irrigation_controllers is the single source of truth.
         const irrigCtrlsForBranch = await storage.listIrrigationControllers(cid, customerId, branchParam);
-        const { seedConfigs } = buildWetCheckGrid(irrigCtrlsForBranch);
+        let { seedConfigs } = buildWetCheckGrid(irrigCtrlsForBranch);
+        // When no profile exists yet, seed from customers.totalControllers (clamped 1–26).
+        if (seedConfigs.length === 0) {
+          const CTRL_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+          const n = Math.min(26, Math.max(1, customer.totalControllers ?? 1));
+          seedConfigs = Array.from({ length: n }, (_, i) => ({ name: `Controller ${CTRL_ALPHA[i]}`, zoneCount: null }));
+        }
         const irrigCtrls = await storage.ensureIrrigationControllers(cid, customerId, seedConfigs, branchParam);
         // Map IrrigationController → PropertyController-compatible wire shape
         // so all existing wet-check UI consumers continue to work without frontend changes.
@@ -16119,7 +16125,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return;
       }
       const irrigCtrlsNoBranch = await storage.listIrrigationControllers(cid, customerId, "");
-      const { seedConfigs: seedConfigsNoBranch } = buildWetCheckGrid(irrigCtrlsNoBranch);
+      let { seedConfigs: seedConfigsNoBranch } = buildWetCheckGrid(irrigCtrlsNoBranch);
+      // When no profile exists yet, seed from customers.totalControllers (clamped 1–26).
+      if (seedConfigsNoBranch.length === 0) {
+        const NB_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        const n = Math.min(26, Math.max(1, customerNoBranch.totalControllers ?? 1));
+        seedConfigsNoBranch = Array.from({ length: n }, (_, i) => ({ name: `Controller ${NB_ALPHA[i]}`, zoneCount: null }));
+      }
       const seededNoBranch = await storage.ensureIrrigationControllers(cid, customerId, seedConfigsNoBranch, "");
       // Expose customer-level bucket as branchName: null on the wire.
       res.json(seededNoBranch.map(ctrl => ({
@@ -16961,8 +16973,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // listIrrigationControllers applies the branch filter correctly.
         const branchKey = branchName ?? "";
         const irrigCtrlsForWC = await storage.listIrrigationControllers(cid, body.customerId, branchKey);
-        // Task #1857: no property_controllers fallback; irrigation_controllers is the sole source.
-        const gridResult = buildWetCheckGrid(irrigCtrlsForWC);
+        let gridResult = buildWetCheckGrid(irrigCtrlsForWC);
+        // When no irrigation profile exists yet, seed from customers.totalControllers
+        // (clamped 1–26). property_controllers is no longer available.
+        if (gridResult.seedConfigs.length === 0) {
+          const WC_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+          const numCtrl = Math.min(26, Math.max(1, customer.totalControllers ?? 1));
+          gridResult = {
+            numControllers: numCtrl,
+            seedConfigs: Array.from({ length: numCtrl }, (_, i) => ({
+              name: `Controller ${WC_ALPHABET[i]}`,
+              zoneCount: null,
+            })),
+          };
+        }
         numControllers = gridResult.numControllers;
         await storage.ensureIrrigationControllers(cid, body.customerId, gridResult.seedConfigs, branchName);
       }

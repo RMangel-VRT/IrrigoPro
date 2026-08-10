@@ -263,29 +263,23 @@ export function registerIrrigationProfileRoutes(
         );
 
         // Lazy seed: when no irrigation profile exists yet for this customer/branch,
-        // check if property_controllers has legacy data and bootstrap irrigation_controllers
-        // from it. This is the automated forward-compat bridge so the profile page
-        // shows controllers that were set up via the wet-check flow before unification.
+        // seed from customers.totalControllers (clamped 1–26).
+        // property_controllers is no longer available — irrigation_controllers is
+        // the single source of truth after the irrigation migration.
         if (controllers.length === 0 && callerCompanyId !== null) {
-          const legacyRows = await storage.listPropertyControllers(callerCompanyId, customerId);
-          const branchFilter = branchName ?? "";
-          const branchRows = legacyRows.filter((r) => (r.branchName ?? "") === branchFilter);
-          if (branchRows.length > 0) {
-            // Task #1856: carry the legacy controllerLetter forward so the
-          // allocator preserves non-sequential legacy assignments (e.g. A, C)
-          // rather than compacting them to A, B.
-          const configs = branchRows.map((r) => ({
-              name: `Controller ${r.controllerLetter}`,
-              zoneCount: r.zoneCount,
-              letter: r.controllerLetter,
-            }));
-            controllers = await storage.ensureIrrigationControllers(
-              callerCompanyId,
-              customerId,
-              configs,
-              branchName ?? null,
-            );
-          }
+          const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+          const seedCustomer = await storage.getCustomer(customerId);
+          const numCtrl = Math.min(26, Math.max(1, seedCustomer?.totalControllers ?? 1));
+          const configs = Array.from({ length: numCtrl }, (_, i) => ({
+            name: `Controller ${ALPHABET[i]}`,
+            zoneCount: null as number | null,
+          }));
+          controllers = await storage.ensureIrrigationControllers(
+            callerCompanyId,
+            customerId,
+            configs,
+            branchName ?? null,
+          );
         }
 
         res.json(controllers);

@@ -1,10 +1,11 @@
 /**
  * Wet-check controller grid building.
  *
- * Task #1857 — `irrigation_controllers` is now the single source of truth.
- * The legacy path (property_controllers + customers.totalControllers) is
- * removed. This module simply converts the already-scoped irrigCtrls list
- * into a GridResult used by `ensureIrrigationControllers`.
+ * `irrigation_controllers` is the single source of truth (Task #1857).
+ * When the scoped list is empty, callers are responsible for seeding from
+ * `customers.totalControllers` (clamped 1–26) before calling
+ * `ensureIrrigationControllers` — see routes.ts and irrigation-controller-resolver.ts.
+ * This module converts an already-scoped irrigCtrls list into a GridResult.
  */
 
 export interface IrrigationControllerRow {

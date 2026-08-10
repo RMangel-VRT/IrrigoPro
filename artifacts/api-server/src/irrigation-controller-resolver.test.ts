@@ -1,9 +1,10 @@
 // Tests for irrigation-controller-resolver.ts
 //
 // Verifies that resolveWetCheckControllers reads `controller.letter` directly
-// from `irrigation_controllers` (Task #1856 — stored letter), and falls back
-// to `property_controllers` only when no irrigation profile exists.
-// Uses injected fakes — no shared dev-DB required.
+// from `irrigation_controllers` (Task #1856 — stored letter).
+// The legacy property_controllers fallback has been removed; the resolver now
+// seeds from customers.totalControllers when no irrigation profile exists.
+// Uses a local resolveWithFakes helper — no shared dev-DB required.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -19,26 +20,15 @@ type FakeIrrigController = {
   branchName: string;
 };
 
-type FakePropController = {
-  controllerLetter: string;
-  zoneCount: number;
-  notes: string | null;
-  branchName: string | null;
-};
-
 interface FakeStorage {
   listIrrigationControllers: (
     companyId: number | null,
     customerId: number,
     branchName?: string,
   ) => Promise<FakeIrrigController[]>;
-  listPropertyControllers: (
-    companyId: number,
-    customerId: number,
-  ) => Promise<FakePropController[]>;
 }
 
-// ── Pure resolver logic matching the production resolver (no extractLetter) ───
+// ── Pure resolver logic matching the production resolver ──────────────────────
 
 const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
@@ -63,18 +53,9 @@ async function resolveWithFakes(
     }));
   }
 
-  const legacyRows = await storage.listPropertyControllers(companyId, customerId);
-  const filtered = branch !== null
-    ? legacyRows.filter((r) => (r.branchName || null) === branch)
-    : legacyRows;
-
-  return filtered.map((r) => ({
-    letter: r.controllerLetter,
-    zoneCount: r.zoneCount,
-    notes: r.notes ?? null,
-    name: `Controller ${r.controllerLetter}`,
-    id: 0,
-  }));
+  // No profile rows — production code seeds from totalControllers. In these
+  // unit tests we simply return [] since we have no customer record to seed from.
+  return [];
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -86,9 +67,6 @@ describe("resolveWetCheckControllers — irrigation_controllers primary path", (
         { id: 1, name: "Hunter Clock - East", letter: "A", totalZones: 14, notes: null, branchName: "" },
         { id: 2, name: "Rainbird - West",     letter: "B", totalZones: 8,  notes: "note b", branchName: "" },
       ],
-      listPropertyControllers: async () => {
-        throw new Error("listPropertyControllers should not be called when irrigation profile exists");
-      },
     };
 
     const result = await resolveWithFakes(fakeStorage, 1, 42);
@@ -106,7 +84,6 @@ describe("resolveWetCheckControllers — irrigation_controllers primary path", (
       listIrrigationControllers: async () => [
         { id: 42, name: "Hunter Clock - East", letter: "A", totalZones: 20, notes: null, branchName: "" },
       ],
-      listPropertyControllers: async () => [],
     };
 
     const result = await resolveWithFakes(fakeStorage, 1, 99);
@@ -119,7 +96,6 @@ describe("resolveWetCheckControllers — irrigation_controllers primary path", (
       listIrrigationControllers: async () => [
         { id: 1, name: "Controller A", letter: "A", totalZones: null, notes: null, branchName: "" },
       ],
-      listPropertyControllers: async () => [],
     };
 
     const result = await resolveWithFakes(fakeStorage, 1, 42);
@@ -140,9 +116,6 @@ describe("resolveWetCheckControllers — irrigation_controllers primary path", (
         { id: 138, name: "Rainbird - West",            letter: "E", totalZones: 37, notes: null, branchName: "" },
         { id: 136, name: "Rainbird Clock - East",      letter: "F", totalZones: 41, notes: null, branchName: "" },
       ],
-      listPropertyControllers: async () => {
-        throw new Error("should not call property_controllers when irrigation profile exists");
-      },
     };
 
     const result = await resolveWithFakes(fakeStorage, 1, 271);
@@ -166,7 +139,6 @@ describe("resolveWetCheckControllers — irrigation_controllers primary path", (
         { id: 2, name: "Controller C", letter: "C", totalZones: 5,  notes: null, branchName: "" },
         { id: 3, name: "Controller E", letter: "E", totalZones: 8,  notes: null, branchName: "" },
       ],
-      listPropertyControllers: async () => [],
     };
 
     const result = await resolveWithFakes(fakeStorage, 1, 42);
@@ -181,62 +153,12 @@ describe("resolveWetCheckControllers — irrigation_controllers primary path", (
         { id: 1, name: "Hunter Clock - East", letter: null, totalZones: 14, notes: null, branchName: "" },
         { id: 2, name: "Rainbird - West",     letter: null, totalZones: 8,  notes: null, branchName: "" },
       ],
-      listPropertyControllers: async () => [],
     };
 
     const result = await resolveWithFakes(fakeStorage, 1, 42);
     // Positional fallback for null: A (index 0), B (index 1)
     assert.equal(result[0].letter, "A");
     assert.equal(result[1].letter, "B");
-  });
-});
-
-describe("resolveWetCheckControllers — legacy fallback path", () => {
-  it("falls back to property_controllers when irrigation_controllers is empty", async () => {
-    let legacyCalled = false;
-    const fakeStorage: FakeStorage = {
-      listIrrigationControllers: async () => [],
-      listPropertyControllers: async () => {
-        legacyCalled = true;
-        return [
-          { controllerLetter: "A", zoneCount: 10, notes: null, branchName: null },
-          { controllerLetter: "B", zoneCount: 6,  notes: "old note", branchName: null },
-        ];
-      },
-    };
-
-    const result = await resolveWithFakes(fakeStorage, 1, 42);
-    assert.ok(legacyCalled, "listPropertyControllers should have been called");
-    assert.equal(result.length, 2);
-    assert.equal(result[0].letter, "A");
-    assert.equal(result[0].zoneCount, 10);
-    assert.equal(result[1].letter, "B");
-    assert.equal(result[1].zoneCount, 6);
-    assert.equal(result[1].notes, "old note");
-  });
-
-  it("filters legacy rows by branchName when branch is provided", async () => {
-    const fakeStorage: FakeStorage = {
-      listIrrigationControllers: async () => [],
-      listPropertyControllers: async () => [
-        { controllerLetter: "A", zoneCount: 10, notes: null, branchName: null },
-        { controllerLetter: "A", zoneCount: 12, notes: null, branchName: "Branch East" },
-      ],
-    };
-
-    const result = await resolveWithFakes(fakeStorage, 1, 42, "Branch East");
-    assert.equal(result.length, 1);
-    assert.equal(result[0].zoneCount, 12);
-  });
-
-  it("returns empty array when both sources are empty", async () => {
-    const fakeStorage: FakeStorage = {
-      listIrrigationControllers: async () => [],
-      listPropertyControllers: async () => [],
-    };
-
-    const result = await resolveWithFakes(fakeStorage, 1, 42);
-    assert.equal(result.length, 0);
   });
 });
 
@@ -248,9 +170,6 @@ describe("resolveWetCheckControllers — branch-scoped isolation", () => {
           return [{ id: 10, name: "Controller A", letter: "A", totalZones: 20, notes: null, branchName: "North" }];
         }
         return [];
-      },
-      listPropertyControllers: async () => {
-        throw new Error("should not fall back when irrigation profile exists for branch");
       },
     };
 
@@ -269,9 +188,6 @@ describe("resolveWetCheckControllers — profile count overrides totalController
         { id: 2, name: "Controller B", letter: "B", totalZones: 8,  notes: null, branchName: "" },
         { id: 3, name: "Controller C", letter: "C", totalZones: 6,  notes: null, branchName: "" },
       ],
-      listPropertyControllers: async () => {
-        throw new Error("should not fall back when irrigation profile has rows");
-      },
     };
 
     const result = await resolveWithFakes(fakeStorage, 1, 42);
@@ -286,7 +202,6 @@ describe("resolveWetCheckControllers — profile count overrides totalController
       listIrrigationControllers: async () => [
         { id: 1, name: "Controller A", letter: "A", totalZones: 14, notes: null, branchName: "" },
       ],
-      listPropertyControllers: async () => [],
     };
 
     const result = await resolveWithFakes(fakeStorage, 1, 42);
@@ -301,7 +216,6 @@ describe("resolveWetCheckControllers — null totalZones never becomes 12", () =
         { id: 1, name: "Controller A", letter: "A", totalZones: null, notes: null, branchName: "" },
         { id: 2, name: "Controller B", letter: "B", totalZones: 8,   notes: null, branchName: "" },
       ],
-      listPropertyControllers: async () => [],
     };
 
     const result = await resolveWithFakes(fakeStorage, 1, 42);
@@ -321,35 +235,12 @@ describe("resolveWetCheckControllers — no-branch (customer-level) read path", 
         }
         return [];
       },
-      listPropertyControllers: async () => {
-        throw new Error("should not read property_controllers when irrigation profile exists");
-      },
     };
 
     const result = await resolveWithFakes(fakeStorage, 1, 42, "");
     assert.equal(result.length, 1);
     assert.equal(result[0].letter, "A");
     assert.equal(result[0].zoneCount, 10);
-  });
-
-  it("no-profile customer falls back to property_controllers (no regression)", async () => {
-    let legacyCalled = false;
-    const fakeStorage: FakeStorage = {
-      listIrrigationControllers: async () => [],
-      listPropertyControllers: async () => {
-        legacyCalled = true;
-        return [
-          { controllerLetter: "A", zoneCount: 8,  notes: null, branchName: null },
-          { controllerLetter: "B", zoneCount: 4,  notes: null, branchName: null },
-        ];
-      },
-    };
-
-    const result = await resolveWithFakes(fakeStorage, 1, 42);
-    assert.ok(legacyCalled);
-    assert.equal(result.length, 2);
-    assert.equal(result[0].letter, "A");
-    assert.equal(result[0].zoneCount, 8);
   });
 });
 
@@ -364,14 +255,13 @@ describe("resolveWetCheckControllers — branch-scoped company isolation", () =>
         }
         return [];
       },
-      listPropertyControllers: async () => [],
     };
 
     const resultCo10 = await resolveWithFakes(fakeStorage, 10, 99, "East");
     const resultCo20 = await resolveWithFakes(fakeStorage, 20, 99, "East");
 
     assert.equal(resultCo10.length, 1, "company 10 should get its profile controllers");
-    assert.equal(resultCo20.length, 0, "company 20 should get no controllers (empty profile)");
+    assert.equal(resultCo20.length, 0, "company 20 should get no controllers (empty profile, seed from totalControllers in production)");
     assert.deepEqual(callLog, [10, 20], "storage called once per company");
   });
 
@@ -383,13 +273,12 @@ describe("resolveWetCheckControllers — branch-scoped company isolation", () =>
         }
         return [];
       },
-      listPropertyControllers: async () => [],
     };
 
     const northResult = await resolveWithFakes(fakeStorage, 1, 42, "North");
     const southResult = await resolveWithFakes(fakeStorage, 1, 42, "South");
 
     assert.equal(northResult.length, 1);
-    assert.equal(southResult.length, 0, "South branch has no profile — should return empty");
+    assert.equal(southResult.length, 0, "South branch has no profile — production code seeds from totalControllers");
   });
 });
