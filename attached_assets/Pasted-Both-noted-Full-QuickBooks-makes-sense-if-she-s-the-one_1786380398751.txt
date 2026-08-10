@@ -1,0 +1,24 @@
+Both noted. Full QuickBooks makes sense if she's the one reconnecting the integration when the token expires — that's a bookkeeper job. The denylist still needs fixing though, so the access is declared rather than inherited.
+
+Paste onto #1886:
+
+Amendment 1 — irrigation_manager keeps invoice read access. Put irrigation_manager in CAN_READ_INVOICES alongside super_admin, company_admin, billing_manager, and bookkeeper. Only field_tech loses it. This changes step 7: the customer-profile Invoices section and the Billing Details tab are removed for field_tech only; irrigation managers keep both. The stale "visible to all roles" comments still get deleted — the tab is now keyed on capability, which is the point. Note in the registry that irrigation-manager invoice access is now deliberate and declared; before this ticket it was accidental, a consequence of the list endpoint having no gate.
+
+Amendment 2 — requireQuickBooksAccess is a denylist and must become an allowlist. It currently reads:
+
+if (userRole === 'irrigation_manager' || userRole === 'field_tech') → 403
+next();  // everything else passes, including any unknown role
+
+That means bookkeeper would pass by accident, and so would every future role. Add a CAN_MANAGE_QUICKBOOKS capability containing super_admin, company_admin, billing_manager, and bookkeeper, and rewrite the middleware to check it. Membership for existing roles must not change — irrigation_manager and field_tech are still refused, now because they are absent from an allowlist rather than named in a denylist. It guards 6 routes in the routes monolith; keep the response shape and status code identical.
+
+The bookkeeper keeps the QuickBooks nav item and full access, including connect, disconnect, and manual sync. That is deliberate — she is the one who reconnects the integration when the token expires.
+
+Amendment 3 — test changes.
+
+irrigation_manager gets 200 on the invoice list (regression guard: previously accidental, now declared — this must not break).
+field_tech gets 403 on the invoice list.
+field_tech sees no Billing Details tab on the customer profile; irrigation_manager still does.
+bookkeeper gets 200 on the QuickBooks connection routes; irrigation_manager and field_tech still get 403 after the denylist-to-allowlist conversion.
+An unrecognised role string gets 403 on QuickBooks — the case the denylist silently allowed.
+
+Amendment 4 — "Done looks like" correction. Replace the line about field techs and irrigation managers losing the Billing Details tab with: field techs no longer see a Billing Details tab on the customer profile at all — not an empty one; irrigation managers are unaffected.
