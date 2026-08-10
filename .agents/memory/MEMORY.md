@@ -6,4 +6,5 @@
 - [api-server test suite shared dev DB](api-server-test-shared-db.md) — full suite is slow (>110s) and integration tests share one dev DB; exact-count assertions fail on leftover data, not your change.
 - [Migration registry count test](migration-registry-count-test.md) — registering a new Super Admin DB migration breaks an exact-count assertion in registry.test.ts; prefer membership checks.
 - [Controller letter stored column](controller-letter-stored.md) — letter on irrigation_controllers is auto-assigned (nextControllerLetter), NOT NULL + unique index (0008 migration); property_controllers is legacy-only.
+- [Drizzle phantom column in a select](drizzle-phantom-column-select.md) — a selected column that doesn't exist throws `Object.entries(undefined)` at prepare time and 500s the whole route; TS won't catch it.
 - [Drizzle push silent abort](drizzle-push-silent-abort.md) — plain push exits 0 without applying when the diff has data-loss statements; use push-force, and import legacy-table data before the drop ships.

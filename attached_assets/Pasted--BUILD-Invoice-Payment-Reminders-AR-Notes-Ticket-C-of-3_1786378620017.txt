@@ -1,0 +1,170 @@
+# BUILD — Invoice Payment Reminders + AR Notes
+
+**Ticket C of 3.** Preceded by `BUILD - Bookkeeper Role + Central Role Registry (A of 3)` and `BUILD - AR Collections View on the Invoice List (B of 3)`.
+
+**What & Why**
+A bookkeeper can now see who owes money (ticket B) but has no way to act on it inside IrrigoPro, and nowhere to record that she did. Reminders happen in a personal inbox and the follow-up history lives in someone's head.
+
+This ticket adds a payment reminder that IrrigoPro sends, a record of every reminder that went out, and an internal AR note thread per invoice.
+
+**This is the only ticket of the three that can reach a customer's inbox.** Everything below is built around that: refusal rules, a throttle, and a confirmation list that is not optional.
+
+## Prerequisites
+
+**Tickets A and B.** A provides `CAN_SEND_INVOICE_EMAIL`; B provides the columns and filters the reminder state renders into.
+
+**`BUILD - Decouple Invoice Sent-ness from Lifecycle Status`** — hard prerequisite. The refusal rule below turns on `sentAt`, and today payment overwrites it.
+
+## Current state (confirmed in code)
+
+**Invoice email delivery already exists.** `EmailService.sendInvoiceDetailPdf` (`email-service.ts:1072`) already emails an invoice with its PDF to a customer, behind `POST /api/invoices/:invoiceId/pdf/send` (`routes.ts:12314`). **Reuse it. Do not build a second invoice sender.**
+
+**A throttle and dedup pattern already exists.** `missing_photos_notifications` (`schema.ts:381`) is one row per recipient carrying `lastSentAt` / `lastSentEmailAt` / `lastEmailSheetCount` / `sentByUserId`, used to make a manager-triggered notify action idempotent and to surface "last notified" in the UI. Follow that shape.
+
+**A delivery-address precedent exists.** Estimates record `sentToEmail` (`schema.ts:493`) — the address actually used, stored rather than resolved at read time. Reminders do the same, for the same reason: the customer's email may change afterwards.
+
+**The customer's billing address is on the invoice.** `invoices.customerEmail` (`schema.ts:838`, not null).
+
+## Slice 1 — Schema
+
+**`invoice_reminders`** — one row per reminder **actually sent**:
+
+- `companyId`, `invoiceId`, `sentByUserId`
+- `sentAt`, `sentToEmail` — the address used, recorded not resolved
+- `reminderNumber` — 1, 2, 3… per invoice
+- `templateKey`
+- `balanceAtSend`, `daysOverdueAtSend` — a reminder is a historical record and must stay readable after the invoice changes
+- `deliveryStatus`, `deliveryError`
+- index on `(companyId, invoiceId)`
+
+**`invoice_ar_notes`** — internal follow-up log:
+
+- `companyId`, `invoiceId`, `userId`, `note`, `createdAt`
+- **Append-only.** No edit, no delete.
+- index on `(companyId, invoiceId)`
+
+**These notes are internal.** They are distinct from `invoices.notes` (which prints on the invoice) and from `qbNote` (QuickBooks cleanup). **They must never appear on a customer-facing document or email.** State that in the code comment where the table is defined, and assert it in a test against generated output.
+
+## Slice 2 — The send path
+
+`POST /api/invoices/:id/reminders`, gated `CAN_SEND_INVOICE_EMAIL`.
+
+**Refuses, with a distinct message for each:**
+
+- Paid, or zero balance
+- Terminal status — `cancelled` / `superseded` / `merged`
+- Draft
+- No `customerEmail`
+- `qbVoidDetectedAt` set — QuickBooks shows this voided; resolve that first
+- **`sentAt == null`** — see below
+
+**Refusing to remind an invoice that was never sent** (decided) is deliberate, not an edge case. Chasing someone for an invoice they never received is worse than useless. The row's call to action is *send it*, not *remind*. Surface that in the UI as the alternative action.
+
+**Throttle: one reminder per invoice per 7 days**, configurable per company, **enforced server-side**. A throttled request returns **when the next one is allowed**, and the button says so. It must not silently do nothing — that is the failure mode already seen with the payment-sync refresh button, where a throttled click produced no toast, no change, and no explanation, and the button looked broken.
+
+**Recording:**
+
+- Writes an `invoice_reminders` row on success only.
+- A failed send records `deliveryStatus: 'failed'` and **does not increment `reminderNumber`** — a bounced email is not a reminder the customer received.
+
+## Slice 3 — Templates
+
+Three tones, keyed to aging, **chosen by the bookkeeper at send time and never automatically**:
+
+| Template | Suggested for |
+|---|---|
+| Friendly | 1–30 days overdue |
+| Firm | 31–60 days |
+| Final notice | 60+ days |
+
+The aging bucket suggests a default; the person picks. Each includes invoice number, effective due date, days overdue, balance due, and the attached PDF. Company name, logo, and reply-to come from the company profile, matching the existing estimate email.
+
+Use the same effective-due-date helper extracted in ticket B. Do not re-derive days overdue in the template.
+
+## Slice 4 — Batch send
+
+Select rows on the AR list, then:
+
+1. **A confirmation list is displayed** — every invoice that will be emailed, the address it goes to, and the template. Below it, every selected invoice that will be **skipped, with its reason**.
+2. Nothing sends until that list is confirmed.
+3. Results report per invoice: sent, skipped (reason), or failed (error).
+
+**The confirmation list is not optional and must not be collapsible-by-default.** This is the one place in the app where a misclick reaches customers.
+
+**No automatic or scheduled reminders in this ticket** (decided). Every reminder is a person deciding to send it. Scheduled dunning is a separate ticket and should not be the first version of this.
+
+## Slice 5 — Surfacing
+
+- The **Last reminder** and **Reminder count** columns from ticket B become live.
+- The **Reminder** filter from ticket B becomes live — never reminded / reminded in last N days / reminded 3+ times.
+- New flag: **Reminded, still unpaid** — reminders sent and still overdue. This is the escalation queue.
+- AR notes appear on the invoice detail and as a hover indicator on the list row.
+- Reminder history is visible on the invoice detail: when, by whom, to what address, which template, and the balance at the time.
+
+## Multi-tenancy (Rule 1)
+
+`invoice_reminders` and `invoice_ar_notes` both carry `companyId` and every query filters on it. **The send path resolves the invoice through the company-scoped fetch before doing anything else** — a bookkeeper must not be able to email another company's customer by passing an invoice id. `super_admin` passes an explicit company. Assert this on the response body and on whether the email was attempted, not on rendered output.
+
+## Decisions
+
+- **IrrigoPro sends the reminder emails** (decided), reusing `sendInvoiceDetailPdf`.
+- **Reminders are manual; no automatic dunning** (decided).
+- **Never remind an invoice that was never sent** (decided) — send it instead.
+- **One reminder per invoice per 7 days, server-enforced, and the refusal explains itself** (decided).
+- **A failed send does not count as a reminder** (decided).
+- **The delivery address is recorded, not resolved at read time** (decided) — same as estimates.
+- **Batch send always shows a confirmation list with skip reasons** (decided).
+- **AR notes are append-only and internal** (decided) — never customer-facing.
+
+## Done looks like
+
+- A bookkeeper sends a reminder from the AR list, sees it recorded, and cannot send another for seven days.
+- She can see every reminder ever sent on an invoice: when, by whom, to what address, and the balance at the time.
+- An invoice that was never sent offers *send it*, not *remind*.
+- A batch send shows exactly who will be emailed and who will be skipped, and why, before anything goes out.
+- AR notes record the follow-up conversation and never leak onto a customer document.
+- Nothing sends on a schedule.
+
+## Tests
+
+- Reminder refused for each case, each returning its own message and each a separate test: paid · zero balance · cancelled · superseded · merged · draft · no `customerEmail` · `sentAt == null` · `qbVoidDetectedAt` set.
+- Throttle: a second reminder inside 7 days is refused **and reports when the next is allowed**; the first after the window succeeds and increments `reminderNumber`.
+- A failed send records `deliveryStatus: 'failed'` and does **not** increment `reminderNumber`; a subsequent successful send is `reminderNumber` 1.
+- `balanceAtSend` and `daysOverdueAtSend` are preserved after the invoice balance later changes.
+- `sentToEmail` is preserved after the customer's email is later changed.
+- Batch send: a mixed selection produces the confirmation list with correct skip reasons, and **no email is attempted before confirmation** — asserted on the mailer, not the UI.
+- The **Reminded, still unpaid** flag renders only when reminders exist and the invoice is still overdue.
+- AR notes never appear in the invoice PDF or in any customer-facing email — asserted on the generated output.
+- AR notes cannot be edited or deleted through any endpoint.
+- Days overdue in the email body matches the AR list for the same invoice.
+- Company isolation: a bookkeeper in company A cannot send a reminder for a company B invoice, and no email is attempted.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for both tables, the reminder endpoint, the throttle check, and the AR notes routes.
+- [ ] Proof the send reuses `EmailService.sendInvoiceDetailPdf` rather than a new sender.
+- [ ] Screenshot: a reminder email as the customer receives it, with the PDF attached.
+- [ ] Screenshot: the batch-send confirmation list showing at least one skipped invoice with its reason.
+- [ ] Captured response body proving the throttle refusal reports the next allowed time.
+- [ ] Screenshot: reminder history on the invoice detail.
+- [ ] Test output for the refusal matrix, the failed-send case, and the historical-value preservation.
+- [ ] Output proving AR notes are absent from a generated invoice PDF and customer email.
+- [ ] Confirmation that no scheduled or automatic send path was added.
+- [ ] Deployed; commit message matches the diff.
+
+## Out of scope
+
+- Automatic or scheduled dunning.
+- Recording payments in IrrigoPro — QBO remains the only writer of payment state.
+- SMS reminders. The Twilio path exists for technician outreach (`missing_photos_notifications` :393) and is deliberately not reused here.
+- Customer-facing payment portal or payment links.
+- Statements or multi-invoice customer summaries — worth doing, separate ticket.
+
+## Relevant files
+
+- `lib/db/src/schema/schema.ts` (new `invoice_reminders`, `invoice_ar_notes`; `missing_photos_notifications` :381 — throttle pattern to follow; estimate `sentToEmail` :493 — address-recording precedent; `invoices.customerEmail` :838)
+- `artifacts/api-server/src/email-service.ts` (`sendInvoiceDetailPdf` :1072 — reuse)
+- `artifacts/api-server/src/routes/routes.ts` (`pdf/send` :12314 — the existing send route to model the new endpoint on)
+- `lib/shared/src/roles.ts` (from ticket A — `CAN_SEND_INVOICE_EMAIL`)
+- `artifacts/irrigopro/src/pages/invoices.tsx` (from ticket B — reminder columns, filter, and the new flag become live)
+- Effective-due-date helper extracted in ticket B (used by the templates)

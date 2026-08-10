@@ -1430,6 +1430,36 @@ export interface IrrigationImportResult {
   };
 }
 
+// Explicit column list for the zone-records read in `getWetCheck`. It has to
+// be a partial select (not `select()`) because the query left-joins
+// irrigation_controllers purely to order by the controller's stored letter —
+// a bare `select()` with a join returns a nested `{ table: row }` shape.
+//
+// Every value here MUST be a real column on `wetCheckZoneRecords`. A typo or a
+// column that does not exist resolves to `undefined`, and Drizzle's
+// `orderSelectedFields` then calls `Object.entries(undefined)` while preparing
+// the query — a `TypeError: Cannot convert undefined or null to object` thrown
+// before any SQL is sent, which turns every read into a 500. Exported so
+// `wet-check-select-shape.test.ts` can assert the shape without a database.
+export const WET_CHECK_ZONE_RECORD_SELECTION = {
+  id: wetCheckZoneRecords.id,
+  wetCheckId: wetCheckZoneRecords.wetCheckId,
+  controllerLetter: wetCheckZoneRecords.controllerLetter,
+  zoneNumber: wetCheckZoneRecords.zoneNumber,
+  status: wetCheckZoneRecords.status,
+  ranSuccessfully: wetCheckZoneRecords.ranSuccessfully,
+  notes: wetCheckZoneRecords.notes,
+  checkedAt: wetCheckZoneRecords.checkedAt,
+  checkedBy: wetCheckZoneRecords.checkedBy,
+  markedCompleteAt: wetCheckZoneRecords.markedCompleteAt,
+  repairLaborHours: wetCheckZoneRecords.repairLaborHours,
+  repairLaborManuallySet: wetCheckZoneRecords.repairLaborManuallySet,
+  clientId: wetCheckZoneRecords.clientId,
+  controllerId: wetCheckZoneRecords.controllerId,
+  observedPressure: wetCheckZoneRecords.observedPressure,
+  observedFlow: wetCheckZoneRecords.observedFlow,
+} as const;
+
 export class DatabaseStorage implements IStorage {
   private _billingCounterTableReady = false;
   private _billingCounterPrefixSeeded = new Set<string>();
@@ -8467,26 +8497,7 @@ export class DatabaseStorage implements IStorage {
     // if a controller is re-lettered the ordering reflects the new letter.
     // Falls back to controllerLetter (denormalized copy) for historical records
     // without a resolved controllerId.
-    const zoneRecords = await db.select({
-      id: wetCheckZoneRecords.id,
-      wetCheckId: wetCheckZoneRecords.wetCheckId,
-      controllerLetter: wetCheckZoneRecords.controllerLetter,
-      zoneNumber: wetCheckZoneRecords.zoneNumber,
-      status: wetCheckZoneRecords.status,
-      ranSuccessfully: wetCheckZoneRecords.ranSuccessfully,
-      notes: wetCheckZoneRecords.notes,
-      issueSummary: wetCheckZoneRecords.issueSummary,
-      repairLaborHours: wetCheckZoneRecords.repairLaborHours,
-      repairLaborManuallySet: wetCheckZoneRecords.repairLaborManuallySet,
-      resolvedAt: wetCheckZoneRecords.resolvedAt,
-      resolvedByUserId: wetCheckZoneRecords.resolvedByUserId,
-      billingSheetId: wetCheckZoneRecords.billingSheetId,
-      wetCheckBillingId: wetCheckZoneRecords.wetCheckBillingId,
-      clientId: wetCheckZoneRecords.clientId,
-      controllerId: wetCheckZoneRecords.controllerId,
-      observedPressure: wetCheckZoneRecords.observedPressure,
-      observedFlow: wetCheckZoneRecords.observedFlow,
-    }).from(wetCheckZoneRecords)
+    const zoneRecords = await db.select(WET_CHECK_ZONE_RECORD_SELECTION).from(wetCheckZoneRecords)
       .leftJoin(irrigationControllers, eq(wetCheckZoneRecords.controllerId, irrigationControllers.id))
       .where(eq(wetCheckZoneRecords.wetCheckId, id))
       .orderBy(

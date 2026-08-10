@@ -1,0 +1,131 @@
+# BUILD — Bookkeeper Role + Central Role Registry
+
+**Ticket A of 3.** Followed by `BUILD - AR Collections View on the Invoice List (B of 3)` and `BUILD - Invoice Payment Reminders + AR Notes (C of 3)`. Ship A first — B and C both depend on the capability sets it creates.
+
+**What & Why**
+There is no user type for a bookkeeper. Today the only way to give someone invoice visibility is to make them a `billing_manager`, which also hands them the power to create, edit, correct, void, and merge invoices and to approve estimates and parts. That is far more authority than the job needs.
+
+This ticket creates the **`bookkeeper`** role and, first, the thing that makes adding a role safe: a single place where role membership is declared. It also closes a pre-existing hole where **any authenticated user can list every invoice in their company.**
+
+When this ships, a bookkeeper can log in, see a working navigation, and read invoices. The AR-specific columns, filters, and reminders come in B and C.
+
+## Current state (confirmed in code)
+
+**Roles are not modelled anywhere.** `users.role` is a plain `text` column with `default("field_tech")` and a **comment** listing the five valid values (`schema.ts:37`). No enum, no constraint, no shared constant. The only type-level declaration is a union on a React prop (`company-admin-app.tsx:94`).
+
+**Role checks are hand-rolled and scattered.** Non-test references to `billing_manager`: **104 server-side**, **162 client-side** across 25+ files. The pattern is a local array — `const allowedRoles = ['company_admin', 'super_admin', 'billing_manager', 'irrigation_manager']` (`parts-routes.ts:122`, and again at `:203`, `:261`, `:1105`) — or a direct string compare.
+
+**`requireBillingAccess` (`routes.ts:518`) conflates reading and writing.** It hardcodes `company_admin || billing_manager` and guards invoice PDFs, `pdf/send` (`:12314`), monthly invoice creation (`:6563`), bill-separately (`:7197`), and the merge routes (`:7471`) — a mix of reads and mutations behind one gate.
+
+**An unknown role gets a blank app.** `navigation.tsx:117` is a `switch (userRole)` with one case per role and `default: return []` (`:262`). A `bookkeeper` user with no case added sees **no navigation at all**. `App.tsx:357` separately branches on `user.role === "billing_manager"` to pick a shell.
+
+**`GET /api/invoices` has no role gate** (`routes.ts:10110`) — `requireAuthentication` only. It is correctly company-scoped, but **any authenticated user, including `field_tech`, can list every invoice in their company with totals.** Pre-existing; this ticket closes it.
+
+## Scope of the role (decided)
+
+| | |
+|---|---|
+| **Can read** | Invoices, invoice PDFs, line items, payment status, balances, aging, customer billing contact and terms |
+| **Can write** | Mark an invoice sent. Send a payment reminder (built in C). Add an AR note (built in C). Nothing else. |
+| **Cannot** | Create, edit, correct, void, merge, or delete an invoice. Record or adjust a payment. Approve estimates or parts. Touch wet checks, work orders, billing sheets, or pricing. |
+| **Cannot see** | Budgets, part costs, margins, labor rates, Financial Pulse, wet-check billing internals |
+
+**Payments stay read-only from QuickBooks** (decided). The bookkeeper never marks an invoice paid in IrrigoPro. QBO is the payment system of record and `qb-payment-sync` is the only writer of `paymentStatus` / `balance` / `paidAt`. A manual override here would fight the sync on the next poll and produce exactly the kind of two-writers drift this project has been cleaning up.
+
+## Slice 1 — The role registry
+
+New module `lib/shared/src/roles.ts`, exported from `lib/shared/src/index.ts`:
+
+- `ROLES` — the canonical list, `bookkeeper` included.
+- `type Role` — the union, replacing the inline one at `company-admin-app.tsx:94`.
+- **Named capability sets, not role lists at call sites**: `CAN_READ_INVOICES`, `CAN_EDIT_INVOICES`, `CAN_SEND_INVOICE_EMAIL`, `CAN_APPROVE_ESTIMATES`, `CAN_APPROVE_PARTS`, `CAN_VIEW_BUDGETS`, `CAN_VIEW_COSTS`.
+- `hasCapability(role, capability): boolean`.
+
+`bookkeeper` is in `CAN_READ_INVOICES` and `CAN_SEND_INVOICE_EMAIL`. It is in **none** of the others.
+
+## Slice 2 — Split the gate, migrate the invoice call sites only
+
+`requireBillingAccess` splits in two:
+
+- `requireInvoiceRead` → `CAN_READ_INVOICES` (adds `bookkeeper`)
+- `requireInvoiceWrite` → `CAN_EDIT_INVOICES` (unchanged membership: `company_admin`, `billing_manager`)
+
+Every current `requireBillingAccess` site must be classified as one or the other **explicitly, one at a time**. **Default to write when ambiguous** — a wrongly-read-gated mutation is a privilege escalation; a wrongly-write-gated read is a support ticket. List the classification of each site in the proof.
+
+**Close the `GET /api/invoices` hole**: add `requireInvoiceRead` (`routes.ts:10110`).
+
+**Before landing that gate, report who currently reads invoices.** If `field_tech` or `irrigation_manager` hits this endpoint from any existing surface, that is a finding to raise, not something to silently allow or silently break. Grep the client for callers and say what you found.
+
+**Migrate the invoice and AR call sites in this ticket only.** Do not attempt all 266 — that is a separate refactor and would make this unreviewable. Leave a `TODO(roles)` marker on the rest and record the count before and after.
+
+## Slice 3 — Make the role usable in the app
+
+- Add a `bookkeeper` case to the `navigation.tsx` switch (`:117`). **Do not let it fall to `default: return []` (`:262`).** Nav items: Invoices (landing), Customers, QuickBooks. Nothing else.
+- Add `bookkeeper` to the `App.tsx:357` shell branch — it uses the same shell as `billing_manager`.
+- Replace the inline role union at `company-admin-app.tsx:94` with the shared `Role` type.
+- The bookkeeper's landing route is `/invoices`.
+
+**Gate: `pnpm typecheck` passes.** Widening the `Role` union will surface every exhaustive switch that does not handle `bookkeeper` — that is the point. Each one is a real decision. **Do not cast or add a fallthrough to silence one**; handle it and say what you chose.
+
+## Multi-tenancy (Rule 1)
+
+No change to isolation. `GET /api/invoices` already scopes via `authenticatedUserCompanyId` with the `super_admin → null` convention (`routes.ts:10114–10120`); adding the role gate must not alter that. A bookkeeper in company A must get nothing for a company B invoice id.
+
+## Decisions
+
+- **`bookkeeper` is a new role, not a variant of `billing_manager`** (decided) — the job is reading and chasing, not authoring.
+- **Read + AR actions only** (decided) — no invoice edit, void, merge, or correction.
+- **Payments remain read-only from QuickBooks** (decided) — one writer for payment state.
+- **Capability sets, not role arrays** (decided) — call sites ask what a user can do, not who they are.
+- **Only invoice/AR call sites migrate now** (decided) — the other ~250 get `TODO(roles)`.
+- **Invoices and AR only** (decided) — no budgets, costs, margins, or Financial Pulse.
+
+## Done looks like
+
+- A bookkeeper logs in, sees a populated navigation, lands on `/invoices`, and can read invoices and their PDFs.
+- She cannot create, edit, void, merge, or correct an invoice, and cannot record a payment — the controls are absent, **and the server refuses if the endpoint is called directly.**
+- She cannot see budgets, costs, margins, or Financial Pulse.
+- `GET /api/invoices` is role-gated; a role without `CAN_READ_INVOICES` is refused.
+- Role membership for every invoice route is readable in one file.
+
+## Tests
+
+- **Role matrix**, asserted on the **server response**, not the rendered UI: `bookkeeper` gets 200 on invoice read, invoice PDF, and mark-sent; **403** on create, edit, correct, void, merge, delete, payment adjust, estimate approve, parts approve, budget read, cost read.
+- `GET /api/invoices` refuses a role without `CAN_READ_INVOICES` — including the pre-existing `field_tech` case.
+- Every route that previously used `requireBillingAccess` behaves identically for `company_admin` and `billing_manager` after the split (regression guard — the split must not change existing access).
+- `hasCapability` returns false for an unrecognised role string, and for a null or undefined role.
+- Nav returns a non-empty item list for `bookkeeper` (direct guard against the `default: return []` trap).
+- Company isolation: a bookkeeper in company A gets nothing for an invoice id from company B.
+
+Follow the existing role-matrix pattern in `artifacts/api-server/src/routes/billing-workspace-role-access.test.ts`.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for `lib/shared/src/roles.ts`, the `requireBillingAccess` split, the `GET /api/invoices` gate, the nav case, and the `App.tsx` shell branch.
+- [ ] The classification list: every former `requireBillingAccess` site, and whether it became read or write.
+- [ ] Report of who currently calls `GET /api/invoices`, produced **before** the gate landed.
+- [ ] `pnpm typecheck` output after widening the `Role` union, with a list of every exhaustive switch that had to handle `bookkeeper` and what was decided for each.
+- [ ] Role-matrix test output showing bookkeeper 200s and 403s side by side.
+- [ ] Screenshot: the app as a bookkeeper, showing a populated nav and the invoice list.
+- [ ] Grep proof that no invoice edit, void, merge, or correction control renders for `bookkeeper`.
+- [ ] Count of remaining hand-rolled role checks before and after, with the `TODO(roles)` markers listed.
+- [ ] Deployed; commit message matches the diff.
+
+## Out of scope
+
+- AR columns, filters, and flags — ticket B.
+- Reminders and AR notes — ticket C.
+- Migrating all 266 hand-rolled role checks — invoice and AR sites only.
+- Recording payments in IrrigoPro.
+- Any change to what `company_admin` or `billing_manager` can do.
+
+## Relevant files
+
+- `lib/shared/src/roles.ts` (new), `lib/shared/src/index.ts` (export it)
+- `lib/db/src/schema/schema.ts` (`users.role` :37 — update the comment to include `bookkeeper`)
+- `artifacts/api-server/src/routes/routes.ts` (`requireBillingAccess` :518; `GET /api/invoices` :10110 — ungated; `pdf/send` :12314; monthly :6563; bill-separately :7197; merge registration :7471)
+- `artifacts/api-server/src/routes/invoice-mark-sent-routes.ts` (gate noted at :12)
+- `artifacts/irrigopro/src/components/layout/navigation.tsx` (role switch :117, `default: return []` :262)
+- `artifacts/irrigopro/src/App.tsx` (role shell branch :357)
+- `artifacts/irrigopro/src/components/company-admin-app.tsx` (inline role union :94 — replace with the shared type)
+- `artifacts/api-server/src/routes/billing-workspace-role-access.test.ts` (role-matrix test pattern to follow)

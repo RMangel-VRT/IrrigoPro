@@ -44,6 +44,10 @@ args = "wet-check-zone-filter"
 task = "workflow.run"
 args = "qb-invoice-ops"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "wet-check-select-shape"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -117,6 +121,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/routes/qb-invoice-ops.test.ts"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "wet-check-select-shape"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/wet-check-select-shape.test.ts"
 
 [workflows.workflow.metadata]
 isValidation = true

@@ -1,0 +1,147 @@
+# BUILD — AR Collections View on the Invoice List
+
+**Ticket B of 3.** Preceded by `BUILD - Bookkeeper Role + Central Role Registry (A of 3)`, followed by `BUILD - Invoice Payment Reminders + AR Notes (C of 3)`.
+
+**What & Why**
+The invoice list is built for someone producing invoices, not for someone chasing them. It sorts newest-first, leads with lifecycle status, and does not show a balance, a due date, or how overdue anything is. A bookkeeper cannot tell which invoices were never sent, which QuickBooks has voided, or which balances are stale.
+
+Every piece of data needed is already on the row. This ticket surfaces it: AR columns, sortable, with composable filters and honest flags.
+
+**Read-only.** No invoice is edited, voided, corrected, or merged from this screen — that authority is unchanged from ticket A, and per the standing rule an invoice is edited in one place, which is not here.
+
+## Prerequisites
+
+**`BUILD - Bookkeeper Role + Central Role Registry` (ticket A)** — provides the role and the capability sets the view keys off.
+
+**`BUILD - Decouple Invoice Sent-ness from Lifecycle Status`** — hard prerequisite. "Never sent" is the highest-value flag on this screen, and today `sentAt` is not what anything reads: payment overwrites `status`, so an invoice paid in QuickBooks can never be marked sent. Without that ticket the flag lies.
+
+**`FIX - QBO Void Misread as Paid`** — already shipped (`9ef9e556`). Without it, QBO-voided invoices read as paid and silently drop out of AR, which is exactly the population this screen is for.
+
+## Current state (confirmed in code)
+
+**The list already has filtering and sorting** (`invoices.tsx`): A/R aging filter deep-linked through `?aging=` (`:360–430`), month filter, text search, column sort (`:449`), and a collapsed cancelled section (`:450`).
+
+**The AR data already exists.** On `invoices`: `dueDate` (`schema.ts:851`), `paymentStatus` / `balance` / `paymentSyncedAt` (`:881–883`), `qbVoidDetectedAt` (`:887`), `qbNote`, `sentAt`, `customerEmail` (`:838`). On `customers`: `paymentTerms` (`:90` — `net_30` / `net_15` / `due_on_receipt`).
+
+**Overdue is already derived server-side.** `GET /api/invoices` annotates each row with `isOverdue` (`routes.ts:10145`), using `dueDate` when set and otherwise `createdAt` + customer payment terms.
+
+**`computeArAging` (`financial-pulse-math.ts`) uses the same effective-due-date rule** and buckets into Current / 1–30 / 31–60 / 60+.
+
+## The one rule that matters here
+
+**Import the effective-due-date helper. Do not re-derive it.**
+
+There are already two implementations of the same rule — the `isOverdue` annotation on the list route and the one inside `computeArAging`. This ticket must not add a third. Extract it to a single exported function, have both existing call sites use it, and build the column on top of that. A fourth disagreeing overdue calculation is precisely the failure mode `FIX - One Budget Spend Calculation` was written to end, and AR is where a wrong number costs real money.
+
+## Slice 1 — Extract the shared helper
+
+- One exported function returning the effective due date and days overdue for an invoice, given the customer's payment terms.
+- Handles: `dueDate` set · `dueDate` null with each of `net_30` / `net_15` / `due_on_receipt` · customer with null terms (defaults to `net_30`, matching `computeArAging` today).
+- Replace the inline derivation at `routes.ts:10145` and the one inside `computeArAging` with calls to it. **Numbers must not change** — if they do, that is a discrepancy to report, not to absorb.
+
+## Slice 2 — AR columns
+
+Added to the existing table, every one sortable:
+
+Balance due · Effective due date · Days overdue · Aging bucket · Payment status · Sent · Last reminder · Reminder count
+
+Last reminder and reminder count read from `invoice_reminders`, which does not exist until ticket C. **Render them as columns with an empty state now** so the layout does not change later, or hide them behind a flag until C lands — either is fine, but pick one and say which.
+
+Balance shows `balance` when the payment sync has run, and falls back to `totalAmount` when it has not — with the **stale sync** flag making clear which is being shown.
+
+## Slice 3 — Filters
+
+Composable, and reflected in the URL so a view can be bookmarked and shared:
+
+- **Aging bucket** — reuse the existing `?aging=` param (`:360–430`). **Do not add a second aging parameter.**
+- **Payment status** — unpaid / partially paid / paid
+- **Sent** — sent / never sent
+- **Reminder** — never reminded / reminded in last N days / reminded 3+ times *(inert until C)*
+- **Customer**, **date range**, **amount range**
+- **Flags-only** toggle
+
+Filters combine with AND. Clearing all returns today's default list.
+
+## Slice 4 — Flags
+
+Each a distinct badge with a plain-language tooltip:
+
+| Flag | Condition | Why it matters |
+|---|---|---|
+| **Never sent** | `sentAt == null`, not draft | Nobody pays an invoice they never received. Highest-value flag on the page. |
+| **Overdue** | not paid and effective due date is past | The core AR signal |
+| **Voided in QuickBooks** | `qbVoidDetectedAt != null` | Already built by `FIX - QBO Void Misread as Paid` — surface it here |
+| **Not in QuickBooks** | no QB link | Will never receive a payment sync; invisible to AR reality |
+| **Stale sync** | `paymentSyncedAt` older than 24h, or null | The balance shown may be wrong. Do not let a bookkeeper chase a paid invoice. |
+| **No billing email** | `customerEmail` empty | Cannot be reminded; needs a human |
+| **Needs QB cleanup** | `qbNote` populated | Existing manual-action note |
+
+Colour alone must not carry the meaning — each badge has text.
+
+## Slice 5 — Defaults per role
+
+- **Default sort for `bookkeeper`: balance due descending, within the oldest aging bucket first.** Biggest money, oldest first.
+- Other roles keep today's newest-first default. This is a per-role default, not a schema change.
+- The bookkeeper's landing is `/invoices` pre-filtered to unpaid-and-overdue. **Implement as a default URL for that role, not a separate route** — Rule 3, one canonical invoice list.
+
+## Multi-tenancy (Rule 1)
+
+No new reads are introduced; the list route is already company-scoped (`routes.ts:10114–10120`) with the `super_admin → null` convention. Any new aggregate (counts per flag, per-bucket totals in a header) resolves scope the same way and must never sum across companies.
+
+## Decisions
+
+- **Extend the invoice list; no separate AR page** (decided) — Rule 3, and a duplicate list is how two screens start disagreeing about what is owed.
+- **One effective-due-date helper, imported everywhere** (decided).
+- **Read-only** (decided) — no edit affordance on this screen; rows link to the invoice detail.
+- **Never-sent is a flag, not a filter-only concept** (decided) — it must be visible without filtering for it.
+- **Bookkeeper default sort is biggest-and-oldest** (decided).
+
+## Done looks like
+
+- A bookkeeper opens `/invoices` and sees unpaid and overdue work, biggest and oldest first, without touching a control.
+- She can tell at a glance which invoices were never sent, which are stale, and which QuickBooks has voided.
+- Filters combine, survive a page reload, and can be shared as a URL.
+- Every column sorts.
+- Nothing on the screen edits an invoice.
+- Days overdue on this screen matches Financial Pulse for the same invoice on the same day.
+
+## Tests
+
+- Effective due date matches `computeArAging` for the same invoice across all five cases: `dueDate` set · null with `net_30` · null with `net_15` · null with `due_on_receipt` · customer with null terms.
+- The extracted helper produces identical output to the two implementations it replaces, on a fixture set covering each aging bucket boundary.
+- Bucket boundaries: exactly 0 days overdue is Current; 1 day is 1–30; exactly 30 is 1–30; exactly 31 is 31–60; exactly 60 is 60+.
+- Flags: never-sent, overdue, stale-sync, no-billing-email, not-in-QuickBooks, and QBO-voided each render on a fixture invoice and are **absent** on a clean one.
+- A `draft` invoice does not get the never-sent flag.
+- Filters compose — aging + payment status + never-sent together return the intersection — and survive a URL round-trip.
+- Existing `?aging=` deep links still work unchanged (regression guard).
+- Bookkeeper default sort is biggest-and-oldest; `billing_manager` default is unchanged (regression guard).
+- Balance falls back to `totalAmount` when `paymentSyncedAt` is null, and the stale flag renders alongside.
+- Company isolation on any new aggregate.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the extracted due-date helper and both call sites that now import it.
+- [ ] Output proving the helper reproduces the previous numbers on the fixture set — or a written explanation of any that changed.
+- [ ] `file:line` for each new column, filter, and flag.
+- [ ] Screenshot: the AR view as a bookkeeper — filters applied, flags visible, sorted biggest-and-oldest.
+- [ ] Screenshot: the same list as a `billing_manager`, showing the default sort is unchanged.
+- [ ] Screenshot or output showing days overdue matching between this list and Financial Pulse for the same invoice.
+- [ ] Grep proof that no edit, void, merge, or correction control renders on this screen for `bookkeeper`.
+- [ ] Test output for the bucket-boundary and filter-composition cases.
+- [ ] Deployed; commit message matches the diff.
+
+## Out of scope
+
+- Reminders and AR notes — ticket C. The reminder columns and filter render inert here.
+- Any invoice mutation.
+- Statements or multi-invoice customer summaries — worth doing, separate ticket.
+- Changing what any existing role can see or do.
+
+## Relevant files
+
+- `artifacts/irrigopro/src/pages/invoices.tsx` (aging filter :360–430, sort :449, filter state :432–500, cancelled section :450)
+- `artifacts/api-server/src/routes/routes.ts` (`GET /api/invoices` :10110, `isOverdue` derivation :10145)
+- `artifacts/api-server/src/financial-pulse-math.ts` (`computeArAging` — second copy of the same rule)
+- `lib/db/src/schema/schema.ts` (`invoices` :838–890 — `dueDate` :851, `paymentStatus`/`balance`/`paymentSyncedAt` :881–883, `qbVoidDetectedAt` :887; `customers.paymentTerms` :90)
+- `lib/shared/src/roles.ts` (from ticket A — capability gates for the per-role defaults)
+- `artifacts/irrigopro/src/lib/invoice-csv.ts` (existing export path — keep column parity if the export is extended)
