@@ -85,7 +85,10 @@ const ROLE_GUARDS = [
   "requireCustomerEditAccess",
   "requireBoundaryEditAccess",
   "requireWorkOrderBillingAccess",
-  "requireBillingAccess",
+  // Task #1886 — requireBillingAccess split into three capability-backed guards.
+  "requireInvoiceRead",
+  "requireInvoiceWrite",
+  "requireInvoiceSend",
   "requireWorkOrderUpdateAccess",
   "requireBillingSheetUpdateAccess",
   "requireNotificationAccess",

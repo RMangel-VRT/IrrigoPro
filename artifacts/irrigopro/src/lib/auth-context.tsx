@@ -8,18 +8,14 @@ import {
 } from "react";
 import { safeGet, safeRemove, safeSet } from "@/utils/safeStorage";
 import { clearSessionAndLogout } from "@/lib/queryClient";
+import type { Role } from "@workspace/shared";
 
 export type WebUser = {
   id: number;
   username: string;
   name: string;
   email: string;
-  role:
-    | "super_admin"
-    | "company_admin"
-    | "irrigation_manager"
-    | "field_tech"
-    | "billing_manager";
+  role: Role;
   companyId?: number | null;
   isActive: boolean;
 };

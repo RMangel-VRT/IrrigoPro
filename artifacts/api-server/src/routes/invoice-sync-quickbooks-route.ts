@@ -44,7 +44,9 @@ export interface SyncInvoiceResult {
 
 export interface RegisterInvoiceSyncQuickbooksRoutesDeps {
   requireAuthentication: RequestHandler;
-  requireBillingAccess: RequestHandler;
+  /** Task #1886: pushing an invoice to QBO writes the invoice's QB linkage
+   *  and SyncToken → CAN_EDIT_INVOICES, not CAN_MANAGE_QUICKBOOKS. */
+  requireInvoiceWrite: RequestHandler;
   // Syncs the app invoice to QuickBooks: creates if no QB id exists, updates
   // in-place if it does. Persists the new/updated QB id and SyncToken.
   // Throws InvoiceSyncError on a precondition (customer not synced, no
@@ -59,14 +61,14 @@ export function registerInvoiceSyncQuickbooksRoutes(
   app: Express,
   {
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     createQuickBooksInvoice,
   }: RegisterInvoiceSyncQuickbooksRoutesDeps,
 ): void {
   app.post(
     "/api/invoices/:id/sync-quickbooks",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       const id = parseInt(req.params.id, 10);
       if (!Number.isFinite(id) || id <= 0) {

@@ -62,6 +62,7 @@ interface EstimateDetailModalProps {
 // never sees an action that would 403 against the PDF endpoint. The
 // server still enforces the gate authoritatively — this is just
 // UI hygiene.
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const PDF_READ_ROLES = new Set<string>([
   "super_admin",
   "company_admin",

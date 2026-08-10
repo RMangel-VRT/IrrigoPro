@@ -36,7 +36,11 @@ import { recordAuditEvent } from "./audit-log";
 
 export interface RegisterInvoiceEditabilityRoutesDeps {
   requireAuthentication: RequestHandler;
-  requireBillingAccess: RequestHandler;
+  /** Task #1886: only GET /api/invoices/:id/items is read-classified here. */
+  requireInvoiceRead: RequestHandler;
+  /** Every mutation in this module — PATCH, return-to-draft, ticket
+   *  attach/release, finalize, void. */
+  requireInvoiceWrite: RequestHandler;
   /** Injected from routes.ts so finalize + metadata-QB-update can trigger a
    *  QB create-or-update without duplicating QB credential/integration plumbing. */
   syncInvoiceToQb?: (
@@ -156,7 +160,7 @@ export function registerInvoiceEditabilityRoutes(
   app: Express,
   deps: RegisterInvoiceEditabilityRoutesDeps,
 ): void {
-  const { requireAuthentication, requireBillingAccess, syncInvoiceToQb } = deps;
+  const { requireAuthentication, requireInvoiceRead, requireInvoiceWrite, syncInvoiceToQb } = deps;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const db: any = deps._db ?? dbModule;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -171,7 +175,7 @@ export function registerInvoiceEditabilityRoutes(
   app.patch(
     "/api/invoices/:id",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));
@@ -272,7 +276,7 @@ export function registerInvoiceEditabilityRoutes(
   app.get(
     "/api/invoices/:id/items",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceRead,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));
@@ -307,7 +311,7 @@ export function registerInvoiceEditabilityRoutes(
   app.post(
     "/api/invoices/:id/return-to-draft",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));
@@ -369,7 +373,7 @@ export function registerInvoiceEditabilityRoutes(
   app.post(
     "/api/invoices/:id/tickets",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));
@@ -607,7 +611,7 @@ export function registerInvoiceEditabilityRoutes(
   app.delete(
     "/api/invoices/:id/tickets/:ticketRef",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));
@@ -746,7 +750,7 @@ export function registerInvoiceEditabilityRoutes(
   app.post(
     "/api/invoices/:id/finalize",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));
@@ -851,7 +855,7 @@ export function registerInvoiceEditabilityRoutes(
   app.post(
     "/api/invoices/:id/void",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));

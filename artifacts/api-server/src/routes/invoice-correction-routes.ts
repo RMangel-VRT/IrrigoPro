@@ -40,7 +40,10 @@ import { InvoiceSyncError } from "./invoice-sync-quickbooks-route";
 
 export interface RegisterInvoiceCorrectionRoutesDeps {
   requireAuthentication: RequestHandler;
-  requireBillingAccess: RequestHandler;
+  /** Task #1886: every endpoint in the guided-dispute flow is write-gated,
+   *  including its two GETs — they exist only to drive the correction
+   *  authoring UI, which is CAN_EDIT_INVOICES-only. */
+  requireInvoiceWrite: RequestHandler;
   /** Optional — injected by routes.ts so the qb-sync endpoint can call
    *  updateQbInvoiceInPlace (or buildAndPostQbInvoice) without duplicating
    *  the QB credential/integration plumbing here. */
@@ -208,7 +211,7 @@ export function registerInvoiceCorrectionRoutes(
   app: Express,
   deps: RegisterInvoiceCorrectionRoutesDeps,
 ): void {
-  const { requireAuthentication, requireBillingAccess, syncInvoiceToQb } = deps;
+  const { requireAuthentication, requireInvoiceWrite, syncInvoiceToQb } = deps;
   // Allow test injection; fall back to module-level singletons in production.
   // Local `db` and `storage` shadow the module-level imports inside this function.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -221,7 +224,7 @@ export function registerInvoiceCorrectionRoutes(
   app.get(
     "/api/invoices/:invoiceId/correction-tickets",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const invoiceId = parseInt(String(req.params.invoiceId));
@@ -314,7 +317,7 @@ export function registerInvoiceCorrectionRoutes(
   app.get(
     "/api/invoice-corrections/:id",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));
@@ -361,7 +364,7 @@ export function registerInvoiceCorrectionRoutes(
   app.post(
     "/api/invoice-corrections",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const parsed = openCorrectionSchema.safeParse(req.body);
@@ -453,7 +456,7 @@ export function registerInvoiceCorrectionRoutes(
   app.patch(
     "/api/invoice-corrections/:id",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));
@@ -555,7 +558,7 @@ export function registerInvoiceCorrectionRoutes(
   app.post(
     "/api/invoice-corrections/:id/reissue",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));
@@ -964,7 +967,7 @@ export function registerInvoiceCorrectionRoutes(
   app.post(
     "/api/invoice-corrections/:id/qb-sync",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));
@@ -1066,7 +1069,7 @@ export function registerInvoiceCorrectionRoutes(
   app.post(
     "/api/invoice-corrections/:id/cancel",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));

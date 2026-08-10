@@ -79,6 +79,7 @@ import ResetPassword from "@/pages/reset-password";
 // FieldPortal import removed by Task #1857 (Slice 5).
 import NotFound from "@/pages/not-found";
 import OnboardingFlow from "@/components/onboarding/onboarding-flow";
+import type { Role } from "@workspace/shared";
 
 function RedirectToCommandCenter() {
   const [, navigate] = useLocation();
@@ -91,7 +92,7 @@ interface User {
   username: string;
   name: string;
   email: string;
-  role: "super_admin" | "company_admin" | "irrigation_manager" | "field_tech" | "billing_manager";
+  role: Role;
   companyId?: number | null;
   isActive: boolean;
 }

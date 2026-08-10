@@ -16,6 +16,7 @@ import type { Express, RequestHandler } from "express";
 import { ACTIVE_BS, ACTIVE_WO, ACTIVE_WCB } from "./billing-workspace-routes";
 import { storage } from "../storage";
 
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const ALLOWED_ROLES = new Set([
   "billing_manager",
   "company_admin",

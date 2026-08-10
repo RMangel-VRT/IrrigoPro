@@ -15,6 +15,7 @@ import type { Request, RequestHandler } from "express";
 // Roles that may perform internal approval / customer delivery on an
 // estimate (approve, reject, internal-approve, send-approval-email,
 // email, pending-approval list).
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 export const ESTIMATE_APPROVAL_ROLES = new Set<string>([
   "super_admin",
   "company_admin",
@@ -28,6 +29,7 @@ export const ESTIMATE_APPROVAL_ROLES = new Set<string>([
 // pricing-stripped tech view can't be sidestepped via the PDF.
 // Task #643 — the legacy `manager` alias was retired; only the
 // canonical `irrigation_manager` role is accepted now.
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 export const ESTIMATE_PDF_READ_ROLES = new Set<string>([
   "super_admin",
   "company_admin",
@@ -38,6 +40,7 @@ export const ESTIMATE_PDF_READ_ROLES = new Set<string>([
 // Roles that may submit a draft for review or resend an expired estimate
 // via POST /api/estimates/:id/transition. These are operationally
 // "manager-level" roles — the same ones that author estimates.
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 export const ESTIMATE_SUBMIT_FOR_REVIEW_ROLES = new Set<string>([
   "super_admin",
   "company_admin",
@@ -51,6 +54,7 @@ export const ESTIMATE_SUBMIT_FOR_REVIEW_ROLES = new Set<string>([
 // row that has already been submitted for review. Mirrors the office
 // roles in `ESTIMATE_SUBMIT_FOR_REVIEW_ROLES` plus `billing_manager`
 // so the same people who own the pending queue can clean it up.
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 export const ESTIMATE_PENDING_DELETE_ROLES = new Set<string>([
   "super_admin",
   "company_admin",
@@ -62,6 +66,7 @@ export const ESTIMATE_PENDING_DELETE_ROLES = new Set<string>([
 // via POST /api/estimates/:id/transition (send_to_customer). Same as
 // the approval roles but spelled out explicitly so a future widening
 // of one set doesn't silently widen the other.
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 export const ESTIMATE_SEND_TO_CUSTOMER_ROLES = new Set<string>([
   "super_admin",
   "company_admin",
@@ -74,6 +79,7 @@ export const ESTIMATE_SEND_TO_CUSTOMER_ROLES = new Set<string>([
 // same roles that can approve a customer estimate — so that billing
 // managers cannot accidentally undo a customer approval they didn't
 // make.
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 export const ESTIMATE_UNAPPROVE_ROLES = new Set<string>([
   "super_admin",
   "company_admin",
@@ -82,6 +88,7 @@ export const ESTIMATE_UNAPPROVE_ROLES = new Set<string>([
 // Roles that may revert a rejected estimate back to `sent` via
 // POST /api/estimates/:id/unreject. Mirrors ESTIMATE_UNAPPROVE_ROLES —
 // same admin tiers, same rationale.
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 export const ESTIMATE_UNREJECT_ROLES = new Set<string>([
   "super_admin",
   "company_admin",

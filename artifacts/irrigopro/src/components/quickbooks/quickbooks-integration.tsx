@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSearch } from "wouter";
+import { hasCapability, CAN_MANAGE_QUICKBOOKS } from "@workspace/shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -270,11 +271,13 @@ export function QuickBooksIntegration({ className }: QuickBooksConnectionProps) 
     }
   })();
 
-  const repairAllowedRoles = ["company_admin", "billing_manager"];
-
+  // Task #1886 — mirrors the server gate on /api/quickbooks/connection/stale,
+  // which moved from an inline company_admin / billing_manager allowlist to
+  // CAN_MANAGE_QUICKBOOKS. Kept in step so the bookkeeper actually issues the
+  // query she is now authorized to make.
   const { data: staleStatus } = useQuery<{ stale: boolean; count: number }>({
     queryKey: ["/api/quickbooks/connection/stale"],
-    enabled: repairAllowedRoles.includes(userRole ?? ""),
+    enabled: hasCapability(userRole, CAN_MANAGE_QUICKBOOKS),
     staleTime: 30_000,
     retry: false,
     throwOnError: false,
@@ -639,9 +642,10 @@ export function QuickBooksIntegration({ className }: QuickBooksConnectionProps) 
             <ConnectionHealthPanel />
           </div>
 
-          {/* Connection issue detection — visible to company_admin, billing_manager, and
-              super_admin only when a stale QB row is detected. Hidden when healthy. */}
-          {repairAllowedRoles.includes(userRole ?? "") && staleStatus?.stale && (
+          {/* Connection issue detection — visible to roles with
+              CAN_MANAGE_QUICKBOOKS only when a stale QB row is detected.
+              Hidden when healthy. */}
+          {hasCapability(userRole, CAN_MANAGE_QUICKBOOKS) && staleStatus?.stale && (
             <>
               <Separator />
               <div className="space-y-3">

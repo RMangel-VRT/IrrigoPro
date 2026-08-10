@@ -208,6 +208,7 @@ export const createEstimateWithItemsSchema = z.object({
 // Slice 7 — billing roles (billing_manager, company_admin, super_admin)
 // plus irrigation_manager can internally approve, reject, or send
 // estimates to customers.
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 export const requireEstimateApprovalAccess: RequestHandler = (req, res, next) => {
   const userRole = req.authenticatedUserRole;
   if (
@@ -235,12 +236,14 @@ export const requireEstimateApprovalAccess: RequestHandler = (req, res, next) =>
 // app and should not be able to pull the full priced PDF.
 // Task #643 — the legacy `manager` alias was retired; only the
 // canonical `irrigation_manager` role is accepted now.
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const ESTIMATE_PDF_READ_ROLES = new Set<string>([
   "super_admin",
   "company_admin",
   "billing_manager",
   "irrigation_manager",
 ]);
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 export const requireEstimatePdfAccess: RequestHandler = (req, res, next) => {
   const userRole = req.authenticatedUserRole;
   if (!userRole || !ESTIMATE_PDF_READ_ROLES.has(userRole)) {

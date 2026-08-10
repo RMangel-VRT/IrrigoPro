@@ -18,7 +18,7 @@
 //     with the caller's actorRole and the expected action string.
 //
 // Static-source tests (Task #1255) also verify that:
-//   - POST /api/invoices/monthly is guarded by requireBillingAccess
+//   - POST /api/invoices/monthly is guarded by requireInvoiceWrite (Task #1886)
 //   - Each "mark as billed" loop in the monthly route emits a *.billed audit row
 
 import { describe, it, beforeEach, afterEach } from "node:test";
@@ -685,11 +685,13 @@ describe("POST /api/wet-check-billings/:id/approve — basic (Task #1255)", () =
   const monthlySrc = nextRoute === -1 ? src.slice(monthlyStart) : src.slice(monthlyStart, nextRoute);
 
   describe("POST /api/invoices/monthly — role guard (Task #1255)", () => {
-    it("requireBillingAccess guard is wired between requireAuthentication and the async handler", () => {
+    // Task #1886 — was requireBillingAccess; generating monthly invoices is an
+    // invoice mutation, so it is write-classified. Membership is unchanged.
+    it("requireInvoiceWrite guard is wired between requireAuthentication and the async handler", () => {
       assert.match(
         monthlySrc,
-        /requireAuthentication,\s*requireBillingAccess,\s*async/,
-        "requireBillingAccess must appear between requireAuthentication and async in the monthly route",
+        /requireAuthentication,\s*requireInvoiceWrite,\s*async/,
+        "requireInvoiceWrite must appear between requireAuthentication and async in the monthly route",
       );
     });
   });

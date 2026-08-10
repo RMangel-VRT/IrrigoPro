@@ -33,6 +33,7 @@ import type { IrrigationImportRow, IrrigationImportRowError, IrrigationZoneTypeE
 
 // ── Role helpers ──────────────────────────────────────────────────────────────
 
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const MANAGER_ROLES = new Set([
   "company_admin",
   "super_admin",
@@ -40,6 +41,7 @@ const MANAGER_ROLES = new Set([
   "billing_manager",
 ]);
 
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const WRITE_ROLES = new Set([
   "company_admin",
   "super_admin",

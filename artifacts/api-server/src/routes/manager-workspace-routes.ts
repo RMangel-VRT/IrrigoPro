@@ -34,6 +34,7 @@ export interface RegisterManagerWorkspaceRoutesDeps {
   requireAuthentication: RequestHandler;
 }
 
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const MW_ROLES = new Set([
   "irrigation_manager",
   "company_admin",

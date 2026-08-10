@@ -504,7 +504,7 @@ describe("invoice audit — WCB enrichment branch (Slice 2)", () => {
   });
 
   // Dev-mode header auth: billing_manager in the test company, no DB user lookup.
-  // requireBillingAccess allows company_admin and billing_manager.
+  // requireInvoiceRead (Task #1886) allows company_admin and billing_manager.
   // x-user-company-id scopes getInvoiceById and the tenant guard to auditCompanyId.
   function auditFetch(): Promise<Response> {
     return fetch(`${auditBaseUrl}/api/invoices/${auditInvoiceId}/audit`, {

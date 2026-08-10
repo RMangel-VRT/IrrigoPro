@@ -19,6 +19,13 @@ import { wetCheckCreateBody, normalizeBranchName, checkBranchGate } from "./wet-
 import { registerWorkOrderZoneRoutes } from "./work-order-zone-route";
 import type { InsertInvoice, InsertCustomer } from "@workspace/db";
 import { PRICING_FIELDS_TO_STRIP } from "@workspace/db";
+import {
+  hasCapability,
+  CAN_READ_INVOICES,
+  CAN_EDIT_INVOICES,
+  CAN_SEND_INVOICE_EMAIL,
+  CAN_MANAGE_QUICKBOOKS,
+} from "@workspace/shared";
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { EmailService } from "../email-service";
@@ -79,17 +86,9 @@ import type {
 // uniformly. In production the ONLY auth surfaces are bearer tokens and
 // server-side sessions. Header-auth is dev-only and cannot be re-enabled
 // via an env flag in production.
-function isHeaderAuthAllowed(): boolean {
-  return process.env.NODE_ENV !== 'production';
-}
 function headerUserId(req: Request): string | undefined {
   if (!isHeaderAuthAllowed()) return undefined;
   const v = req.headers['x-user-id'];
-  return typeof v === 'string' ? v : Array.isArray(v) ? v[0] : undefined;
-}
-function headerUserRole(req: Request): string | undefined {
-  if (!isHeaderAuthAllowed()) return undefined;
-  const v = req.headers['x-user-role'];
   return typeof v === 'string' ? v : Array.isArray(v) ? v[0] : undefined;
 }
 function headerUserCompanyId(req: Request): string | undefined {
@@ -301,6 +300,7 @@ async function regressionGuardZeroCatalogPrices(
 // ─── /Authoritative server-side pricing ─────────────────────────────────────────
 
 // Roles allowed to read billing notes
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const BILLING_NOTES_READ_ROLES = new Set(['billing_manager', 'company_admin', 'super_admin']);
 
 // Strip billingNotes from customer data for roles that should not see it
@@ -432,6 +432,7 @@ import { buildWoLineDescription, buildBsLineDescription, buildWcbLineDescription
 import { seedIssueTypeConfigsForActiveCompanies } from "../seed-issue-type-configs";
 
 // Production-ready middleware to check if user has company admin permissions for site map operations
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const requireCompanyAdminAccess = (req: any, res: any, next: any) => {
   const userRole = req.authenticatedUserRole;
 
@@ -451,6 +452,7 @@ const requireCompanyAdminAccess = (req: any, res: any, next: any) => {
 };
 
 // Middleware to allow company admins AND billing managers to edit customer records
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const requireCustomerEditAccess = (req: any, res: any, next: any) => {
   const userRole = req.authenticatedUserRole;
 
@@ -477,6 +479,7 @@ const requireCustomerEditAccess = (req: any, res: any, next: any) => {
 // The client-side allowlist in
 // `artifacts/irrigopro/src/components/customers/property-boundary.tsx`
 // (`EDIT_ROLES`) MUST stay in sync with this set.
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const requireBoundaryEditAccess = (req: any, res: any, next: any) => {
   const userRole = req.authenticatedUserRole;
 
@@ -501,6 +504,7 @@ const requireBoundaryEditAccess = (req: any, res: any, next: any) => {
 };
 
 // Middleware to check if user can edit/delete work orders and billing sheets
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const requireWorkOrderBillingAccess = (req: any, res: any, next: any) => {
   const userRole = req.authenticatedUserRole;
 
@@ -514,22 +518,8 @@ const requireWorkOrderBillingAccess = (req: any, res: any, next: any) => {
   next();
 };
 
-// Middleware for billing/invoice PDF access (billing_manager and company_admin only)
-const requireBillingAccess = (req: any, res: any, next: any) => {
-  // Use the authenticated user role set by requireAuthentication middleware
-  const userRole = req.authenticatedUserRole;
-  
-  if (userRole !== 'company_admin' && userRole !== 'billing_manager') {
-    res.status(403).json({ 
-      message: "Access denied. Only company administrators and billing managers can access invoice PDFs." 
-    });
-    return;
-  }
-  
-  next();
-};
-
 // More granular middleware for work order updates that allows field techs to start their own work orders
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const requireWorkOrderUpdateAccess = async (req: any, res: any, next: any) => {
   const userRole = req.authenticatedUserRole;
   const userId = req.authenticatedUserId;
@@ -625,6 +615,7 @@ const requireSameCompanyAsWorkOrder = makeRequireSameCompanyAsWorkOrder(storage)
 const requireSameCompanyAsBillingSheet = makeRequireSameCompanyAsBillingSheet(storage);
 
 // More granular middleware for billing sheet updates that allows field techs to submit for approval
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const requireBillingSheetUpdateAccess = async (req: any, res: any, next: any) => {
   const userRole = req.authenticatedUserRole;
   const userId = req.authenticatedUserId;
@@ -684,6 +675,7 @@ const requireBillingSheetUpdateAccess = async (req: any, res: any, next: any) =>
 };
 
 // Authentication middleware for notifications - ensures users can only access their own notifications
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const requireNotificationAccess = async (req: any, res: any, next: any) => {
   try {
     // Get authenticated user ID - prefer session-based auth
@@ -916,6 +908,7 @@ const requireAuthentication = async (req: any, res: any, next: any) => {
 };
 
 // Middleware to check if user has permission to view site maps (company admin and irrigation manager)
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const requireSiteMapViewAccess = (req: any, res: any, next: any) => {
   const userRole = req.authenticatedUserRole;
 
@@ -934,20 +927,6 @@ const requireSiteMapViewAccess = (req: any, res: any, next: any) => {
   next();
 };
 
-// QuickBooks access control middleware - irrigation managers and field techs cannot access QuickBooks
-const requireQuickBooksAccess = (req: any, res: any, next: any) => {
-  const userRole = req.authenticatedUserRole || headerUserRole(req);
-  
-  if (userRole === 'irrigation_manager' || userRole === 'field_tech') {
-    res.status(403).json({ 
-      message: "Access denied. QuickBooks integration is not available for your role." 
-    });
-    return;
-  }
-  
-  next();
-};
-
 // In-memory OAuth state store (replaces session-based storage — app uses localStorage auth, not server sessions)
 // Maps state token -> { expiry timestamp, companyId } (10 min TTL)
 // Task #744: USE_DB_OAUTH_STATE=1 routes new flows through Postgres instead; the Map stays for the in-memory path.
@@ -963,6 +942,16 @@ setInterval(() => {
 }, 60_000);
 
 
+// Task #1886 — capability-backed guards live in role-guards.ts so tests can
+// mount the real middleware instead of re-implementing it.
+import {
+  isHeaderAuthAllowed,
+  headerUserRole,
+  requireInvoiceRead,
+  requireInvoiceWrite,
+  requireInvoiceSend,
+  requireQuickBooksAccess,
+} from "./role-guards";
 import { db } from "../db";
 import { 
   customers, estimates, workOrders, estimateItems, parts, billingSheets, billingSheetItems, 
@@ -4871,11 +4860,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // User routes
   // Role rank for ceiling checks (higher = more privileged).
+  // Every role in the registry needs an entry — an unlisted role falls back to
+  // rank 0, which makes it unassignable by anyone below super_admin.
   const ROLE_RANK: Record<string, number> = {
     super_admin: 4,
     company_admin: 3,
     billing_manager: 2,
     irrigation_manager: 2,
+    bookkeeper: 2, // Task #1886 — same rank as the other non-admin company roles.
     field_tech: 1,
   };
 
@@ -6385,7 +6377,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerSiteMapRoutes(app, { requireAuthentication, requireSiteMapViewAccess, requireCompanyAdminAccess });
 
   // Invoice preview (no creation, just calculation)
-  app.post("/api/invoices/preview", requireAuthentication, async (req, res) => {
+  // Task #1886 — WRITE. This assembles the contents of an invoice that does
+  // not exist yet (work orders, billing sheets, eligible wet-check billings)
+  // and is step one of the create flow in the billing Command Center, whose
+  // only callers are company_admin and billing_manager. It was previously
+  // authenticated-only, which let any role read a customer's billable work.
+  app.post("/api/invoices/preview", requireAuthentication, requireInvoiceWrite, async (req, res) => {
     try {
       const { customerId, workOrderIds = [], billingSheetIds = [], wetCheckBillingIds = [] } = req.body;
       
@@ -6560,7 +6557,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Create monthly invoice for customer - consolidates selected or all unbilled work
-  app.post("/api/invoices/monthly", requireAuthentication, requireBillingAccess, async (req, res) => {
+  app.post("/api/invoices/monthly", requireAuthentication, requireInvoiceWrite, async (req, res) => {
     try {
       const { customerId, workOrderIds = [], billingSheetIds = [], selectedWetCheckBillingIds = [], periodStart: periodStartInput, periodEnd: periodEndInput } = req.body;
 
@@ -7191,10 +7188,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
 
   // Task #1809 — "Bill Separately": create a standalone invoice for a single ticket.
-  // Guard: requireAuthentication + requireBillingAccess (same as monthly endpoint).
+  // Guard: requireAuthentication + requireInvoiceWrite (same as monthly endpoint).
   // Body: { ticketType: 'work_order' | 'billing_sheet' | 'wet_check_billing', ticketId: number }
   // Returns: the created invoice record.
-  app.post("/api/invoices/bill-separately", requireAuthentication, requireBillingAccess, async (req, res) => {
+  app.post("/api/invoices/bill-separately", requireAuthentication, requireInvoiceWrite, async (req, res) => {
     try {
       const bodySchema = z.object({
         ticketType: z.enum(['work_order', 'billing_sheet', 'wet_check_billing']),
@@ -7468,35 +7465,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerBudgetRoutes(app, { requireAuthentication });
   registerFinancialPulseRoutes(app, { requireAuthentication });
   // Task #1425 — merge duplicate monthly invoices for the same customer.
-  registerInvoiceMergeRoutes(app, { requireAuthentication, requireBillingAccess });
+  registerInvoiceMergeRoutes(app, { requireAuthentication, requireInvoiceWrite });
   // Task #1443 — per-invoice QuickBooks sync/resync (post-merge).
   registerInvoiceSyncQuickbooksRoutes(app, {
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     createQuickBooksInvoice: createQuickBooksInvoiceForInvoice,
   });
   // Task #1438 — mark an invoice sent / unsent (records delivery, no email).
-  registerInvoiceMarkSentRoutes(app, { requireAuthentication, requireBillingAccess });
+  registerInvoiceMarkSentRoutes(app, { requireAuthentication, requireInvoiceSend, requireInvoiceWrite });
   // Task #1710 — Invoice Correction & Reissue (Guided Dispute Flow).
   // syncInvoiceToQb: inject the local closure so the qb-sync endpoint can
   // call updateQbInvoiceInPlace without duplicating QB plumbing here.
   registerInvoiceCorrectionRoutes(app, {
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     syncInvoiceToQb: createQuickBooksInvoiceForInvoice,
   });
   // Task #1811 — Invoice Editability & Walk-Back (metadata PATCH, return-to-draft,
   // membership edit, finalize, void & release).
   registerInvoiceEditabilityRoutes(app, {
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceRead,
+    requireInvoiceWrite,
     syncInvoiceToQb: createQuickBooksInvoiceForInvoice,
   });
   // Task #1831 — QBO Payment-Status Sync.
   // Reads Balance from QBO for active QBO-linked invoices; stamps payment_status / balance.
   registerQbPaymentSyncRoutes(app, {
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     makeRequest: makeQuickBooksRequest,
     apiBase:
       process.env.NODE_ENV === "production"
@@ -9134,13 +9132,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Returns { stale: boolean, count: number } — true when this company has a QB
   // integration row where company_id = realm_id (fingerprint of the
   // OAuth-state-lost mis-store). Read-only; safe to call on every page mount.
-  // Allowed: company_admin, billing_manager.
-  app.get("/api/quickbooks/connection/stale", requireAuthentication, async (req: any, res: Response) => {
-    const role = req.authenticatedUserRole;
-    if (!["company_admin", "billing_manager"].includes(role)) {
-      res.status(403).json({ message: "Not authorized" });
-      return;
-    }
+  // Allowed: CAN_MANAGE_QUICKBOOKS (Task #1886 — replaced an inline
+  // company_admin / billing_manager allowlist that refused the bookkeeper,
+  // even though the QuickBooks page she lands on queries this on mount).
+  app.get("/api/quickbooks/connection/stale", requireAuthentication, requireQuickBooksAccess, async (req: any, res: Response) => {
     try {
       const sessionCompanyId = String(req.authenticatedUserCompanyId ?? "");
       if (!sessionCompanyId) {
@@ -9159,7 +9154,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
 
-  app.get("/api/quickbooks/health", requireAuthentication, async (req, res) => {
+  // Task #1886 — this route had NO role gate: any authenticated user could
+  // read connection status and token expiry. Now on CAN_MANAGE_QUICKBOOKS,
+  // the same capability as the rest of the QuickBooks surface.
+  app.get("/api/quickbooks/health", requireAuthentication, requireQuickBooksAccess, async (req, res) => {
     try {
       const companyId = resolveCompanyId(req);
       if (!companyId) {
@@ -10107,7 +10105,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Invoice routes (placeholder endpoints)
-  app.get("/api/invoices", requireAuthentication, async (req, res) => {
+  // Task #1886 — this endpoint previously had NO role gate: any authenticated
+  // user could list every invoice in their company. It is now gated on
+  // CAN_READ_INVOICES (field_tech is refused; irrigation_manager keeps the
+  // access it had, now by declaration rather than by omission). The existing
+  // company scoping and the super_admin → null convention below are unchanged.
+  app.get("/api/invoices", requireAuthentication, requireInvoiceRead, async (req, res) => {
     try {
       const customerId = req.query.customerId ? parseInt(req.query.customerId as string) : undefined;
 
@@ -12029,7 +12032,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/invoices/:invoiceId/audit", requireAuthentication, requireBillingAccess, async (req, res) => {
+  app.get("/api/invoices/:invoiceId/audit", requireAuthentication, requireInvoiceRead, async (req, res) => {
     try {
       const invoiceId = parseInt(req.params.invoiceId);
       const callerCompanyId11065 = (req as any).authenticatedUserRole === 'super_admin' ? null : ((req as any).authenticatedUserCompanyId ?? null);
@@ -12215,7 +12218,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // ./invoice-sync-quickbooks-route.ts, wired up at the merge-route register
   // site below with createQuickBooksInvoiceForInvoice injected.
 
-  app.get("/api/invoices/:invoiceId/pdf", requireAuthentication, requireBillingAccess, async (req, res) => {
+  app.get("/api/invoices/:invoiceId/pdf", requireAuthentication, requireInvoiceRead, async (req, res) => {
     try {
       const invoiceId = parseInt(req.params.invoiceId);
       const callerCompanyId11217 = (req as any).authenticatedUserRole === 'super_admin' ? null : ((req as any).authenticatedUserCompanyId ?? null);
@@ -12268,7 +12271,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/invoices/:invoiceId/pdf/download", requireAuthentication, requireBillingAccess, async (req, res) => {
+  app.get("/api/invoices/:invoiceId/pdf/download", requireAuthentication, requireInvoiceRead, async (req, res) => {
     try {
       const invoiceId = parseInt(req.params.invoiceId);
 
@@ -12311,7 +12314,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/invoices/:invoiceId/pdf/send", requireAuthentication, requireBillingAccess, async (req, res) => {
+  app.post("/api/invoices/:invoiceId/pdf/send", requireAuthentication, requireInvoiceSend, async (req, res) => {
     try {
       const invoiceId = parseInt(req.params.invoiceId);
       const callerCompanyId11304 = (req as any).authenticatedUserRole === 'super_admin' ? null : ((req as any).authenticatedUserCompanyId ?? null);
@@ -12382,7 +12385,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/invoices/:invoiceId/pdf/regenerate", requireAuthentication, requireBillingAccess, async (req, res) => {
+  app.post("/api/invoices/:invoiceId/pdf/regenerate", requireAuthentication, requireInvoiceWrite, async (req, res) => {
     try {
       const invoiceId = parseInt(req.params.invoiceId);
       const callerCompanyId11380 = (req as any).authenticatedUserRole === 'super_admin' ? null : ((req as any).authenticatedUserCompanyId ?? null);

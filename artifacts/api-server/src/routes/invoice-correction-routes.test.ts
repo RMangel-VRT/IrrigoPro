@@ -34,6 +34,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { registerInvoiceCorrectionRoutes, deriveRevisionNumber } from "./invoice-correction-routes";
+import { hasCapability, CAN_EDIT_INVOICES } from "@workspace/shared";
 import {
   invoiceCorrections,
   invoiceCorrectionLines,
@@ -202,9 +203,9 @@ function buildApp(
   });
   registerInvoiceCorrectionRoutes(app, {
     requireAuthentication: (_req, _res, next) => next(),
-    requireBillingAccess: (req: any, res, next) => {
-      const allowed = ["company_admin", "billing_manager", "super_admin"];
-      if (!allowed.includes(req.authenticatedUserRole)) {
+    // Task #1886 — backed by the real CAN_EDIT_INVOICES set.
+    requireInvoiceWrite: (req: any, res: any, next: any) => {
+      if (!hasCapability(req.authenticatedUserRole, CAN_EDIT_INVOICES)) {
         res.status(403).json({ message: "Forbidden" });
         return;
       }

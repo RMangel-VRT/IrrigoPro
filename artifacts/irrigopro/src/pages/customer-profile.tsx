@@ -15,7 +15,14 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Customer, Estimate, WorkOrder, BillingSheetWithItems, SiteMap } from "@workspace/db/schema";
-import { lifecycleOf, formatEstimateNumber } from "@workspace/shared";
+import {
+  lifecycleOf,
+  formatEstimateNumber,
+  hasCapability,
+  CAN_READ_INVOICES,
+  CAN_VIEW_COSTS,
+} from "@workspace/shared";
+import { useAuth } from "@/lib/auth-context";
 import { InvoiceList } from "@/components/billing/invoice-list";
 import { InvoicePdfPreviewModal } from "@/components/billing/invoice-pdf-preview-modal";
 import { IrrigationSystemCard } from "@/components/customers/irrigation-system-card";
@@ -71,7 +78,12 @@ export default function CustomerProfile() {
     setLocation(`/customers/${id}/profile?${params.toString()}`);
   }
 
-  const [userRole, setUserRole] = useState<string>("");
+  // Task #1886 — role comes from the auth context, which is the single
+  // source of truth for the signed-in user (it owns the localStorage read
+  // and the BFCache re-read). The bespoke useState + useEffect copy this
+  // replaced went stale on any auth change that did not remount the page.
+  const { user: authUser } = useAuth();
+  const userRole = authUser?.role ?? "";
 
   // Invoice PDF modal
   const [showPdfModal, setShowPdfModal] = useState(false);
@@ -89,16 +101,6 @@ export default function CustomerProfile() {
   const [selectedBillingSheet, setSelectedBillingSheet] = useState<BillingSheetWithItems | null>(null);
   const [billedWOExpanded, setBilledWOExpanded] = useState(false);
   const [billedBSExpanded, setBilledBSExpanded] = useState(false);
-
-  useEffect(() => {
-    const savedUser = safeGet("user");
-    if (savedUser) {
-      try {
-        const userData = JSON.parse(savedUser);
-        setUserRole(userData.role || "");
-      } catch {}
-    }
-  }, []);
 
   const { data: customer, isLoading } = useQuery<Customer>({
     queryKey: [`/api/customers/${id}`],
@@ -119,10 +121,14 @@ export default function CustomerProfile() {
     enabled: !!id,
   });
 
-  // Financial summary for Overview compact snapshot — same endpoint as FinancialPulseWidget
+  // Financial summary for Overview compact snapshot — same endpoint as FinancialPulseWidget.
+  // Task #1886 — gated on CAN_VIEW_COSTS, which mirrors the financial-pulse
+  // allowlist. Firing this for every signed-in role produced a background 403
+  // for anyone outside it (bookkeeper, irrigation manager, field tech); the
+  // snapshot falls back to its billing-sheet totals branch when absent.
   const { data: financialSummary } = useQuery<CustomerFinancialSummary>({
     queryKey: [`/api/financial-pulse/customer/${id}/summary`],
-    enabled: !!id && !!userRole,
+    enabled: !!id && hasCapability(userRole, CAN_VIEW_COSTS),
   });
 
   const isAdmin = userRole === "company_admin" || userRole === "super_admin";
@@ -134,6 +140,12 @@ export default function CustomerProfile() {
     userRole === "company_admin" ||
     userRole === "super_admin" ||
     userRole === "billing_manager";
+  // Task #1886 — the Invoices section and, with it, the Billing Details tab
+  // now track this capability. A field tech has neither, so the tab
+  // disappears for them entirely instead of rendering empty. An irrigation
+  // manager has CAN_READ_INVOICES but not isBillingRole, so they keep the tab
+  // with only the Invoices section in it, exactly as before.
+  const canReadInvoices = hasCapability(userRole, CAN_READ_INVOICES);
 
   const isWOBilled = (wo: WorkOrder) => wo.status === "billed" || !!wo.invoiceId;
   const isBSBilled = (bs: BillingSheetWithItems) => bs.status === "billed" || !!bs.invoiceId;
@@ -214,11 +226,10 @@ export default function CustomerProfile() {
     // Jobs: Estimates, Work Orders, Billing Sheets — all three lists are ungated
     jobs: true,
 
-    // Billing Details: contains two categories of sections:
-    //   1. Billing-specific (Rates, Notes, FinancialPulse, Budget, Alerts) — isBillingRole
-    //   2. InvoiceList — ungated (visible to all roles, same as original long-scroll page)
-    // Tab has content for ANY role because InvoiceList is always present.
-    billing: isBillingRole || true, // always true; derived for auditability
+    // Billing Details: visible when at least one of its sections is. The
+    // billing-specific sections (Rates, Notes, FinancialPulse, Budget, Alerts)
+    // need isBillingRole; the Invoices section needs CAN_READ_INVOICES.
+    billing: isBillingRole || canReadInvoices,
 
     // Property: PropertyNotes + PropertyBoundarySection + Site Maps — all ungated
     property: true,
@@ -449,13 +460,18 @@ export default function CustomerProfile() {
                             </p>
                           </div>
                         </div>
-                        <Button
-                          variant="outline" size="sm"
-                          className="w-full text-emerald-700 border-emerald-200 hover:bg-emerald-50"
-                          onClick={() => setTab("billing")}
-                        >
-                          <Receipt className="w-4 h-4 mr-1.5" />View Billing Details
-                        </Button>
+                        {/* Task #1886 — keyed on the same predicate as the tab
+                            itself, so a role without the Billing Details tab is
+                            not offered a control that navigates nowhere. */}
+                        {tabVisibility.billing && (
+                          <Button
+                            variant="outline" size="sm"
+                            className="w-full text-emerald-700 border-emerald-200 hover:bg-emerald-50"
+                            onClick={() => setTab("billing")}
+                          >
+                            <Receipt className="w-4 h-4 mr-1.5" />View Billing Details
+                          </Button>
+                        )}
                       </>
                     ) : (
                       <div className="space-y-3">
@@ -464,13 +480,18 @@ export default function CustomerProfile() {
                           <p className="text-xl font-bold text-emerald-800">{formatCurrency(totalBillingValue)}</p>
                           <p className="text-xs text-emerald-600 mt-0.5">{billingSheets.length} billing sheets</p>
                         </div>
-                        <Button
-                          variant="outline" size="sm"
-                          className="w-full text-emerald-700 border-emerald-200 hover:bg-emerald-50"
-                          onClick={() => setTab("billing")}
-                        >
-                          <Receipt className="w-4 h-4 mr-1.5" />View Billing Details
-                        </Button>
+                        {/* Task #1886 — keyed on the same predicate as the tab
+                            itself, so a role without the Billing Details tab is
+                            not offered a control that navigates nowhere. */}
+                        {tabVisibility.billing && (
+                          <Button
+                            variant="outline" size="sm"
+                            className="w-full text-emerald-700 border-emerald-200 hover:bg-emerald-50"
+                            onClick={() => setTab("billing")}
+                          >
+                            <Receipt className="w-4 h-4 mr-1.5" />View Billing Details
+                          </Button>
+                        )}
                       </div>
                     )}
                   </CardContent>
@@ -733,17 +754,18 @@ export default function CustomerProfile() {
                 </div>
               </>
             )}
-            {/* InvoiceList — visible to all roles (same as original long-scroll page) */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Receipt className="w-5 h-5" />Invoices
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <InvoiceList customerId={parseInt(id!)} limit={10} onOpenPdf={handleOpenPdf} />
-              </CardContent>
-            </Card>
+            {canReadInvoices && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Receipt className="w-5 h-5" />Invoices
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <InvoiceList customerId={parseInt(id!)} limit={10} onOpenPdf={handleOpenPdf} />
+                </CardContent>
+              </Card>
+            )}
           </TabsContent>
 
           {/* ── Property Tab ────────────────────────────────────────────── */}

@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/lib/auth-context";
+import { hasCapability, CAN_EDIT_INVOICES } from "@workspace/shared";
 import { Badge } from "@/components/ui/badge";
 import { FileText, Loader2, AlertCircle, Calendar, CheckCircle2, RefreshCw, ClipboardList, CreditCard, AlertTriangle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
@@ -81,6 +83,12 @@ function getPaymentStatusBadge(invoice: Invoice) {
 
 export function InvoiceList({ customerId, limit = 20, onOpenPdf }: InvoiceListProps) {
   const { toast } = useToast();
+  // Task #1886 — this list is now reachable by read-only roles
+  // (irrigation_manager, bookkeeper), so the two controls that WRITE must be
+  // gated. Previously they rendered for anyone who could see the list and
+  // 403'd silently on click.
+  const { user } = useAuth();
+  const canWriteInvoices = hasCapability(user?.role, CAN_EDIT_INVOICES);
   const [auditInvoice, setAuditInvoice] = useState<{ id: number; label: string; total: string } | null>(null);
 
   const syncMutation = useMutation({
@@ -124,10 +132,13 @@ export function InvoiceList({ customerId, limit = 20, onOpenPdf }: InvoiceListPr
 
   // Task #1831 — Auto-trigger payment sync on mount. Server-side throttle
   // (5 min/company) prevents hammering QBO on every render.
+  // Task #1886 — only for roles that may write; otherwise this fires a
+  // guaranteed 403 on every mount for read-only roles.
   useEffect(() => {
+    if (!canWriteInvoices) return;
     paymentSyncMutation.mutate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [canWriteInvoices]);
 
   const { data: invoices = [], isLoading, error } = useArrayQuery<Invoice>({
     queryKey: ["/api/invoices", { customerId, limit }],
@@ -229,7 +240,7 @@ export function InvoiceList({ customerId, limit = 20, onOpenPdf }: InvoiceListPr
 
   return (
     <div className="space-y-4">
-      {hasQbLinked && (
+      {hasQbLinked && canWriteInvoices && (
         <div className="flex justify-end">
           <Button
             variant="outline"
@@ -325,7 +336,7 @@ export function InvoiceList({ customerId, limit = 20, onOpenPdf }: InvoiceListPr
                       <CheckCircle2 className="w-3.5 h-3.5" />
                       Synced
                     </span>
-                  ) : (
+                  ) : canWriteInvoices ? (
                     <Button
                       variant="ghost"
                       size="sm"
@@ -349,7 +360,7 @@ export function InvoiceList({ customerId, limit = 20, onOpenPdf }: InvoiceListPr
                         </>
                       )}
                     </Button>
-                  )}
+                  ) : null}
                 </div>
                 {invoice.paymentSyncedAt && (
                   <div className="flex justify-between items-center text-xs text-gray-400">

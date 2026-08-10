@@ -32,6 +32,7 @@ interface PropertyBoundarySectionProps {
 
 // Mirror of `requireCustomerEditAccess` on the server. Keep these in sync —
 // otherwise the UI shows edit affordances for roles that get 403 on save.
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const EDIT_ROLES = new Set([
   "company_admin",
   "super_admin",

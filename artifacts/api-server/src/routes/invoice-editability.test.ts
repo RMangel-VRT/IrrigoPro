@@ -152,8 +152,10 @@ const requireAuthentication: RequestHandler = (req: any, res, next) => {
   next();
 };
 
-// Billing access guard stub: always passes (we're testing at the route level).
-const requireBillingAccess: RequestHandler = (_req, _res, next) => next();
+// Invoice access guard stubs: always pass (we're testing at the route level;
+// the role matrix itself is covered by bookkeeper-role-matrix.test.ts).
+const requireInvoiceRead: RequestHandler = (_req, _res, next) => next();
+const requireInvoiceWrite: RequestHandler = (_req, _res, next) => next();
 
 // ── Minimal db mock ─────────────────────────────────────────────────────────
 //
@@ -276,7 +278,8 @@ async function startHarness(
 
   registerInvoiceEditabilityRoutes(app, {
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceRead,
+    requireInvoiceWrite,
     syncInvoiceToQb,
     _db: makeMockDb(dbOpts),
     _storageApi: makeMockStorage({ invoices }),

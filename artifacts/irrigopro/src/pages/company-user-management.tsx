@@ -11,7 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Plus, User, Edit, UserX, Mail, Shield, Wrench, Crown, Trash2, AlertTriangle, Archive, Database, Key, MailCheck, CheckCircle, MoreVertical } from "lucide-react";
+import { Plus, User, Edit, UserX, Mail, Shield, Wrench, Crown, Trash2, AlertTriangle, Archive, Database, Key, MailCheck, CheckCircle, MoreVertical, Calculator } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useForm } from "react-hook-form";
@@ -25,14 +25,14 @@ const userFormSchema = z.object({
   password: z.string().min(6, "Password must be at least 6 characters"),
   name: z.string().min(1, "Name is required"),
   email: z.string().email("Must be a valid email").optional().or(z.literal("")),
-  role: z.enum(["irrigation_manager", "field_tech", "billing_manager"]),
+  role: z.enum(["irrigation_manager", "field_tech", "billing_manager", "bookkeeper"]),
 });
 
 const editUserFormSchema = z.object({
   phone: z.string().optional().or(z.literal("")),
   name: z.string().min(1, "Name is required"),
   email: z.string().email("Must be a valid email").optional().or(z.literal("")),
-  role: z.enum(["irrigation_manager", "field_tech", "billing_manager"]),
+  role: z.enum(["irrigation_manager", "field_tech", "billing_manager", "bookkeeper"]),
 });
 
 const changePasswordSchema = z.object({
@@ -332,7 +332,7 @@ export default function CompanyUserManagement() {
     editForm.setValue("phone", user.phone || "");
     editForm.setValue("name", user.name);
     editForm.setValue("email", user.email || "");
-    editForm.setValue("role", user.role as "irrigation_manager" | "field_tech" | "billing_manager");
+    editForm.setValue("role", user.role as EditUserFormData["role"]);
   };
 
   const handleResendVerification = async (user: User) => {
@@ -371,6 +371,8 @@ export default function CompanyUserManagement() {
         return "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200";
       case "billing_manager":
         return "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200";
+      case "bookkeeper":
+        return "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200";
       default:
         return "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200";
     }
@@ -386,6 +388,8 @@ export default function CompanyUserManagement() {
         return <Wrench className="w-4 h-4" />;
       case "billing_manager":
         return <Mail className="w-4 h-4" />;
+      case "bookkeeper":
+        return <Calculator className="w-4 h-4" />;
       default:
         return <User className="w-4 h-4" />;
     }
@@ -401,6 +405,8 @@ export default function CompanyUserManagement() {
         return "Field Tech";
       case "billing_manager":
         return "Billing Manager";
+      case "bookkeeper":
+        return "Bookkeeper";
       default:
         return role;
     }
@@ -515,6 +521,7 @@ export default function CompanyUserManagement() {
                           <SelectItem value="irrigation_manager">Manager</SelectItem>
                           <SelectItem value="field_tech">Field Tech</SelectItem>
                           <SelectItem value="billing_manager">Billing Manager</SelectItem>
+                          <SelectItem value="bookkeeper">Bookkeeper</SelectItem>
                         </SelectContent>
                       </Select>
                       <FormMessage />
@@ -932,6 +939,7 @@ export default function CompanyUserManagement() {
                         <SelectItem value="irrigation_manager">Manager</SelectItem>
                         <SelectItem value="field_tech">Field Tech</SelectItem>
                         <SelectItem value="billing_manager">Billing Manager</SelectItem>
+                        <SelectItem value="bookkeeper">Bookkeeper</SelectItem>
                       </SelectContent>
                     </Select>
                     <FormMessage />

@@ -23,7 +23,8 @@ import {
 
 export interface RegisterInvoiceMergeRoutesDeps {
   requireAuthentication: RequestHandler;
-  requireBillingAccess: RequestHandler;
+  /** Task #1886: merging invoices is an invoice mutation → CAN_EDIT_INVOICES. */
+  requireInvoiceWrite: RequestHandler;
 }
 
 export const mergeInvoicesSchema = z
@@ -35,12 +36,12 @@ export const mergeInvoicesSchema = z
 
 export function registerInvoiceMergeRoutes(
   app: Express,
-  { requireAuthentication, requireBillingAccess }: RegisterInvoiceMergeRoutesDeps,
+  { requireAuthentication, requireInvoiceWrite }: RegisterInvoiceMergeRoutesDeps,
 ): void {
   app.post(
     "/api/invoices/merge",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       const parsed = mergeInvoicesSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -53,7 +54,7 @@ export function registerInvoiceMergeRoutes(
 
       const { survivingInvoiceId, mergedInvoiceIds } = parsed.data;
 
-      // requireBillingAccess only admits company_admin / billing_manager,
+      // requireInvoiceWrite only admits company_admin / billing_manager,
       // so the caller is always company-bound here.
       const callerCompanyId: number | null =
         req.authenticatedUserRole === "super_admin"

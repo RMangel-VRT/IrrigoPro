@@ -257,7 +257,9 @@ export interface RegisterWetCheckReconciliationRoutesDeps {
   queries?: WcReconciliationQueries; // defaults to productionDb-backed impl
 }
 
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const RECONCILE_ROLES = new Set(["company_admin", "super_admin"]);
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const REASSIGN_ROLES = new Set(["company_admin", "billing_manager", "super_admin"]);
 
 function isAllowed(req: any, roles: Set<string>): boolean {

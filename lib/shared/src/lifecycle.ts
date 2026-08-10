@@ -227,6 +227,7 @@ export const isAwaitingCustomerReply = (
 //                       refused server-side.
 //   - sent / approved /
 //     rejected / expired → nobody (still preserved for audit).
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const DELETE_ROLES_ANY = new Set<string>([
   "super_admin",
   "company_admin",
@@ -234,6 +235,7 @@ const DELETE_ROLES_ANY = new Set<string>([
   "billing_manager",
   "field_tech",
 ]);
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const DELETE_ROLES_PENDING = new Set<string>([
   "super_admin",
   "company_admin",

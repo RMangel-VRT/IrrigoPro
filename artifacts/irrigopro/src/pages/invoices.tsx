@@ -1,6 +1,12 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useSearch } from "wouter";
+import {
+  hasCapability,
+  CAN_EDIT_INVOICES,
+  CAN_SEND_INVOICE_EMAIL,
+  CAN_VIEW_COSTS,
+} from "@workspace/shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -84,14 +90,8 @@ function parseApiErrorCode(err: Error): string | null {
   }
 }
 
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const CSV_EXPORT_ROLES = new Set([
-  "company_admin",
-  "billing_manager",
-]);
-
-// Task #1425 — merging duplicate monthly invoices is restricted to the same
-// billing-capable roles as monthly invoice creation (requireBillingAccess).
-const MERGE_ROLES = new Set([
   "company_admin",
   "billing_manager",
 ]);
@@ -460,11 +460,17 @@ export default function InvoicesPage() {
   const [exportingInvoiceId, setExportingInvoiceId] = useState<number | null>(null);
   const userRole = getCurrentUserRole();
   const canExportSingleCsv = !!userRole && CSV_EXPORT_ROLES.has(userRole);
-  const canMerge = !!userRole && MERGE_ROLES.has(userRole);
-  // Task #1438 — same billing-capable role set as merge/export.
-  const canMarkSent = !!userRole && MERGE_ROLES.has(userRole);
-  // Task #1811 — invoice editability (same role set as billing).
-  const canBillingEdit = !!userRole && MERGE_ROLES.has(userRole);
+  // Task #1886 — these were one shared MERGE_ROLES set; they are now two
+  // distinct capabilities, because the bookkeeper may send an invoice but may
+  // not change one. Mirrors requireInvoiceSend / requireInvoiceWrite server-side.
+  const canMerge = hasCapability(userRole, CAN_EDIT_INVOICES);
+  const canMarkSent = hasCapability(userRole, CAN_SEND_INVOICE_EMAIL);
+  const canBillingEdit = hasCapability(userRole, CAN_EDIT_INVOICES);
+  // Task #1886 — Financial Pulse is denied to the bookkeeper by scope, and its
+  // routes enforce that. Rendering the widget anyway would fire a background
+  // 403 on her landing page, so it is gated on the same capability the server
+  // checks. CAN_VIEW_COSTS mirrors the financial-pulse allowlist exactly.
+  const canViewCosts = hasCapability(userRole, CAN_VIEW_COSTS);
 
   // Task #1425 — invoice merge selection. `selectedIds` holds the invoices
   // ticked for merging; `survivingId` is the chosen survivor in the confirm
@@ -480,7 +486,7 @@ export default function InvoicesPage() {
   const [resyncQbAuthError, setResyncQbAuthError] = useState(false);
   // Task #1710 — Invoice Correction & Reissue.
   const [correctionInvoice, setCorrectionInvoice] = useState<Invoice | null>(null);
-  const canCorrect = !!userRole && MERGE_ROLES.has(userRole);
+  const canCorrect = hasCapability(userRole, CAN_EDIT_INVOICES);
   // Task #1811 — Invoice editability state.
   const [editMetadataInvoice, setEditMetadataInvoice] = useState<Invoice | null>(null);
   const [editNotes, setEditNotes] = useState("");
@@ -694,11 +700,17 @@ export default function InvoicesPage() {
   // throttled server-side (5 min per company), so calling it on every mount
   // is safe — it returns immediately with {throttled:true} when recently run.
   // Silent when throttled or when nothing changed; toast only on actual updates.
+  //
+  // Task #1886 — gated on CAN_EDIT_INVOICES. The endpoint stamps
+  // paymentStatus/balance/paidAt, so it is write-classified; firing it on mount
+  // for a read-only role (bookkeeper) produced a silent background 403 on the
+  // role's own landing page.
   useEffect(() => {
+    if (!canBillingEdit) return;
     isAutoSyncRef.current = true;
     paymentSyncMutation.mutate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [canBillingEdit]);
 
   // Task #1438 — record/undo manual delivery of an invoice. mark-sent flips
   // a draft → sent (stamping sentAt); mark-unsent reverts a sent → draft.
@@ -1097,7 +1109,11 @@ export default function InvoicesPage() {
             Mark sent
           </DropdownMenuItem>
         )}
-        {canMarkSent && invoice.sentAt != null && (
+        {/* Task #1886 — mark-unsent is WRITE-classified on the server
+            (requireInvoiceWrite), so it is gated on CAN_EDIT_INVOICES, not on
+            the send capability. A bookkeeper may mark an invoice sent but not
+            reverse it; showing this to her would render a control that 403s. */}
+        {canBillingEdit && invoice.sentAt != null && (
           <DropdownMenuItem
             disabled={markUnsentMutation.isPending && markUnsentMutation.variables === invoice.id}
             onSelect={(e) => {
@@ -1131,37 +1147,44 @@ export default function InvoicesPage() {
             Export CSV
           </DropdownMenuItem>
         )}
-        {!invoice.quickbooksInvoiceId ? (
-          <DropdownMenuItem
-            disabled={syncMutation.isPending}
-            onSelect={(e) => {
-              e.preventDefault();
-              syncMutation.mutate({ id: invoice.id });
-            }}
-          >
-            {syncMutation.isPending && syncMutation.variables?.id === invoice.id ? (
-              <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />
-            ) : (
-              <RefreshCw className="w-3.5 h-3.5 mr-2" />
-            )}
-            Sync to QuickBooks
-          </DropdownMenuItem>
-        ) : (
-          <DropdownMenuItem
-            disabled={syncMutation.isPending}
-            onSelect={(e) => {
-              e.preventDefault();
-              setResyncInvoice(invoice);
-            }}
-          >
-            {syncMutation.isPending && syncMutation.variables?.id === invoice.id ? (
-              <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />
-            ) : (
-              <RefreshCw className="w-3.5 h-3.5 mr-2" />
-            )}
-            Re-sync to QuickBooks
-          </DropdownMenuItem>
-        )}
+        {/* Task #1886 — /api/invoices/:id/sync-quickbooks is WRITE-guarded
+            (requireInvoiceWrite), so both branches are gated on
+            CAN_EDIT_INVOICES. Managing the QuickBooks *integration* is a
+            bookkeeper capability; pushing invoice content into it is not. */}
+        {canBillingEdit &&
+          (!invoice.quickbooksInvoiceId ? (
+            <DropdownMenuItem
+              disabled={syncMutation.isPending}
+              onSelect={(e) => {
+                e.preventDefault();
+                syncMutation.mutate({ id: invoice.id });
+              }}
+              data-testid={`button-sync-quickbooks-invoice-${invoice.id}`}
+            >
+              {syncMutation.isPending && syncMutation.variables?.id === invoice.id ? (
+                <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />
+              ) : (
+                <RefreshCw className="w-3.5 h-3.5 mr-2" />
+              )}
+              Sync to QuickBooks
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem
+              disabled={syncMutation.isPending}
+              onSelect={(e) => {
+                e.preventDefault();
+                setResyncInvoice(invoice);
+              }}
+              data-testid={`button-resync-quickbooks-invoice-${invoice.id}`}
+            >
+              {syncMutation.isPending && syncMutation.variables?.id === invoice.id ? (
+                <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />
+              ) : (
+                <RefreshCw className="w-3.5 h-3.5 mr-2" />
+              )}
+              Re-sync to QuickBooks
+            </DropdownMenuItem>
+          ))}
         {/* Task #1710 — Correct / Reissue. Available on generated invoices. */}
         {canCorrect && invoice.status === "generated" && (
           <DropdownMenuItem
@@ -1300,21 +1323,24 @@ export default function InvoicesPage() {
               <p className="text-sm text-gray-500 mt-0.5">All invoices sent across all customers</p>
             </div>
             <div className="flex items-center gap-3">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => paymentSyncMutation.mutate()}
-                disabled={paymentSyncMutation.isPending}
-                data-testid="button-refresh-payment-status"
-                title="Refresh payment status from QuickBooks"
-              >
-                {paymentSyncMutation.isPending ? (
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                ) : (
-                  <RefreshCw className="w-4 h-4 mr-2" />
-                )}
-                Refresh QB Payments
-              </Button>
+              {/* Task #1886 — write-classified: this stamps payment state. */}
+              {canBillingEdit && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => paymentSyncMutation.mutate()}
+                  disabled={paymentSyncMutation.isPending}
+                  data-testid="button-refresh-payment-status"
+                  title="Refresh payment status from QuickBooks"
+                >
+                  {paymentSyncMutation.isPending ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-4 h-4 mr-2" />
+                  )}
+                  Refresh QB Payments
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
@@ -1339,9 +1365,11 @@ export default function InvoicesPage() {
         {/* Task #708 — A/R Aging widget. Bucket clicks deep-link
             back to this page with `?aging=<key>`, which hydrates the
             aging filter below. */}
-        <div className="mb-6">
-          <FinancialPulseWidget variant="ar-aging" />
-        </div>
+        {canViewCosts && (
+          <div className="mb-6">
+            <FinancialPulseWidget variant="ar-aging" />
+          </div>
+        )}
 
         {/* Filters */}
         <div className="flex flex-col sm:flex-row gap-3 mb-6">
@@ -1852,7 +1880,7 @@ export default function InvoicesPage() {
       )}
 
       {/* Task #1425 — merge confirmation dialog */}
-      <Dialog open={mergeConfirmOpen} onOpenChange={(open) => { if (!open) setMergeConfirmOpen(false); }}>
+      <Dialog open={canMerge && mergeConfirmOpen} onOpenChange={(open) => { if (!open) setMergeConfirmOpen(false); }}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Merge invoices</DialogTitle>
@@ -1937,7 +1965,7 @@ export default function InvoicesPage() {
           in-place (DocNumber-first lookup → sparse update). No duplicate is
           created; the old QB invoice is NOT deleted or voided. */}
       <Dialog
-        open={resyncInvoice != null}
+        open={canBillingEdit && resyncInvoice != null}
         onOpenChange={(open) => {
           if (!open) {
             setResyncInvoice(null);
@@ -2007,14 +2035,14 @@ export default function InvoicesPage() {
       {correctionInvoice && (
         <InvoiceCorrectionFlow
           invoice={correctionInvoice}
-          open={correctionInvoice != null}
+          open={canCorrect && correctionInvoice != null}
           onClose={() => setCorrectionInvoice(null)}
         />
       )}
 
       {/* Task #1811 — Draft ticket editor sheet */}
       <Sheet
-        open={draftEditorInvoice != null}
+        open={canBillingEdit && draftEditorInvoice != null}
         onOpenChange={(open) => { if (!open) setDraftEditorInvoice(null); }}
       >
         <SheetContent className="sm:max-w-xl w-full overflow-y-auto">
@@ -2257,7 +2285,7 @@ export default function InvoicesPage() {
 
       {/* Task #1811 — Edit invoice metadata dialog */}
       <Dialog
-        open={editMetadataInvoice != null}
+        open={canBillingEdit && editMetadataInvoice != null}
         onOpenChange={(open) => { if (!open) setEditMetadataInvoice(null); }}
       >
         <DialogContent className="sm:max-w-lg">
@@ -2345,7 +2373,7 @@ export default function InvoicesPage() {
 
       {/* Task #1811 — Void & Release confirmation dialog */}
       <Dialog
-        open={voidConfirmInvoice != null}
+        open={canBillingEdit && voidConfirmInvoice != null}
         onOpenChange={(open) => {
           if (!open) {
             setVoidConfirmInvoice(null);

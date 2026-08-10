@@ -25,6 +25,7 @@ export interface RegisterBillingWorkspaceRoutesDeps {
   requireAuthentication: RequestHandler;
 }
 
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const BW_ROLES = new Set([
   "billing_manager",
   "company_admin",

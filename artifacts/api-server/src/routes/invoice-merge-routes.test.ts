@@ -13,6 +13,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { registerInvoiceMergeRoutes } from "./invoice-merge-routes";
+import { hasCapability, CAN_EDIT_INVOICES } from "@workspace/shared";
 import { storage } from "../storage";
 
 const ORIG: Record<string, any> = {};
@@ -34,10 +35,11 @@ function makeAuth(role: string, companyId: number | null = 1): RequestHandler {
   };
 }
 
-// Mirror of routes.ts requireBillingAccess.
-const requireBillingAccess: RequestHandler = (req: any, res, next) => {
-  const role = req.authenticatedUserRole;
-  if (role !== "company_admin" && role !== "billing_manager") {
+// Task #1886 — guards are backed by the real capability sets from the role
+// registry rather than a hand-copied mirror of the middleware, so a change to
+// membership shows up here instead of silently drifting.
+const requireInvoiceWrite: RequestHandler = (req: any, res, next) => {
+  if (!hasCapability(req.authenticatedUserRole, CAN_EDIT_INVOICES)) {
     res.status(403).json({ message: "Access denied." });
     return;
   }
@@ -49,7 +51,7 @@ function buildApp(role: string, companyId: number | null = 1): Express {
   app.use(express.json());
   registerInvoiceMergeRoutes(app, {
     requireAuthentication: makeAuth(role, companyId),
-    requireBillingAccess,
+    requireInvoiceWrite,
   });
   return app;
 }

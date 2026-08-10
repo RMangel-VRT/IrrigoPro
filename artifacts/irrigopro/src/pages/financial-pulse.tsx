@@ -289,6 +289,7 @@ function formatRelative(iso: string | null): string {
   return `${Math.round(diff / 3_600_000)}h ago`;
 }
 
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const ALLOWED_ROLES = new Set([
   "super_admin",
   "company_admin",

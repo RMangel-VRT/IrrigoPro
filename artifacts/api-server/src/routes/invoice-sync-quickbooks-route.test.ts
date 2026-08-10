@@ -15,6 +15,7 @@ import express, { type Express, type RequestHandler } from "express";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
+import { hasCapability, CAN_EDIT_INVOICES } from "@workspace/shared";
 import {
   registerInvoiceSyncQuickbooksRoutes,
   InvoiceSyncError,
@@ -40,10 +41,11 @@ function makeAuth(role: string, companyId: number | null = 1): RequestHandler {
   };
 }
 
-const requireBillingAccess: RequestHandler = (req: any, res, next) => {
-  const role = req.authenticatedUserRole;
-  const allowed = ["company_admin", "billing_manager", "super_admin"];
-  if (!allowed.includes(role)) {
+// Task #1886 — guards are backed by the real capability sets from the role
+// registry rather than a hand-copied mirror of the middleware, so a change to
+// membership shows up here instead of silently drifting.
+const requireInvoiceWrite: RequestHandler = (req: any, res, next) => {
+  if (!hasCapability(req.authenticatedUserRole, CAN_EDIT_INVOICES)) {
     res.status(403).json({ message: "Access denied." });
     return;
   }
@@ -59,7 +61,7 @@ function buildApp(
   app.use(express.json());
   registerInvoiceSyncQuickbooksRoutes(app, {
     requireAuthentication: makeAuth(role, companyId),
-    requireBillingAccess,
+    requireInvoiceWrite,
     createQuickBooksInvoice,
   });
   return app;

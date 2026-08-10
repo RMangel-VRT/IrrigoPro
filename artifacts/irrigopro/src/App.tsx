@@ -84,7 +84,7 @@ import { NotificationPermissionBanner } from "@/components/notifications/notific
 import CompanyAdminApp from "@/components/company-admin-app";
 import PoweredByFooter from "@/components/layout/powered-by-footer";
 import { DesktopShell } from "@/components/layout/desktop-shell";
-import { billingManagerNav, managerNav, superAdminNav } from "@/components/layout/nav-config";
+import { billingManagerNav, bookkeeperNav, managerNav, superAdminNav } from "@/components/layout/nav-config";
 import { ServiceWorkerRegistration, ServiceWorkerUpdatePrompt } from "@/components/offline/service-worker-update-prompt";
 import { ConflictToastBridge } from "@/components/offline/conflict-toast-bridge";
 import { SessionExpiredBanner } from "@/components/auth/session-expired-banner";
@@ -338,6 +338,39 @@ function Router() {
                   <Route path="/wet-checks/:id/summary" component={WetCheckInspectionSummaryPage} />
                   <Route path="/wet-checks/:id" component={WetChecksRoutingPage} />
                   <Route path="/switch-user" component={SwitchUser} />
+                  <Route path="/user-profile" component={UserProfile} />
+                  <Route path="/license-agreement" component={LicenseAgreement} />
+                  <Route path="/privacy-policy" component={PrivacyPolicy} />
+                  <Route path="/login" component={Login} />
+                  <Route component={NotFound} />
+                </Switch>
+              </Suspense>
+            </div>
+          </DesktopShell>
+          <Toaster />
+        </QueryClientProvider>
+      </TooltipProvider>
+    );
+  }
+
+  // Task #1886 — Bookkeeper: invoice visibility and QuickBooks custody, nothing
+  // else. Shares the DesktopShell component with the billing manager but gets
+  // its own nav config and its own (much shorter) route list — no Financial
+  // Pulse, Manager Workspace, Billing Sheets, Wet Checks, Work Orders, or
+  // Estimates Pending Approval. Landing route is the invoice list.
+  if (user.role === "bookkeeper") {
+    return (
+      <TooltipProvider>
+        <QueryClientProvider client={queryClient}>
+          <DesktopShell navConfig={bookkeeperNav}>
+            <div className="px-4">
+              <Suspense fallback={<RouteSuspenseFallback />}>
+                <Switch>
+                  <Route path="/" component={InvoicesPage} />
+                  <Route path="/invoices" component={InvoicesPage} />
+                  <Route path="/customers" component={Customers} />
+                  <Route path="/customers/:id/profile" component={CustomerProfile} />
+                  <Route path="/quickbooks" component={QuickBooksPage} />
                   <Route path="/user-profile" component={UserProfile} />
                   <Route path="/license-agreement" component={LicenseAgreement} />
                   <Route path="/privacy-policy" component={PrivacyPolicy} />

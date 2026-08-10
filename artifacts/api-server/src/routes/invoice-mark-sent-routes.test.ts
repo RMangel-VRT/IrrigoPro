@@ -17,6 +17,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { registerInvoiceMarkSentRoutes } from "./invoice-mark-sent-routes";
+import { hasCapability, CAN_EDIT_INVOICES, CAN_SEND_INVOICE_EMAIL, type Capability } from "@workspace/shared";
 import { storage } from "../storage";
 
 const ORIG: Record<string, any> = {};
@@ -38,22 +39,28 @@ function makeAuth(role: string, companyId: number | null = 1): RequestHandler {
   };
 }
 
-// Mirror of routes.ts requireBillingAccess.
-const requireBillingAccess: RequestHandler = (req: any, res, next) => {
-  const role = req.authenticatedUserRole;
-  if (role !== "company_admin" && role !== "billing_manager") {
-    res.status(403).json({ message: "Access denied." });
-    return;
-  }
-  next();
-};
+// Task #1886 — guards are backed by the real capability sets from the role
+// registry rather than a hand-copied mirror of the middleware, so a change to
+// membership shows up here instead of silently drifting.
+function capabilityGuard(capability: Capability): RequestHandler {
+  return (req: any, res, next) => {
+    if (!hasCapability(req.authenticatedUserRole, capability)) {
+      res.status(403).json({ message: "Access denied." });
+      return;
+    }
+    next();
+  };
+}
+const requireInvoiceSend = capabilityGuard(CAN_SEND_INVOICE_EMAIL);
+const requireInvoiceWrite = capabilityGuard(CAN_EDIT_INVOICES);
 
 function buildApp(role: string, companyId: number | null = 1): Express {
   const app = express();
   app.use(express.json());
   registerInvoiceMarkSentRoutes(app, {
     requireAuthentication: makeAuth(role, companyId),
-    requireBillingAccess,
+    requireInvoiceSend,
+    requireInvoiceWrite,
   });
   return app;
 }

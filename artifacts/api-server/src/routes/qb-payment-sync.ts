@@ -445,7 +445,11 @@ export function isInvoiceOverdue(
 
 export interface RegisterQbPaymentSyncRoutesDeps {
   requireAuthentication: RequestHandler;
-  requireBillingAccess: RequestHandler;
+  /** Task #1886: this endpoint stamps payment_status / balance / paid_at on
+   *  invoice rows, so it is an invoice write → CAN_EDIT_INVOICES. The
+   *  bookkeeper is deliberately excluded: payment state is QBO-owned and she
+   *  never writes it from IrrigoPro. */
+  requireInvoiceWrite: RequestHandler;
   makeRequest: QbMakeRequestFn;
   getQbIntegration: (companyId: string) => Promise<{
     realmId: string;
@@ -459,7 +463,7 @@ export function registerQbPaymentSyncRoutes(
   app: Express,
   deps: RegisterQbPaymentSyncRoutesDeps,
 ): void {
-  const { requireAuthentication, requireBillingAccess, makeRequest, getQbIntegration, apiBase } = deps;
+  const { requireAuthentication, requireInvoiceWrite, makeRequest, getQbIntegration, apiBase } = deps;
 
   // Hydrate the in-memory throttle map from app_settings on startup so that
   // a server restart doesn't let every company trigger a full QBO batch query
@@ -473,7 +477,7 @@ export function registerQbPaymentSyncRoutes(
   app.post(
     "/api/invoices/sync-payment-status",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const role: string | undefined = req.authenticatedUserRole;

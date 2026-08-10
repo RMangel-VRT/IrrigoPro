@@ -9,7 +9,8 @@
 //   `status`. Allowed when sentAt is non-null and status is not terminal.
 //
 // Both are company-scoped (getInvoiceById under the caller's company) and
-// role-guarded by requireBillingAccess (company_admin / billing_manager).
+// role-guarded per-endpoint (Task #1886): mark-sent is CAN_SEND_INVOICE_EMAIL
+// (a bookkeeper records delivery), mark-unsent is CAN_EDIT_INVOICES.
 // Extracted into its own module so the handlers can be mounted against
 // in-memory storage stubs in tests without standing up the whole
 // routes.ts monolith.
@@ -19,17 +20,22 @@ import { storage } from "../storage";
 
 export interface RegisterInvoiceMarkSentRoutesDeps {
   requireAuthentication: RequestHandler;
-  requireBillingAccess: RequestHandler;
+  /** Recording that an invoice went out → CAN_SEND_INVOICE_EMAIL. */
+  requireInvoiceSend: RequestHandler;
+  /** Task #1886: un-sending is not "mark an invoice sent", and the scope
+   *  decision names only the forward direction. Ambiguous → defaulted to
+   *  write, so a bookkeeper cannot walk delivery back. */
+  requireInvoiceWrite: RequestHandler;
 }
 
 export function registerInvoiceMarkSentRoutes(
   app: Express,
-  { requireAuthentication, requireBillingAccess }: RegisterInvoiceMarkSentRoutesDeps,
+  { requireAuthentication, requireInvoiceSend, requireInvoiceWrite }: RegisterInvoiceMarkSentRoutesDeps,
 ): void {
   app.post(
     "/api/invoices/:id/mark-sent",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceSend,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));
@@ -73,7 +79,7 @@ export function registerInvoiceMarkSentRoutes(
   app.post(
     "/api/invoices/:id/mark-unsent",
     requireAuthentication,
-    requireBillingAccess,
+    requireInvoiceWrite,
     async (req: any, res) => {
       try {
         const id = parseInt(String(req.params.id));

@@ -5,7 +5,8 @@
  * reading (no DB, no HTTP) to assert structural invariants that would be
  * easy to accidentally break when the 10k-line routes.ts is edited:
  *
- *  1. Endpoint exists and is guarded by requireAuthentication + requireBillingAccess
+ *  1. Endpoint exists and is guarded by requireAuthentication + requireInvoiceWrite
+ *     (Task #1886 split requireBillingAccess into read/write/send guards)
  *  2. Body is validated with Zod (ticketType enum, ticketId int)
  *  3. Double-billing guard: invoice is rolled back when QB sync fails
  *  4. Standalone invoices are stamped with billingType: 'standalone'
@@ -58,12 +59,15 @@ describe("bill-separately endpoint: registration", () => {
     );
   });
 
-  it("endpoint is guarded by requireBillingAccess", () => {
+  // Task #1886 — requireBillingAccess split into read/write/send. Billing a
+  // ticket separately creates an invoice, so this site is write-classified and
+  // its membership is unchanged (super_admin / company_admin / billing_manager).
+  it("endpoint is guarded by requireInvoiceWrite", () => {
     const region = nearby(routesSrc, '"/api/invoices/bill-separately"', 400);
     assert.ok(region, "anchor not found");
     assert.ok(
-      region.includes("requireBillingAccess"),
-      `Expected requireBillingAccess guard near endpoint\n\n${region}`,
+      region.includes("requireInvoiceWrite"),
+      `Expected requireInvoiceWrite guard near endpoint\n\n${region}`,
     );
   });
 });

@@ -69,6 +69,7 @@ import {
   INVOICE_EXCLUDED_STATUSES,
 } from "../financial-pulse-math";
 
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const ALLOWED_ROLES = new Set([
   "super_admin",
   "company_admin",

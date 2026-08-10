@@ -27,6 +27,7 @@ export interface RegisterBudgetRoutesDeps {
 // Slice 1 spec: only super_admin / company_admin / billing_manager can
 // see a customer's budget usage. irrigation_manager is intentionally
 // NOT in this set — they get pricing data but not budget signals.
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
 const VISIBILITY_ROLES = new Set([
   "super_admin",
   "company_admin",

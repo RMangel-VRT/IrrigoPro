@@ -259,6 +259,15 @@ export default function Navigation() {
             ]
           },
         ];
+      // Task #1886 — the bookkeeper's three surfaces. This case must exist:
+      // falling through to the `default: []` below would render a blank app
+      // for the role on this nav surface while the desktop sidebar looked fine.
+      case "bookkeeper":
+        return [
+          { path: "/invoices", label: "Invoices", icon: Receipt },
+          { path: "/customers", label: "Customers", icon: Users },
+          { path: "/quickbooks", label: "QuickBooks", icon: Calculator },
+        ];
       default:
         return [];
     }

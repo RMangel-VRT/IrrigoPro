@@ -8,3 +8,6 @@
 - [Controller letter stored column](controller-letter-stored.md) — letter on irrigation_controllers is auto-assigned (nextControllerLetter), NOT NULL + unique index (0008 migration); property_controllers is legacy-only.
 - [Drizzle phantom column in a select](drizzle-phantom-column-select.md) — a selected column that doesn't exist throws `Object.entries(undefined)` at prepare time and 500s the whole route; TS won't catch it.
 - [Drizzle push silent abort](drizzle-push-silent-abort.md) — plain push exits 0 without applying when the diff has data-loss statements; use push-force, and import legacy-table data before the drop ships.
+- [Role capability registry](role-capability-registry.md) — gate on capabilities, never role strings; unknown/null roles must be false, and prefer allowlists to denylists.
+- [Express guard typing](express-guard-typing.md) — typing a shared guard as RequestHandler re-types req.params and breaks unrelated routes; keep loose params.
+- [Verifying role-gated UI](scripted-login-acceptance.md) — nav reads role at login, so verify roles with a fresh scripted login and watch for background 403s, not screenshots.

@@ -177,6 +177,21 @@ export const billingManagerNav: NavConfig = {
   ],
 };
 
+// Task #1886 — bookkeeper desktop sidebar.
+//
+// Deliberately NOT billingManagerNav: that config carries Financial Pulse,
+// Manager Workspace, Billing Sheets, Wet Checks, Work Orders, and Estimates
+// Pending Approval, all of which are out of scope for this role. The two
+// shells share the DesktopShell *component*, not the nav config or the route
+// list. Invoices, Customers, QuickBooks — nothing else.
+export const bookkeeperNav: NavConfig = {
+  items: [
+    { type: "leaf", label: "Invoices", path: "/invoices", icon: Receipt },
+    { type: "leaf", label: "Customers", path: "/customers", icon: Users },
+    { type: "leaf", label: "QuickBooks", path: "/quickbooks", icon: Calculator },
+  ],
+};
+
 export const managerNav: NavConfig = {
   items: [
     { type: "leaf", label: "Manager Workspace", path: "/manager-workspace", icon: ClipboardCheck },
