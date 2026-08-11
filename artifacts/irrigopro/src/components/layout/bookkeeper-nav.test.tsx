@@ -11,18 +11,29 @@
  * and now tracks its own contents via CAN_READ_INVOICES.
  */
 
-import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   hasCapability,
+  computeEffectiveDueDate,
+  isInvoiceOverdue,
   CAN_READ_INVOICES,
   CAN_EDIT_INVOICES,
   CAN_SEND_INVOICE_EMAIL,
   CAN_VIEW_COSTS,
+  OVERDUE_AGING_FILTER,
 } from "@workspace/shared";
+
+// Task #1914 — the signed-in role has to vary now: the overdue badge is gated
+// on invoice-read capability, so a field tech's session must be renderable
+// here to prove no request goes out for it. `vi.hoisted` is what lets the
+// module mock below read a value the tests can change.
+const session = vi.hoisted(() => ({
+  role: "bookkeeper" as string,
+}));
 
 vi.mock("@/components/layout/navigation", () => ({
   default: () => <div data-testid="mock-navigation" />,
@@ -39,7 +50,7 @@ vi.mock("@/components/app-health/impersonation-banner", () => ({
 vi.mock("@/utils/safeStorage", () => ({
   safeGet: (key: string) =>
     key === "user"
-      ? JSON.stringify({ id: 7, name: "Test Bookkeeper", role: "bookkeeper", companyId: 1 })
+      ? JSON.stringify({ id: 7, name: "Test Bookkeeper", role: session.role, companyId: 1 })
       : null,
   safeSet: vi.fn(),
   safeRemove: vi.fn(),
@@ -55,7 +66,13 @@ vi.mock("@/components/layout/route-meta", () => ({
 // is red on main for exactly that reason — see the task follow-ups.)
 vi.mock("@/lib/auth-context", () => ({
   useAuth: () => ({
-    user: { id: 7, name: "Test Bookkeeper", email: "bk@example.com", role: "bookkeeper", companyId: 1 },
+    user: {
+      id: 7,
+      name: "Test Bookkeeper",
+      email: "bk@example.com",
+      role: session.role,
+      companyId: 1,
+    },
     isLoading: false,
     login: vi.fn(),
     logout: vi.fn(),
@@ -80,7 +97,11 @@ if (!window.matchMedia) {
 }
 
 function makeQueryClient() {
-  return new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  return new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0, queryFn: async () => null },
+    },
+  });
 }
 
 function collectLeafPaths(items: NavItem[]): string[] {
@@ -327,5 +348,199 @@ describe("customer-profile Billing Details tab visibility", () => {
 
   it("bookkeeper can read invoices", () => {
     expect(hasCapability("bookkeeper", CAN_READ_INVOICES)).toBe(true);
+  });
+});
+
+// ── Task #1914: the overdue-invoice badge ────────────────────────────────────
+//
+// The badge does not decide what "overdue" means; it counts through the
+// invoice list endpoint's overdue aging filter and renders the post-filter
+// total the endpoint reports. So the fake endpoint below applies the SHARED
+// definition (computeEffectiveDueDate + isInvoiceOverdue from
+// lib/shared/src/invoice-aging.ts) to the fixtures, and every expectation is
+// derived from that same helper rather than from a number typed in here. If
+// the shell ever grew its own client-side notion of overdue, the count it
+// rendered would stop agreeing with these fixtures.
+//
+// The endpoint's own agreement with the shared definition — that ?aging=
+// overdue really selects the shared-overdue rows, and that X-Total-Count is
+// the post-filter total — is proved against the real handler in
+// artifacts/api-server/src/routes/invoice-list-routes.test.ts.
+
+const NOW = new Date("2026-08-11T12:00:00.000Z");
+const DAY = 24 * 60 * 60 * 1000;
+
+interface FixtureInvoice {
+  id: number;
+  dueDate: string;
+  createdAt: string;
+  paymentStatus: string;
+}
+
+function fixture(id: number, dueInDays: number, paymentStatus = "unpaid"): FixtureInvoice {
+  return {
+    id,
+    dueDate: new Date(NOW.getTime() + dueInDays * DAY).toISOString(),
+    createdAt: new Date(NOW.getTime() - 60 * DAY).toISOString(),
+    paymentStatus,
+  };
+}
+
+/** Six invoices: three genuinely overdue, one paid, two not yet due. */
+const INVOICE_FIXTURES: FixtureInvoice[] = [
+  fixture(1, -75),
+  fixture(2, -40),
+  fixture(3, -2),
+  fixture(4, -90, "paid"),
+  fixture(5, 3),
+  fixture(6, 20),
+];
+
+function isOverduePerSharedModule(inv: FixtureInvoice): boolean {
+  return isInvoiceOverdue(
+    inv.paymentStatus,
+    computeEffectiveDueDate(inv.dueDate, inv.createdAt, null),
+    NOW,
+  );
+}
+
+function sharedOverdueCount(rows: FixtureInvoice[]): number {
+  return rows.filter(isOverduePerSharedModule).length;
+}
+
+let fetchCalls: string[] = [];
+
+/**
+ * Stands in for GET /api/invoices. Honours `?aging=overdue` using the shared
+ * definition and reports the post-filter total in X-Total-Count, exactly as
+ * the real handler does.
+ */
+function installFakeInvoiceApi(rows: FixtureInvoice[]) {
+  const impl = vi.fn(async (input: unknown) => {
+    const url = String(input);
+    fetchCalls.push(url);
+    const qs = url.includes("?") ? url.slice(url.indexOf("?") + 1) : "";
+    const params = new URLSearchParams(qs);
+    const selected =
+      params.get("aging") === OVERDUE_AGING_FILTER
+        ? rows.filter(isOverduePerSharedModule)
+        : rows;
+    const limitRaw = params.get("limit");
+    const limit = limitRaw ? Number(limitRaw) : selected.length;
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "X-Total-Count": String(selected.length) }),
+      json: async () => selected.slice(0, limit),
+      text: async () => "",
+    } as unknown as Response;
+  });
+  (globalThis as unknown as { fetch: unknown }).fetch = impl;
+  return impl;
+}
+
+function renderShell() {
+  return render(
+    <QueryClientProvider client={makeQueryClient()}>
+      <DesktopShell navConfig={bookkeeperNav}>
+        <div>content</div>
+      </DesktopShell>
+    </QueryClientProvider>,
+  );
+}
+
+function badgeTexts(): string[] {
+  return Array.from(document.querySelectorAll('[data-sidebar="menu-badge"]')).map(
+    (el) => el.textContent?.trim() ?? "",
+  );
+}
+
+describe("bookkeeper sidebar — overdue invoice badge (Task #1914)", () => {
+  const realFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    fetchCalls = [];
+    session.role = "bookkeeper";
+  });
+
+  afterEach(() => {
+    (globalThis as unknown as { fetch: unknown }).fetch = realFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("asks the invoice list for the overdue slice, one row deep", async () => {
+    installFakeInvoiceApi(INVOICE_FIXTURES);
+    renderShell();
+    await waitFor(() => {
+      expect(fetchCalls.some((u) => u.startsWith("/api/invoices"))).toBe(true);
+    });
+    const call = fetchCalls.find((u) => u.startsWith("/api/invoices"))!;
+    const params = new URLSearchParams(call.slice(call.indexOf("?") + 1));
+    expect(params.get("aging")).toBe(OVERDUE_AGING_FILTER);
+    // A minimal page: the number comes from the header, not from counting rows.
+    expect(params.get("limit")).toBe("1");
+    expect(params.get("offset")).toBe("0");
+  });
+
+  it("renders the post-filter total, and it agrees with the shared overdue rule", async () => {
+    const expected = sharedOverdueCount(INVOICE_FIXTURES);
+    expect(expected).toBe(3); // sanity: the fixtures do exercise the rule
+    expect(expected).toBeLessThan(INVOICE_FIXTURES.length); // …and it filters
+    installFakeInvoiceApi(INVOICE_FIXTURES);
+    renderShell();
+    await waitFor(() => {
+      expect(badgeTexts()).toContain(String(expected));
+    });
+    // Not the unfiltered list length, and not a paid-but-past-due row's worth.
+    expect(badgeTexts()).not.toContain(String(INVOICE_FIXTURES.length));
+  });
+
+  it("renders no badge at all — not a 0 — when nothing is overdue", async () => {
+    const allCurrent = [fixture(1, 5), fixture(2, 30), fixture(3, -1, "paid")];
+    expect(sharedOverdueCount(allCurrent)).toBe(0);
+    installFakeInvoiceApi(allCurrent);
+    renderShell();
+    await waitFor(() => {
+      expect(fetchCalls.some((u) => u.startsWith("/api/invoices"))).toBe(true);
+    });
+    await waitFor(() => {
+      expect(badgeTexts()).toEqual([]);
+    });
+    expect(screen.queryByText("0")).toBeNull();
+  });
+
+  it("issues no overdue request at all for a role without invoice-read capability", async () => {
+    expect(hasCapability("field_tech", CAN_READ_INVOICES)).toBe(false);
+    session.role = "field_tech";
+    installFakeInvoiceApi(INVOICE_FIXTURES);
+    renderShell();
+    // Give React Query every chance to fire it.
+    await waitFor(() => {
+      expect(screen.getByTestId("desktop-shell")).toBeTruthy();
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(fetchCalls.filter((u) => u.startsWith("/api/invoices"))).toEqual([]);
+    expect(badgeTexts()).toEqual([]);
+  });
+
+  it("does not turn on the four approval badge queries for the bookkeeper", async () => {
+    // The overdue gate is independent: enabling it must not start her polling
+    // parts, manual part reviews, wet-check reviews, estimates or the
+    // needs-approval count.
+    installFakeInvoiceApi(INVOICE_FIXTURES);
+    renderShell();
+    await waitFor(() => {
+      expect(fetchCalls.some((u) => u.startsWith("/api/invoices"))).toBe(true);
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    for (const endpoint of [
+      "/api/parts/pending-approval",
+      "/api/manual-part-reviews",
+      "/api/wet-checks/pending-review",
+      "/api/estimates/pending-approval",
+      "/api/manager-workspace/needs-approval/count",
+    ]) {
+      expect(fetchCalls.some((u) => u.startsWith(endpoint)), endpoint).toBe(false);
+    }
   });
 });

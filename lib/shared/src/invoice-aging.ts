@@ -61,6 +61,16 @@ export function computeEffectiveDueDate(
 }
 
 /**
+ * The wire value that asks the invoice list for "at or past its due date".
+ *
+ * Task #1914 — the sidebar's overdue badge counts invoices by calling the
+ * invoice list endpoint with this filter and reading the post-filter total, so
+ * the badge cannot grow its own idea of what "overdue" means. Both the caller
+ * and the endpoint that applies the filter refer to this constant.
+ */
+export const OVERDUE_AGING_FILTER = "overdue";
+
+/**
  * Overdue = not fully paid AND past the effective due date.
  * A null/absent payment status is treated as `unpaid`.
  */

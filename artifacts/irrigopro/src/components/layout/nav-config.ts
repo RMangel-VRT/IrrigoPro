@@ -29,7 +29,13 @@ export type NavBadgeKey =
   | "partsPendingApproval"
   | "wetCheckReviews"
   | "estimatesPendingApproval"
-  | "awaitingApproval";
+  | "awaitingApproval"
+  // Task #1914 — invoices at or past their due date. Resolved in
+  // desktop-shell's useNavBadges from the invoice list endpoint's own overdue
+  // aging filter, so the number here is the shipped definition in
+  // lib/shared/src/invoice-aging.ts and never a second one. Only ever attached
+  // to a nav whose role holds CAN_READ_INVOICES.
+  | "overdueInvoices";
 
 export type NavBadgeMap = Partial<Record<NavBadgeKey, number>>;
 
@@ -128,7 +134,13 @@ export const billingManagerNav: NavConfig = {
         { type: "leaf", label: "Financial Pulse", path: "/financial-pulse", icon: Activity },
         { type: "leaf", label: "Command Center", path: "/billing/command-center", icon: ClipboardList },
         { type: "leaf", label: "Billing Sheets", path: "/billing-sheets", icon: ClipboardList },
-        { type: "leaf", label: "Invoices", path: "/invoices", icon: Receipt },
+        {
+          type: "leaf",
+          label: "Invoices",
+          path: "/invoices",
+          icon: Receipt,
+          badgeKey: "overdueInvoices",
+        },
         billingManagerReportsGroup,
       ],
     },
@@ -178,17 +190,45 @@ export const billingManagerNav: NavConfig = {
 };
 
 // Task #1886 — bookkeeper desktop sidebar.
+// Task #1914 — grouped, with the overdue badge on Invoices.
 //
 // Deliberately NOT billingManagerNav: that config carries Financial Pulse,
 // Manager Workspace, Billing Sheets, Wet Checks, Work Orders, and Estimates
 // Pending Approval, all of which are out of scope for this role. The two
-// shells share the DesktopShell *component*, not the nav config or the route
-// list. Invoices, Customers, QuickBooks — nothing else.
+// shells share the DesktopShell *component* and now the same grouping
+// vocabulary — Invoices open by default, Customers, Settings — but not the nav
+// config or the route list. Invoices, Customers, QuickBooks — nothing else.
+//
+// The grouping is presentation only: the reachable route set is exactly the
+// three paths it has always been. (Group with a single same-named leaf follows
+// companyAdminNav's Customers group; the group heading is the section, the
+// leaf is the page that carries the badge.)
 export const bookkeeperNav: NavConfig = {
   items: [
-    { type: "leaf", label: "Invoices", path: "/invoices", icon: Receipt },
+    {
+      type: "group",
+      label: "Invoices",
+      icon: DollarSign,
+      defaultOpen: true,
+      items: [
+        {
+          type: "leaf",
+          label: "Invoices",
+          path: "/invoices",
+          icon: Receipt,
+          badgeKey: "overdueInvoices",
+        },
+      ],
+    },
     { type: "leaf", label: "Customers", path: "/customers", icon: Users },
-    { type: "leaf", label: "QuickBooks", path: "/quickbooks", icon: Calculator },
+    {
+      type: "group",
+      label: "Settings",
+      icon: Settings,
+      items: [
+        { type: "leaf", label: "QuickBooks", path: "/quickbooks", icon: Calculator },
+      ],
+    },
   ],
 };
 
@@ -301,7 +341,13 @@ export const companyAdminNav: NavConfig = {
         { type: "leaf", label: "Manager Workspace", path: "/manager-workspace", icon: LayoutDashboard, badgeKey: "awaitingApproval" },
         { type: "leaf", label: "Financial Pulse", path: "/financial-pulse", icon: Activity },
         { type: "leaf", label: "Command Center", path: "/billing/command-center", icon: ClipboardList },
-        { type: "leaf", label: "Invoices", path: "/invoices", icon: Receipt },
+        {
+          type: "leaf",
+          label: "Invoices",
+          path: "/invoices",
+          icon: Receipt,
+          badgeKey: "overdueInvoices",
+        },
         reportsGroup,
       ],
     },

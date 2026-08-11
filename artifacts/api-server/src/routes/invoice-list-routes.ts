@@ -33,6 +33,7 @@ import {
   daysOverdue,
   isBalanceFallback,
   isInvoiceOverdue,
+  OVERDUE_AGING_FILTER,
   resolveBalanceDue,
   hasCapability,
   CAN_READ_AR_NOTES,
@@ -49,7 +50,10 @@ import {
  * Pulse widget has always deep-linked with — unchanged, deliberately, so
  * existing links keep working. `overdue` is added for "anything at or past its
  * due date", which is what the collections landing default needs; it reuses
- * this parameter rather than introducing a second one.
+ * this parameter rather than introducing a second one. Its literal is
+ * `OVERDUE_AGING_FILTER` in the shared aging module — the sidebar's overdue
+ * badge (Task #1914) counts through this same filter, so the two surfaces
+ * cannot drift on what they ask for.
  */
 export type AgingFilterValue =
   | "all"
@@ -194,7 +198,7 @@ export function parseArListQuery(query: Record<string, unknown>): ArListQuery {
     agingRaw === "days30" ||
     agingRaw === "days60" ||
     agingRaw === "days90Plus" ||
-    agingRaw === "overdue"
+    agingRaw === OVERDUE_AGING_FILTER
       ? agingRaw
       : "all";
 
@@ -401,7 +405,7 @@ export function isOpenAr(inv: InvoiceRowLike): boolean {
 function matchesAging(row: AnnotatedInvoice, aging: AgingFilterValue): boolean {
   if (aging === "all") return true;
   if (!isOpenAr(row)) return false;
-  if (aging === "overdue") return row.agingBucket !== "current";
+  if (aging === OVERDUE_AGING_FILTER) return row.agingBucket !== "current";
   return row.agingBucket === AGING_VALUE_TO_BUCKET[aging];
 }
 

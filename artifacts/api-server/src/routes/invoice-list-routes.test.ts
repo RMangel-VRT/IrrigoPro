@@ -42,7 +42,10 @@ import {
   CAN_READ_INVOICES,
   CAN_EDIT_INVOICES,
   COLLECTIONS_LANDING_DEFAULT,
+  OVERDUE_AGING_FILTER,
   classifyAgingBucket,
+  computeEffectiveDueDate,
+  isInvoiceOverdue,
   type Capability,
 } from "@workspace/shared";
 import { requireInvoiceRead } from "./role-guards";
@@ -808,5 +811,104 @@ describe("GET /api/invoices — ?reminders= filter", () => {
 
   it("counts as a filter for the legacy-shape check", () => {
     assert.equal(isUnfilteredArListQuery(parseArListQuery({ reminders: "never" })), false);
+  });
+});
+
+// ── (k) Task #1914 — the number behind the sidebar's overdue badge ───────────
+//
+// The desktop sidebar shows a bookkeeper how many invoices are overdue by
+// calling this endpoint with the overdue aging filter and reading
+// X-Total-Count. That badge writes no definition of its own, so what has to
+// hold is that this endpoint's ?aging=overdue population is the shared aging
+// module's overdue population — computed here straight from the fixtures with
+// `computeEffectiveDueDate` + `isInvoiceOverdue`, never hardcoded.
+
+describe("GET /api/invoices — the count the overdue nav badge reads", () => {
+  const BADGE_QUERY = `/api/invoices?aging=${OVERDUE_AGING_FILTER}&limit=1&offset=0`;
+
+  /** Overdue per lib/shared/src/invoice-aging.ts, over the fixture rows. */
+  function sharedOverdueCount(rows: InvoiceRowLike[]): number {
+    return rows.filter((r) =>
+      isInvoiceOverdue(
+        r.paymentStatus,
+        computeEffectiveDueDate(r.dueDate, r.createdAt, null),
+        NOW,
+      ),
+    ).length;
+  }
+
+  const openArRows: InvoiceRowLike[] = [
+    overdueBy(1, 75),
+    overdueBy(2, 40),
+    overdueBy(3, 2),
+    overdueBy(4, 90, { paymentStatus: "paid", paidAt: NOW, status: "paid" }),
+    inv({ id: 5, dueDate: new Date(NOW.getTime() + 3 * DAY) }),
+    inv({ id: 6, dueDate: new Date(NOW.getTime() + 20 * DAY) }),
+  ];
+
+  it("reports the shared module's overdue count in X-Total-Count", async () => {
+    const expected = sharedOverdueCount(openArRows);
+    assert.equal(expected, 3, "fixtures exercise the rule");
+    assert.ok(expected < openArRows.length, "…and the filter actually filters");
+    const { app } = buildApp(openArRows);
+    const res = await get(app, BADGE_QUERY);
+    assert.equal(res.status, 200);
+    assert.equal(res.total, String(expected));
+  });
+
+  it("reports the whole total even though only one row is asked for", async () => {
+    // The badge requests a minimal page on purpose: counting returned rows
+    // would silently cap the badge at the page size.
+    const many = Array.from({ length: 120 }, (_, i) => overdueBy(i + 1, 5 + i));
+    const { app } = buildApp(many);
+    const res = await get(app, BADGE_QUERY);
+    assert.equal(res.body.length, 1);
+    assert.equal(res.total, String(sharedOverdueCount(many)));
+    assert.equal(res.total, "120");
+  });
+
+  it("reports zero when nothing is overdue, so the badge renders nothing", async () => {
+    const rows = [
+      inv({ id: 1, dueDate: new Date(NOW.getTime() + 5 * DAY) }),
+      inv({ id: 2, dueDate: new Date(NOW.getTime() + 30 * DAY) }),
+    ];
+    assert.equal(sharedOverdueCount(rows), 0);
+    const { app } = buildApp(rows);
+    const res = await get(app, BADGE_QUERY);
+    assert.equal(res.total, "0");
+    assert.deepEqual(res.body, []);
+  });
+
+  it("excludes rows that are not open A/R, which the shared rule alone would count", async () => {
+    // Documented intersection, not a drift: ?aging= is an A/R filter, so it
+    // also requires `isOpenAr`. A past-due DRAFT is overdue by the shared
+    // date rule but is not money anyone is owed yet, and the bookkeeper's
+    // badge must not chase her towards it.
+    const rows = [overdueBy(1, 30), overdueBy(2, 30, { status: "draft" })];
+    assert.equal(sharedOverdueCount(rows), 2, "the date rule counts both");
+    const { app } = buildApp(rows);
+    const res = await get(app, BADGE_QUERY);
+    assert.equal(res.total, "1");
+    assert.deepEqual(ids(res.body), [1]);
+  });
+
+  it("is company-scoped, like every other read here", async () => {
+    const rowsByCompany = new Map<number | null, InvoiceRowLike[]>([
+      [1, [overdueBy(1, 30)]],
+      [2, [overdueBy(2, 30), overdueBy(3, 30)]],
+    ]);
+    const { app } = buildApp([], { companyId: 2, rowsByCompany });
+    const res = await get(app, BADGE_QUERY);
+    assert.equal(res.total, "2");
+  });
+
+  it("a role without invoice-read capability cannot reach the count at all", async () => {
+    // The client gates the query on the same capability; this is the server
+    // half of that pair.
+    assert.equal(hasCapability("field_tech", CAN_READ_INVOICES), false);
+    const { app } = buildApp(openArRows, { role: "field_tech" });
+    const res = await get(app, BADGE_QUERY);
+    assert.equal(res.status, 403);
+    assert.equal(res.total, null);
   });
 });

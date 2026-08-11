@@ -88,6 +88,10 @@ args = "invoice-row-expansion-reads"
 task = "workflow.run"
 args = "invoice-row-expansion-ui"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "nav-config-bookkeeper"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -282,6 +286,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/irrigopro exec vitest run src/pages/invoices-row-expansion.test.tsx"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "nav-config-bookkeeper"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/irrigopro exec vitest run src/components/layout/nav-config.test.ts src/components/layout/bookkeeper-nav.test.tsx"
 
 [workflows.workflow.metadata]
 isValidation = true

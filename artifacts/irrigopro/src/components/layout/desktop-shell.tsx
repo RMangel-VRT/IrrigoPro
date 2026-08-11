@@ -3,6 +3,12 @@ import { createPortal } from "react-dom";
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { clearSessionAndLogout } from "@/lib/queryClient";
+import { getImpersonationToken } from "@/lib/impersonation";
+import {
+  hasCapability,
+  CAN_READ_INVOICES,
+  OVERDUE_AGING_FILTER,
+} from "@workspace/shared";
 import {
   Sidebar,
   SidebarContent,
@@ -105,7 +111,45 @@ function groupHasActive(group: NavGroup, activePath: string | null): boolean {
   return false;
 }
 
-function useNavBadges(enabled: boolean): NavBadgeMap {
+// Task #1914 — the overdue-invoice badge reads its number from the invoice
+// list endpoint's own overdue aging filter (OVERDUE_AGING_FILTER, shared with
+// the endpoint that applies it), so the badge cannot disagree with the aging
+// rules in lib/shared/src/invoice-aging.ts or with the list the bookkeeper
+// lands on. `limit=1&offset=0` asks for the smallest possible page: the number
+// we want is the POST-filter total the endpoint reports in X-Total-Count, and
+// counting returned rows client-side would cap the badge at a page size.
+export const OVERDUE_INVOICES_URL =
+  `/api/invoices?aging=${OVERDUE_AGING_FILTER}&limit=1&offset=0`;
+
+async function fetchOverdueInvoiceCount(): Promise<number | null> {
+  try {
+    const headers: Record<string, string> = {};
+    const impToken = getImpersonationToken();
+    if (impToken) headers["x-impersonation-token"] = impToken;
+    const res = await fetch(OVERDUE_INVOICES_URL, {
+      credentials: "include",
+      headers,
+    });
+    if (!res.ok) return null;
+    const raw = res.headers.get("X-Total-Count");
+    if (raw == null) return null;
+    const total = Number(raw);
+    return Number.isFinite(total) ? total : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param enabled          the four long-standing approval badges
+ * @param overdueEnabled   the overdue-invoice badge, gated separately
+ *
+ * Task #1914 — the two gates are deliberately independent. `enabled` is a
+ * hardcoded role list that predates the bookkeeper; folding the overdue query
+ * into it would either leave her badge dead or start four roles polling
+ * endpoints they have never polled. Neither flag may widen the other.
+ */
+function useNavBadges(enabled: boolean, overdueEnabled: boolean): NavBadgeMap {
   // Task #539 — see notification-system.tsx: the workspace queryFn
   // default returns `null` on 401 (so destructure defaults like
   // `data = []` DO NOT apply). Coerce each badge query through
@@ -153,6 +197,13 @@ function useNavBadges(enabled: boolean): NavBadgeMap {
     enabled,
     refetchInterval: 60000,
   });
+  // Task #1914 — its own `enabled`, never the flag above.
+  const { data: overdueInvoicesRaw } = useQuery<number | null>({
+    queryKey: [OVERDUE_INVOICES_URL],
+    queryFn: fetchOverdueInvoiceCount,
+    enabled: overdueEnabled,
+    refetchInterval: 60000,
+  });
   const pendingParts = Array.isArray(pendingPartsRaw) ? pendingPartsRaw : [];
   const pendingReviews = Array.isArray(pendingReviewsRaw) ? pendingReviewsRaw : [];
   const wetCheckPending = Array.isArray(wetCheckPendingRaw) ? wetCheckPendingRaw : [];
@@ -164,6 +215,9 @@ function useNavBadges(enabled: boolean): NavBadgeMap {
     wetCheckReviews: wetCheckPending.length,
     estimatesPendingApproval: pendingEstimates.length,
     awaitingApproval: awaitingApprovalCount,
+    // A failed or not-yet-resolved count is 0, which LeafItem renders as no
+    // badge at all rather than a "0" the bookkeeper would have to interpret.
+    overdueInvoices: typeof overdueInvoicesRaw === "number" ? overdueInvoicesRaw : 0,
   };
 }
 
@@ -217,7 +271,12 @@ export function DesktopShell({ navConfig, children }: DesktopShellProps) {
     userRole === "company_admin" ||
     userRole === "billing_manager" ||
     userRole === "irrigation_manager";
-  const badges = useNavBadges(enableBadges);
+  // Task #1914 — the overdue badge is gated on the capability that guards the
+  // endpoint it reads (requireInvoiceRead), not on the role list above. A role
+  // without CAN_READ_INVOICES — a field tech — issues no request for it at all,
+  // rather than firing one that 403s in the background.
+  const enableOverdueBadge = hasCapability(userRole, CAN_READ_INVOICES);
+  const badges = useNavBadges(enableBadges, enableOverdueBadge);
 
   const [actionsTarget, setActionsTarget] = useState<HTMLDivElement | null>(
     null,
