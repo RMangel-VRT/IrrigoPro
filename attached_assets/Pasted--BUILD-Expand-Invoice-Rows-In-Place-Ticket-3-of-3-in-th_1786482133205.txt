@@ -1,0 +1,77 @@
+# BUILD — Expand Invoice Rows In Place
+
+**Ticket 3 of 3** in the invoice page redesign. Depends on `BUILD - Invoice Page AR-First Layout (2 of 3)` — it expands the row that ticket builds.
+
+**What & Why**
+Working an aging list means opening invoice after invoice: check the line items, see whether a reminder already went out, read what the last person recorded. Today each of those is a navigation away and a navigation back, and the back button loses the filters and the scroll position. On a list of thirty overdue invoices that is thirty round trips through a filter reset.
+
+This ticket makes a row expand in place, so the list stays put while she works down it.
+
+**Additive by design.** Ticket 2's page is complete without this — rows behave as they do today until this lands. Nothing here reworks what ticket 2 built.
+
+## Scope
+
+Clicking a row expands it inline to show three things, in this order:
+
+1. **Line items** — what the invoice is actually for. Source ticket type and number, work date, description, amount.
+2. **Reminder history** — every reminder sent: when, by whom, to what address, which template, and the balance at the time. Read the **recorded historical values** from `invoice_reminders`, never recompute them from today's invoice state. That is the whole reason those columns exist.
+3. **AR notes** — the append-only thread with its compose box, gated on `CAN_READ_AR_NOTES`.
+
+Collapsing returns to the list with filters, sort, and scroll position intact. **One row expanded at a time** — an accordion, not a set of independently open panels, so the list never becomes taller than it is navigable.
+
+## Steps
+
+1. **Expand and collapse.** Row click toggles. Opening a second row closes the first. Keyboard accessible — the row is a control, so it takes focus and responds to Enter and Space, and the expanded region is associated with it for screen readers.
+2. **Load on expand, not up front.** Line items, reminder history, and notes are fetched when a row opens, not for every row in the list. A list of fifty invoices must not make a hundred and fifty requests on mount.
+3. **Line items.** Reuse whatever the invoice detail already renders rather than writing a second line-item view. If the existing component cannot be reused cleanly, say why before building a new one.
+4. **Reminder history.** Present the recorded values. Where a reminder's `sentToEmail` differs from the customer's current email, or `balanceAtSend` differs from today's balance, that is correct and expected — it is history. Do not "helpfully" reconcile them to current values.
+5. **AR notes.** The thread plus compose box, both gated on `CAN_READ_AR_NOTES`. Append only — no edit, no delete affordance, because there are no endpoints for either. Make it visually and textually clear these are internal and never printed on the invoice, so nobody confuses them with the customer-visible notes field.
+6. **Preserve list state.** Filters, sort, scroll position, and selection all survive expanding and collapsing. This is the point of the ticket; if any of them reset, the feature has not delivered.
+7. **Empty states.** An invoice with no reminders, or no notes, gets a plain line saying so — not a blank region and not a spinner that never resolves.
+
+## Done looks like
+
+- Clicking a row opens line items, reminder history, and AR notes without leaving the list.
+- Collapsing returns to exactly where she was — same filters, same sort, same scroll position, same selection.
+- Reminder history shows what was true at send time, including addresses and balances that have since changed.
+- Only one row is open at a time.
+- Expanding a row does not fire requests for rows that are not open.
+- A role without `CAN_READ_AR_NOTES` sees line items and reminder history, and no notes section at all.
+
+## Tests
+
+- Expanding and collapsing preserves filters, sort, scroll position, and selection.
+- Opening a second row collapses the first.
+- Line items, reminders, and notes are requested **on expand**, not on list mount — assert on the request count for a multi-row list.
+- Reminder history renders `sentToEmail` and `balanceAtSend` as recorded, and does not change when the invoice balance or customer email is subsequently updated.
+- An invoice with no reminders and no notes renders both empty states, not blank regions.
+- A role without `CAN_READ_AR_NOTES` gets no notes section, and the note data is absent from the response body (server-side, via `ar-note-visibility.ts`) rather than hidden in the client.
+- The expanded region is keyboard reachable and announced to screen readers.
+- Company isolation on the expanded reads — an invoice id from another company returns nothing.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the expand region, the toggle behaviour, and each of the three sections.
+- [ ] Screenshot: an expanded row showing line items, reminder history with a past address and balance, and the AR note thread.
+- [ ] Screenshot: the same row expanded as a role without `CAN_READ_AR_NOTES`, with no notes section.
+- [ ] Network capture proving requests fire on expand, not on list mount.
+- [ ] Test output for the preserved-list-state assertions.
+- [ ] A note on whether the existing line-item component was reused, and if not, why.
+- [ ] Deployed; commit message matches the diff.
+
+## Out of scope
+
+- Any change to the header, aging strip, filters, or row summary — ticket 2.
+- Editing anything from the expanded region. Void, merge, and correct stay in the row menu; the invoice remains editable in one place.
+- Editing or deleting AR notes. Append-only is deliberate and there are no endpoints for either.
+- A full invoice detail page redesign. The existing detail route stays as it is.
+- Bulk expand, or expanding multiple rows at once.
+
+## Relevant files
+
+- `artifacts/irrigopro/src/pages/invoices.tsx` (the row built by ticket 2)
+- `artifacts/api-server/src/routes/invoice-ar-note-routes.ts` (notes list and append)
+- `artifacts/api-server/src/routes/ar-note-visibility.ts` (server-side stripping)
+- `artifacts/api-server/src/routes/invoice-reminder-routes.ts` (reminder history)
+- `lib/shared/src/roles.ts` (`CAN_READ_AR_NOTES`)
+- The existing invoice detail line-item component (reuse target — identify it before building a second one)

@@ -1,0 +1,131 @@
+# FIX — Nothing Runs Typecheck Before Publish
+
+**What & Why**
+`pnpm typecheck` exists and works. Nothing runs it automatically. A TypeScript error can merge and publish to production, and one did.
+
+Task #1885 was a production outage: every `GET /api/wet-checks/:id` returned 500, so field techs tapping a customer on the Wet Checks page got an infinite spinner with no error. The cause was five column names in a Drizzle select that **do not exist** on `wetCheckZoneRecords` — `issueSummary`, `resolvedAt`, `resolvedByUserId`, `billingSheetId`, `wetCheckBillingId`, copy-pasted from `wetCheckFindings`. Each resolved to `undefined`, and Drizzle's `orderSelectedFields` called `Object.entries(undefined)` at query-prepare time.
+
+**Every one of those five is a compile error.** Drizzle table objects are strongly typed; `wetCheckZoneRecords.issueSummary` does not typecheck. The compiler would have caught all five before the code ever ran. It was never asked.
+
+This ticket makes the compiler part of the merge.
+
+## Current state (confirmed in code)
+
+`scripts/post-merge.sh` runs, in order:
+
+```
+pnpm install --frozen-lockfile
+pnpm --filter db push-force
+pnpm --filter db verify
+```
+
+That is the whole gate. Note what it covers and what it does not:
+
+- `push-force` fixes the **silent-abort** failure (plain `drizzle-kit push` exits 0 without applying when the diff contains data-loss statements).
+- `db verify` catches **schema → database** drift — the database missing something the Drizzle schema defines. That was the #1857 incident.
+- **Nothing catches code → schema drift** — code referencing something the schema does not define. That was the #1885 incident, and it is what the type checker is for.
+
+There is **no CI**: no `.github/workflows` directory exists.
+
+`pnpm typecheck` is defined in the root `package.json` and is real:
+
+```
+"typecheck:libs": "tsc --build",
+"typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
+"build": "pnpm run typecheck && pnpm -r --if-present run build"
+```
+
+It is reachable only through `build`, and nothing invokes `build` on merge.
+
+## The fix
+
+Add one line to `scripts/post-merge.sh`, after `pnpm --filter db verify`:
+
+```
+pnpm typecheck
+```
+
+The script already runs under `set -e`, so a non-zero exit fails the merge loudly. That is the entire functional change.
+
+**Order matters.** Typecheck runs **after** `push-force` and `db verify`, because `typecheck:libs` is `tsc --build`, which compiles `lib/db` — and a schema change needs to be applied and verified before the compiled output is trusted. Put it last.
+
+## What makes this ticket worth its own review
+
+The one-line change is trivial. **The proof is the deliverable**, and it has to be produced in a specific order:
+
+1. **Reintroduce a known-bad line first.** On a scratch branch, add one of #1885's phantom fields back into the `getWetCheck` zone-records select — `issueSummary: wetCheckZoneRecords.issueSummary`.
+2. **Run `pnpm typecheck` and capture the failure.** It must name the file, the line, and the missing property.
+3. **Remove the bad line and run it again**, capturing the clean pass.
+4. Only then land the `post-merge.sh` change.
+
+**If step 2 does not fail, stop and report.** A `pnpm typecheck` that passes with a phantom Drizzle column is a broken type-checking setup — a `skipLibCheck` swallowing the error, a stale `lib/db/dist` being typechecked instead of source, an `any` leaking through the schema import, or the api-server package silently having no `typecheck` script and being skipped by `--if-present`. That would be a **worse** finding than the original outage, because it would mean the safety net has been decorative for some time. Do not work around it; report what you found.
+
+## Also address the run time
+
+If `pnpm typecheck` is slow enough that it makes merges painful, say so with a number rather than skipping it. Report the wall-clock time on a cold and a warm run. `tsc --build` is incremental and caches to `tsconfig.tsbuildinfo`, so a warm run should be fast; if it is not, the fix is to make the build info cache persist between runs, not to drop the check.
+
+## Consider the publish path too, but report before acting
+
+`post-merge.sh` guards the merge. Whether the Replit **publish** flow runs `build` (and therefore `typecheck`) is not visible from the repository — `.replit` sets `deploymentTarget = "autoscale"` and defines workflows, but the deployment build command is not in the file.
+
+**Investigate and report what the publish actually runs.** If it already runs `build`, then typecheck gates publish today and #1885 got through by another route — which is itself worth understanding. If it does not, recommend adding it, but **do not change the deployment configuration as part of this ticket** without confirming what breaks. A failed publish gate on an unrelated pre-existing error would be a bad surprise during an incident.
+
+## Decisions
+
+- **Typecheck runs on merge, in `post-merge.sh`** (decided) — the same place `db verify` already guards the other drift direction.
+- **It runs last, after `push-force` and `db verify`** (decided) — `tsc --build` compiles `lib/db` and needs the schema settled first.
+- **The proof is a captured failure on known-bad code** (decided) — a gate nobody has seen fail is not a gate.
+- **A passing typecheck on a phantom column is a stop-and-report** (decided) — that would mean the checker itself is broken.
+- **No deployment-config change without investigating first** (decided).
+
+## Done looks like
+
+- `scripts/post-merge.sh` runs `pnpm typecheck` and a type error fails the merge.
+- There is captured output proving typecheck **fails** on one of #1885's phantom fields and **passes** once it is removed.
+- The repository's current state passes cleanly.
+- What the publish flow runs is documented, with a recommendation if it does not typecheck.
+- The three drift directions are all covered and it is written down which check owns which:
+  - database missing what the schema defines → `pnpm --filter db verify`
+  - schema diff silently not applied → `push-force`
+  - **code referencing what the schema does not define → `pnpm typecheck`**
+
+## Tests
+
+This is build tooling, so the verification is the captured evidence rather than a test suite:
+
+- Typecheck fails on the reintroduced phantom column, naming file, line, and property.
+- Typecheck passes on the current tree.
+- `post-merge.sh` exits non-zero when typecheck fails — verify by running the script against the scratch branch, not by reasoning about `set -e`.
+- Every workspace package that should be typechecked actually is. `--if-present` silently skips a package with no `typecheck` script, so **list the packages the command covers** and confirm `artifacts/api-server` is among them. A gate that skips the largest package in the repo is not a gate.
+
+That last check is the one most likely to find something. Confirm it explicitly.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] The `post-merge.sh` diff.
+- [ ] Captured `pnpm typecheck` output **failing** on the reintroduced `issueSummary` field, showing file, line, and the missing property.
+- [ ] Captured `pnpm typecheck` output **passing** on the current tree.
+- [ ] Captured `post-merge.sh` run exiting non-zero with the bad line present.
+- [ ] The list of workspace packages the typecheck command actually covers, with `artifacts/api-server` confirmed present.
+- [ ] Wall-clock time for a cold and a warm typecheck run.
+- [ ] A written statement of what the Replit publish flow runs, and whether typecheck gates it.
+- [ ] Confirmation that no phantom-column references were left in the tree after the experiment.
+
+## Out of scope
+
+- Adding CI (GitHub Actions or otherwise). `post-merge.sh` is the existing mechanism; use it.
+- Running tests on merge. Worth doing, separate ticket — this one is about the compiler only.
+- Linting.
+- Changing the Replit deployment configuration. Investigate and recommend; do not modify.
+- Fixing any pre-existing type errors this surfaces beyond what is needed to make the tree pass. If a large number appear, stop and report the count before fixing.
+
+## Relevant files
+
+- `scripts/post-merge.sh` (the whole change)
+- `package.json` (`typecheck`, `typecheck:libs`, `build` scripts)
+- `artifacts/api-server/package.json` (`typecheck: tsc -p tsconfig.json --noEmit`)
+- `artifacts/api-server/tsconfig.json` (project references to `lib/db`, `lib/api-zod`)
+- `artifacts/api-server/src/storage.ts` (`getWetCheck` zone-records select — where the phantom field goes back temporarily)
+- `lib/db/src/schema/schema.ts` (`wetCheckZoneRecords` — the table that never had those columns)
+- `.replit` (deployment configuration — read only)
+- `.agents/memory/drizzle-push-silent-abort.md` (the sibling finding; worth a companion note about this one)

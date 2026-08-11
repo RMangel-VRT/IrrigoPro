@@ -1,0 +1,142 @@
+# BUILD — Invoice Page AR-First Layout
+
+**Ticket 2 of 3** in the invoice page redesign. Preceded by `BUILD - Bookkeeper Navigation Matches the Rest of the App (1 of 3)` (independent — order does not matter), followed by `BUILD - Expand Invoice Rows In Place (3 of 3)`.
+
+**What & Why**
+Four tickets in a row added capability to the invoice page — AR columns, flags, filters, reminders, batch send, AR notes — and none of them changed the layout those things landed in. The result is seven filter dropdowns in a row, a Flags column cramming several badges into one cell, and every action buried in a kebab menu.
+
+The bookkeeper feels it worst because her `/` route renders this page directly, so it is her home screen. But it is everyone's invoice page, and it is doing a poor job for all of them.
+
+This ticket redesigns the header, the filters, and the row.
+
+**This is the invoice page for every role that can read invoices** — not a bookkeeper variant. One layout, with capability gates deciding which controls appear. A second invoice surface is how two screens start disagreeing about what is owed.
+
+## This ticket is deliberately not split further
+
+The pieces below are one coherent layout change. A new aging strip above the old seven-dropdown filter row is worse than either endpoint; so is a redesigned row under the old header. **The intermediate states are the problem, not the size.** Ship it as one change or not at all.
+
+## Current state (confirmed in code)
+
+`invoices.tsx` is **3,300 lines**. Filter selects run `:1957–2127` — seven `SelectTrigger`s in a row. The table header block `:2255–2271` ends with `Flags`, `Last reminder`, `Reminders`. The row menu holds roughly a dozen `DropdownMenuItem`s between `:1642` and `:1833`. Capability reads are already in place at `:466–489`.
+
+**Everything this needs is already on the wire.** Balance, effective due date, days overdue, aging bucket, payment status, `sentAt`, reminder count, last reminder, and every flag condition are computed and served by tickets B and C. This is a layout ticket. **If a new server field seems necessary, stop and check whether it already exists under another name** — the only genuinely new server work is the aging aggregate in slice 2.
+
+## Decisions (fixed — do not relitigate)
+
+- **The aging strip shows for every role with invoice access.** One page, one layout.
+- **Default view is role-keyed.** The bookkeeper lands on unpaid-and-overdue, biggest balance first, flat. **Every other role keeps today's month-grouped, newest-first default.** Nobody mid-workflow gets their screen reordered.
+- **Common actions inline, the rest in the menu.** View PDF and resync to QuickBooks become inline icons; void, merge, correct and the other structural actions stay in the kebab with their existing confirmations.
+
+## Slice 1 — Header and QuickBooks status
+
+A single header row above everything:
+
+- Title, plus a one-line summary of total outstanding and invoice count **for the current filter**, so it changes as she filters and always describes what is on screen.
+- A **QuickBooks status pill**: connected state and last sync time, with a sync button beside it. When `paymentSyncedAt` is older than 24 hours or null, the pill takes the warning treatment and says balances may be stale. Gate the pill and button on `CAN_MANAGE_QUICKBOOKS` — a role without it sees **neither**, not a disabled control.
+- The pill answers "can I trust this number", so it must be visible without scrolling.
+
+## Slice 2 — Aging strip as the primary filter
+
+Four cards: **Not yet due · 0–29 · 30–59 · 60+**, each with dollar total and invoice count, using the labels and boundaries from `lib/shared/src/invoice-aging.ts`. Do not recompute either.
+
+- **Clicking a card filters the list to that bucket**, with the selected card visibly active. This replaces the aging dropdown entirely — **reuse the existing `?aging=` URL parameter** so Financial Pulse deep links keep working unchanged.
+- Totals respect the other active filters, so the strip and the table always agree.
+- The aggregate is the one new server read. Company-scoped from the caller's company, never summing across companies, `super_admin` passing an explicit company. Subject to the same pricing-visibility rules as the table.
+
+## Slice 3 — Collapse the filter row
+
+- A **search box** for invoice number and customer.
+- One **Filters** button opening a popover with payment status, sent state, reminders, customer, date range, amount range, and flags-only.
+- **Active filters render as removable chips** beneath the toolbar, with Clear all. The chips answer "why am I seeing these rows" — an applied but invisible filter is worse than no filter.
+- Every filter stays in the URL exactly as today. This is a presentation change to controls that already work; **the query parameters and the server-side filtering must not change.**
+
+## Slice 4 — The row
+
+Five columns: **selection · invoice · balance · status · action**.
+
+- **Invoice** — customer name on top, invoice number and due date beneath.
+- **Balance** — amount, with days overdue beneath in the danger treatment when overdue. Falls back to invoice total when no payment sync has run, with the stale indicator alongside.
+- **Status is two lines, deliberately.** Top line is what the money is doing (`Unpaid · 60+`, `Paid`, `Never sent`, `Voided in QuickBooks`). Bottom line is what we have done about it (`Sent Jun 2 · 2 reminders`, `Never reminded`, `No PDF on file`, `Needs a decision`). These are different questions and the Flags column mashes them together. **Every existing flag maps into this shape — none are dropped.**
+- **One primary action per row, naming the action that applies.** Never sent shows **Send**, not Remind. Inside the reminder throttle shows **In 5 days** rather than a dead disabled button. This is #1887's refusal matrix surfaced as the control itself instead of an error after the click. **Read the refusal reason from the server; do not re-derive eligibility in the client**, or the button and the endpoint will drift.
+- **Inline icons** for View PDF and Resync to QuickBooks. **Kebab menu** for void, merge, correct, return to draft, finalize, edit metadata, attach ticket, and audit — all preserved with their current confirmations, moved out of the main row.
+- **A note indicator** when AR notes exist, gated on `CAN_READ_AR_NOTES` and stripped server-side by `ar-note-visibility.ts` — absent from the response for roles without it, not hidden in the client.
+
+## Slice 5 — Selection and batch entry
+
+The selection bar appears when rows are selected, showing count and dollar total, with **Send reminders** and Clear. It is the entry point to #1888's confirmation list, which is **unchanged** — this ticket does not touch the confirmation flow or its skip reasons.
+
+Select-all respects the active filters, so "select what I am looking at" behaves as expected. Gate the bar on `CAN_SEND_INVOICE_EMAIL`.
+
+## Capability gates — the whole point of one page
+
+| Control | Gate |
+|---|---|
+| Page, aging strip, filters, table | `CAN_READ_INVOICES` |
+| Remind, Send, selection bar, batch | `CAN_SEND_INVOICE_EMAIL` |
+| Void, merge, correct, finalize, return to draft, edit metadata, attach ticket, create invoice | `CAN_EDIT_INVOICES` |
+| QuickBooks pill, sync, resync | `CAN_MANAGE_QUICKBOOKS` |
+| Note indicator | `CAN_READ_AR_NOTES` |
+
+Every gate uses `hasCapability` from `lib/shared/src/roles.ts`. **No role-string comparisons anywhere in this page.** A control whose gate is looser than the endpoint behind it is a button that 403s — audit for that explicitly and report what was found.
+
+## Done looks like
+
+- The bookkeeper lands on unpaid-and-overdue work, biggest and oldest first, and it reads as a home screen rather than a raw table.
+- Every other role opens the page and finds their existing default view, with the new layout around it.
+- The aging strip filters on click, and the header total always describes the current view.
+- Filters are one button plus visible chips, not seven dropdowns.
+- Row status answers two questions separately: what the money is doing, and what we have done about it.
+- Every row's primary button names the action that applies, and says why when it cannot fire.
+- QuickBooks sync state is visible without scrolling and warns when balances may be stale.
+- A billing manager sees this same page with void, merge, and correct in the row menu; a bookkeeper sees it without them.
+- No control renders that the server would refuse.
+
+## Tests
+
+- **Role rendering matrix**, asserted on rendered output per role: bookkeeper sees Remind and no edit controls; billing manager sees both; irrigation manager sees neither; no role sees a control its capability does not permit.
+- **No button 403s**: for each role, every action control rendered maps to an endpoint that role's capability permits. Assert the mapping, not a click-through.
+- Clicking an aging card filters the list and updates `?aging=` to the existing value; existing Financial Pulse deep links still land correctly (regression guard).
+- Aging strip totals equal the sum of the filtered rows, and change when other filters are applied.
+- Header total and count match the active filter.
+- The row's primary action reflects the **server's** refusal reason — never-sent renders Send, throttled renders the next-allowed time, QB-voided renders disabled. Assert against a fixtured refusal payload, not client logic.
+- Bookkeeper default is flat and biggest-and-oldest; **billing manager default is month-grouped and newest-first** (regression guard — this must not change).
+- Select-all selects the filtered set, not the loaded page.
+- The note indicator is absent from the API response for a role without `CAN_READ_AR_NOTES`, asserted on the response body.
+- Company isolation on the aging aggregate.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the header, aging strip, filter popover, and row component.
+- [ ] The capability-gate table as implemented, `file:line` per control, plus the audit result for any control whose gate was looser than its endpoint.
+- [ ] Screenshots: the page as a bookkeeper, a billing manager, and an irrigation manager — side by side, showing which controls differ.
+- [ ] Screenshot: a row in each primary-action state — Remind, Send, throttled, disabled.
+- [ ] Test output for the role rendering matrix and the no-button-403s assertion.
+- [ ] Proof that existing `?aging=` deep links are unchanged.
+- [ ] Grep proof of zero role-string comparisons in `invoices.tsx`.
+- [ ] Deployed; commit message matches the diff.
+
+## Out of scope
+
+- Expand-in-place row detail — ticket 3.
+- The nav — ticket 1.
+- Any change to what the server returns beyond the aging aggregate.
+- The #1888 batch confirmation flow — the selection bar opens it; it is not redesigned.
+- Any new refusal, throttle, or template logic — all of it comes from #1887.
+- Moving an aging boundary or changing a Financial Pulse number.
+- The Command Center (`customer-billing.tsx`). Do not touch it.
+- The customer-profile invoice section — it uses `InvoiceList`, a different component, and stays as it is.
+- Mobile layout beyond keeping the page usable at narrow widths.
+
+## A note on scale
+
+`invoices.tsx` is 3,300 lines before this work. Extracting the header, aging strip, filter bar, and row into their own components is expected and welcome — but **that extraction is the mechanism, not an additional goal**. Do not refactor parts of the page this ticket does not touch. If the file is still large afterwards, that is fine.
+
+## Relevant files
+
+- `artifacts/irrigopro/src/pages/invoices.tsx` (filter selects `:1957–2127`, table headers `:2255–2271`, row menu `:1642–1833`, capability reads `:466–489`)
+- `lib/shared/src/invoice-aging.ts` (bucket labels and boundaries — import, never recompute)
+- `lib/shared/src/roles.ts` (every gate)
+- `artifacts/api-server/src/routes/invoice-list-routes.ts` (server-side filtering and sorting; home for the aging aggregate)
+- `artifacts/api-server/src/routes/invoice-reminder-routes.ts` (the refusal matrix the row button reads)
+- `artifacts/api-server/src/routes/ar-note-visibility.ts` (note indicator stripping)
+- `lib/db/src/pricing-fields.ts` (`balance` and `balanceDue` already stripped for field techs)

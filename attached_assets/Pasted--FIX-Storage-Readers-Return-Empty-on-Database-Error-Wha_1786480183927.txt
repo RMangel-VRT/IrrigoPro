@@ -1,0 +1,122 @@
+# FIX — Storage Readers Return Empty on Database Error
+
+**What & Why**
+Five reader methods in `storage.ts` catch a database error, log to `console`, and return an empty value — `[]` or `null`. To every caller that is indistinguishable from a successful query that found nothing.
+
+This is not theoretical. Commit `2485530b` ("Fix connection-pool exhaustion under manager dashboard fan-out") records the symptom in production:
+
+> Storage readers caught the throw and returned `[]`, so users saw silently empty lists.
+
+The pool exhaustion is fixed. **The swallowing is not**, and it will produce the same silent-empty behaviour the next time a query fails for any reason — a timeout, a deadlock, a bad migration, a dropped column.
+
+The consequences are worse than an empty list. One of these five feeds the budget engine and one feeds the QuickBooks token-refresh job.
+
+## Current state (confirmed in code)
+
+`storage.ts` has **304** `async` methods. **Five** of them swallow. The other 299 let the error propagate to the route layer, which turns it into a 500 — a visible failure. So the swallow is the anomaly, not the house style, and fixing it makes these five consistent with everything around them.
+
+| Line | Method | Returns on error | What a caller concludes |
+|---|---|---|---|
+| 3497 | `getQuickBooksIntegration(realmId)` | `null` | No QuickBooks integration exists |
+| 3509 | `getQuickBooksIntegrationByCompanyId(companyId)` | `null` | This company has no QuickBooks connection |
+| 3617 | `getQuickBooksAllIntegrations()` | `[]` | No integrations exist anywhere |
+| 3627 | `getAllActiveQuickBooksIntegrations()` | `[]` | No active integrations exist |
+| 7006 | `getInvoicesByCustomer(customerId, companyId)` | `[]` | This customer has no invoices |
+
+All five log with `console.error` / `console.warn` rather than the structured `logger`, so they do not appear in the same place as every other server error.
+
+## Why each one matters
+
+**`getInvoicesByCustomer` corrupts budget numbers.** It is the invoice leg of `computeCustomerSpend` (`budget-spend.ts:56`) — the single shared spend function created by #1864 that the customer profile, Financial Pulse, and the budget alert service all now call. A swallowed error returns zero invoices, which computes to **zero spend**, which reads as **comfortably under budget**. A crew is told to keep working on a customer who is already over. The alert that should have fired does not, because the threshold was never crossed on paper.
+
+It also feeds the customer-profile invoice list, where a bookkeeper would see a customer with no invoices to chase.
+
+**`getAllActiveQuickBooksIntegrations` can silently kill the QuickBooks connection.** It is passed as the loader to `startQbTokenHealthJob` (`routes.ts:15595`), the daily token-refresh job. If it returns `[]`, the job iterates nothing, refreshes nothing, and reports success. Tokens expire on their own schedule and the integration dies with no warning. The `console.error` scrolls past in a log nobody reads at 3am.
+
+**The dead error handler.** At `routes.ts:15642` the QuickBooks probe route wraps the same call in a `try/catch` that returns a 500 on failure. That catch **can never fire** — the storage method already swallowed the throw. Someone wrote correct error handling on top of a method that made it unreachable, which is the clearest possible evidence that callers expect these to throw.
+
+**The two single-integration lookups invert a security-adjacent decision.** `getQuickBooksIntegrationByCompanyId` has five callers (`routes.ts:6482`, `:7272`, `:7443`, `:8523`, `:9106`). A `null` return means "not connected", which drives skip paths and the reconnect-required email. A database error should not be able to impersonate a disconnected integration.
+
+## The fix
+
+**Let them throw.** Delete the `try/catch` from all five so they behave like the other 299 readers: the error propagates, the route layer returns a 500, and the failure is visible. This is a smaller change than it sounds and needs no new abstraction.
+
+**Do not** replace the swallow with a discriminated result type. That would mean touching every caller and is a much larger change for the same outcome — an error that is visible instead of hidden. If a specific caller genuinely needs to tolerate a failed lookup, it can catch it **at the call site**, where the decision is written down and reviewable, rather than having tolerance baked into the reader for everyone.
+
+**Where a caller must degrade rather than fail, do it explicitly.** The token-health job is the one place a hard throw needs thought: it runs on a timer, and an unhandled rejection in a background job is its own problem. Give it an explicit catch that **logs through `logger` at error level and records that the run was skipped** — it must not treat a failed load as "no integrations to refresh." Skipping loudly is fine; skipping silently is the bug.
+
+**Switch the logging to `logger`.** All five use `console`; the rest of the server uses the structured logger. Even after the catches are removed, any call-site catch added in their place logs through `logger` so the failure lands where every other error does.
+
+## Multi-tenancy (Rule 1)
+
+No change to scoping. `getInvoicesByCustomer` keeps its `companyId` parameter and the `null`-means-unscoped convention exactly as it is — note that #1864 already fixed the alert service to pass `customer.companyId` rather than `null`. This ticket changes only what happens on failure, never what is returned on success.
+
+## Decisions
+
+- **Let the readers throw; match the other 299** (decided) — no new result type, no caller-wide refactor.
+- **Tolerance moves to the call site** (decided) — a caller that can survive a failed lookup says so where it can be reviewed.
+- **The background token job degrades loudly** (decided) — logs at error level and records a skipped run; never treats a failure as an empty set.
+- **Structured logging everywhere** (decided) — `console` out, `logger` in.
+
+## Done looks like
+
+- A database error in any of the five methods produces a **visible failure** — a 500 to the caller, or a logged-and-recorded skip in the background job — never an empty list presented as fact.
+- `computeCustomerSpend` cannot report zero spend because a query failed. A customer over budget can never read as under budget due to an error.
+- The QuickBooks token-refresh job cannot silently refresh nothing.
+- A failed integration lookup can no longer be mistaken for a disconnected integration.
+- The dead `try/catch` at `routes.ts:15642` becomes reachable and does what it was written to do.
+- All five log through `logger`, not `console`.
+
+## Tests
+
+- Each of the five methods, given a database client that throws: the method **throws** rather than returning `[]` or `null`. Five tests, one per method.
+- `computeCustomerSpend` with a failing invoice query **propagates the error** — it must not return `{ invoiced: 0 }`. This is the regression guard that matters most; name it after the budget consequence so nobody deletes it.
+- The budget alert service, given a failing invoice query, does **not** evaluate thresholds against zero spend and does not send an all-clear.
+- The QuickBooks probe route (`routes.ts:15642`) returns **500** when the integration load fails — proving the previously dead catch now fires.
+- The token-health job, given a failing loader, logs at error level and records a skipped run, and does **not** report a successful run over zero integrations.
+- Success paths for all five are byte-identical to today — same rows, same ordering, same null-vs-empty semantics when the query genuinely returns nothing.
+- A genuinely empty result is still an empty result: a customer with no invoices returns `[]` and a company with no integration returns `null`, both without error.
+
+That last one is the important pairing. The fix must separate "nothing found" from "lookup failed" — not make the first one throw.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for each of the five catch blocks removed, and for any call-site catch added in their place.
+- [ ] Test output showing each method throwing on a failing client, and each still returning empty on a genuinely empty result.
+- [ ] The `computeCustomerSpend` regression test output.
+- [ ] Evidence the probe route's 500 path now fires.
+- [ ] Confirmation that the token-health job logs and records a skipped run rather than a successful empty one.
+- [ ] Grep proof that no `console.error` or `console.warn` remains in the five methods or their new call-site handlers.
+- [ ] A re-run of the swallow scan showing zero remaining `catch` blocks in `storage.ts` that return an empty value without rethrowing.
+- [ ] Deployed; commit message matches the diff.
+
+## Out of scope
+
+- Introducing a `Result` / `Either` type or any other error-handling abstraction.
+- Auditing error handling outside `storage.ts`.
+- The connection-pool work itself — already fixed in `2485530b`.
+- Changing what any of the five methods returns on success.
+- Retry logic. A failed query should be visible; whether to retry is a separate question.
+
+## The pattern this belongs to
+
+This is the third production incident of the same shape, and it is worth naming so the next one gets caught in review:
+
+1. `drizzle-kit push` **exited 0 without applying** when the diff contained data-loss statements — a failure that looked like success. Fixed by `push-force` + `pnpm --filter db verify`.
+2. `requireQuickBooksAccess` was a **denylist that called `next()`** for any role it did not name — an unknown role was admitted rather than refused. Fixed in #1886 by converting to an allowlist.
+3. Storage readers **return `[]` on error** — a failure that looks like no data. This ticket.
+
+Each one fails silently in the permissive direction. When reviewing anything that handles an error, a missing value, or an unrecognised input, the question to ask is: *if this goes wrong, does anyone find out?*
+
+## Relevant files
+
+- `artifacts/api-server/src/storage.ts:3497` (`getQuickBooksIntegration`)
+- `artifacts/api-server/src/storage.ts:3509` (`getQuickBooksIntegrationByCompanyId`)
+- `artifacts/api-server/src/storage.ts:3617` (`getQuickBooksAllIntegrations`)
+- `artifacts/api-server/src/storage.ts:3627` (`getAllActiveQuickBooksIntegrations`)
+- `artifacts/api-server/src/storage.ts:7006` (`getInvoicesByCustomer`)
+- `artifacts/api-server/src/budget-spend.ts:56` (`computeCustomerSpend` — the invoice leg)
+- `artifacts/api-server/src/services/budget-alert-service.ts` (threshold evaluation)
+- `artifacts/api-server/src/routes/routes.ts:15595` (token-health job loader)
+- `artifacts/api-server/src/routes/routes.ts:15642` (the currently-dead `try/catch`)
+- `artifacts/api-server/src/routes/routes.ts:6482`, `:7272`, `:7443`, `:8523`, `:9106` (integration lookup callers)

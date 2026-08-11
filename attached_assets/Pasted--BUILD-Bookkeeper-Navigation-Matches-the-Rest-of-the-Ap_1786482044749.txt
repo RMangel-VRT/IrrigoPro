@@ -1,0 +1,74 @@
+# BUILD — Bookkeeper Navigation Matches the Rest of the App
+
+**Ticket 1 of 3** in the invoice page redesign. Independent of the other two — it touches the nav config and the shell, not `invoices.tsx`. Ship it first; it needs nothing and blocks nothing.
+
+Followed by `BUILD - Invoice Page AR-First Layout (2 of 3)` and `BUILD - Expand Invoice Rows In Place (3 of 3)`.
+
+**What & Why**
+The bookkeeper's sidebar is three bare links. Every other role gets grouped sections with icons and count badges. The app looks unfinished the moment she logs in, and it is the first thing she sees.
+
+The nav system already supports everything hers is missing — groups, `defaultOpen`, badges. Her config just does not use them.
+
+## Current state (confirmed in code)
+
+`bookkeeperNav` (`nav-config.ts:187`):
+
+```ts
+export const bookkeeperNav: NavConfig = {
+  items: [
+    { type: "leaf", label: "Invoices", path: "/invoices", icon: Receipt },
+    { type: "leaf", label: "Customers", path: "/customers", icon: Users },
+    { type: "leaf", label: "QuickBooks", path: "/quickbooks", icon: Calculator },
+  ],
+};
+```
+
+`billingManagerNav` (`:118`) for contrast opens with a Dashboard leaf and organises the rest into Billing / Operations / Wet checks / Parts / Settings groups, several carrying a `badgeKey`.
+
+`NavBadgeKey` (`:28`) currently has four values — `partsPendingApproval`, `wetCheckReviews`, `estimatesPendingApproval`, `awaitingApproval` — resolved by `useNavBadges` (`desktop-shell.tsx:108`) and rendered at `:511` (leaf) and `:565` (nested leaf). **There is no invoice or AR badge.**
+
+## Steps
+
+1. **Restructure `bookkeeperNav` to the shape the other configs use.** An **Invoices** group (`defaultOpen: true`), **Customers**, and a **Settings** group holding QuickBooks. Same grouping vocabulary, same icon treatment as `billingManagerNav`. Keep the route set exactly as it is — this is presentation, not access.
+2. **Add an overdue-invoice badge key.** Extend `NavBadgeKey` with a value for overdue invoice count, resolve it in `useNavBadges` (`desktop-shell.tsx:108`) from the AR data the invoice list already serves, and attach it to the Invoices leaf. Use `lib/shared/src/invoice-aging.ts` for what counts as overdue — do not write a second definition.
+3. **Do not fire the badge query for roles that cannot see it.** `useNavBadges` takes an `enabled` flag; gate the new query on `hasCapability(role, CAN_READ_INVOICES)` so a field tech is not polling an endpoint that would refuse them.
+4. **Decide whether other roles get the badge too.** `billingManagerNav` and `companyAdminNav` also carry an Invoices leaf. Adding the same badge there is a small, sensible extension — do it if it is clean, and say so either way. Do not add it to a nav whose role lacks `CAN_READ_INVOICES`.
+5. **Do not add a Dashboard entry.** There is no bookkeeper dashboard page and this ticket does not create one. Her landing stays the invoice list; ticket 2 is what makes that a reasonable home.
+
+## Done looks like
+
+- The bookkeeper's sidebar uses grouped sections with icons, visually indistinguishable in structure from the billing manager's.
+- The Invoices entry carries a live overdue count.
+- The badge query does not run for roles without `CAN_READ_INVOICES`.
+- No route she can reach has changed, and no route she could not reach has opened.
+
+## Tests
+
+- `bookkeeperNav` returns grouped items, not a flat leaf list.
+- The overdue badge renders with a count, and renders nothing at zero rather than a `0`.
+- The badge count matches the overdue definition in `invoice-aging.ts` for the same data.
+- `useNavBadges` does not issue the overdue query for a role without `CAN_READ_INVOICES`.
+- The bookkeeper's reachable route set is unchanged from #1886 (regression guard — this ticket must not alter access).
+- Every other role's nav is unchanged apart from the badge, if step 4 adds it.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the nav restructure, the new badge key, and its resolver.
+- [ ] Screenshot: the bookkeeper's sidebar with the overdue badge, beside the billing manager's for comparison.
+- [ ] The step 4 decision, stated either way.
+- [ ] Proof the badge query is gated — network capture or the `enabled` expression.
+- [ ] Test output for the unchanged-route-set regression guard.
+
+## Out of scope
+
+- Any change to `invoices.tsx` — tickets 2 and 3.
+- Any change to which routes a bookkeeper can reach.
+- A bookkeeper dashboard page.
+- Restructuring any other role's nav beyond optionally adding the badge.
+
+## Relevant files
+
+- `artifacts/irrigopro/src/components/layout/nav-config.ts` (`NavBadgeKey` `:28`, `billingManagerNav` `:118` as the shape to match, `bookkeeperNav` `:187`)
+- `artifacts/irrigopro/src/components/layout/desktop-shell.tsx` (`useNavBadges` `:108`, badge rendering `:511` and `:565`)
+- `lib/shared/src/invoice-aging.ts` (overdue definition — import it)
+- `lib/shared/src/roles.ts` (`CAN_READ_INVOICES` for the query gate)
