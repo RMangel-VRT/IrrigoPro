@@ -390,7 +390,11 @@ import {
 } from "./qb-invoice-ops";
 import { registerInvoiceMarkSentRoutes } from "./invoice-mark-sent-routes";
 import { registerInvoiceListRoutes } from "./invoice-list-routes";
-import { registerInvoiceReminderRoutes } from "./invoice-reminder-routes";
+import {
+  createReminderCore,
+  registerInvoiceReminderRoutes,
+} from "./invoice-reminder-routes";
+import { registerInvoiceReminderBatchRoutes } from "./invoice-reminder-batch-routes";
 import { registerInvoiceCorrectionRoutes } from "./invoice-correction-routes";
 import { registerInvoiceEditabilityRoutes } from "./invoice-editability-routes";
 // Task #1890 — computeEffectiveDueDate / isInvoiceOverdue were imported here
@@ -7477,7 +7481,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerInvoiceMarkSentRoutes(app, { requireAuthentication, requireInvoiceSend, requireInvoiceWrite });
   // Task #1887 — payment reminders. Same CAN_SEND_INVOICE_EMAIL capability as
   // the invoice PDF send route; nothing here runs on a schedule.
-  registerInvoiceReminderRoutes(app, { requireAuthentication, requireInvoiceSend });
+  // One core, shared by the single send and the batch, so there is literally
+  // one send path in the process — the batch cannot drift from the refusals,
+  // the throttle or the recording the single send enforces.
+  const reminderCore = createReminderCore();
+  registerInvoiceReminderRoutes(app, {
+    requireAuthentication,
+    requireInvoiceSend,
+    _core: reminderCore,
+  });
+  // `/api/invoices/reminders/{preview,batch}` cannot be swallowed by
+  // `/api/invoices/:id/reminders`: that pattern requires a literal final
+  // "reminders" segment, and neither of these has one.
+  registerInvoiceReminderBatchRoutes(app, {
+    requireAuthentication,
+    requireInvoiceSend,
+    _core: reminderCore,
+  });
   // Task #1710 — Invoice Correction & Reissue (Guided Dispute Flow).
   // syncInvoiceToQb: inject the local closure so the qb-sync endpoint can
   // call updateQbInvoiceInPlace without duplicating QB plumbing here.

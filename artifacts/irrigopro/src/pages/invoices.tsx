@@ -71,6 +71,7 @@ import {
   RotateCcw,
   Trash2,
   CheckSquare,
+  Send,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -85,6 +86,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { InvoicePdfPreviewModal } from "@/components/billing/invoice-pdf-preview-modal";
 import { InvoiceAuditModal } from "@/components/billing/invoice-audit-modal";
+import { BatchReminderDialog } from "@/components/billing/batch-reminder-dialog";
 import { FinancialPulseWidget } from "@/components/financial-pulse/financial-pulse-widget";
 import { exportSingleInvoiceCsv } from "@/lib/invoice-csv";
 import { safeGet } from "@/utils/safeStorage";
@@ -833,7 +835,11 @@ export default function InvoicesPage() {
   // Task #1425 — invoice merge selection. `selectedIds` holds the invoices
   // ticked for merging; `survivingId` is the chosen survivor in the confirm
   // dialog; `mergeConfirmOpen` toggles that dialog.
+  // Task #1888 — the same selection now also feeds the batch reminder send, so
+  // it is no longer merge-specific: a bookkeeper who cannot merge anything
+  // still gets the checkboxes.
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [batchReminderOpen, setBatchReminderOpen] = useState(false);
   const [mergeConfirmOpen, setMergeConfirmOpen] = useState(false);
   const [survivingId, setSurvivingId] = useState<number | null>(null);
   // Task #1443 — invoice queued for a confirmed QuickBooks re-sync (it already
@@ -1436,6 +1442,13 @@ export default function InvoicesPage() {
   // Task #1425 — an invoice is mergeable only when it isn't already cancelled.
   const isMergeable = (inv: Invoice) => inv.status !== "cancelled";
 
+  // Task #1888 — the row checkbox is shared between merge and batch reminders.
+  // Both are gated on their own capability through the shared registry; the
+  // checkbox appears for either one, and the action bar shows only the
+  // actions this user actually holds.
+  const canBatchRemind = canMarkSent;
+  const canSelectRows = canMerge || canBatchRemind;
+
   const selectedInvoices = useMemo(
     () => activeFilteredInvoices.filter((inv) => selectedIds.has(inv.id)),
     [activeFilteredInvoices, selectedIds],
@@ -1477,6 +1490,27 @@ export default function InvoicesPage() {
   };
 
   const clearSelection = () => setSelectedIds(new Set());
+
+  // Task #1888 — "select what I am looking at". The visible set is whatever
+  // the active server-side filters left on screen, so this can never tick a
+  // row the user cannot see.
+  const selectableVisibleIds = useMemo(
+    () => activeFilteredInvoices.filter(isMergeable).map((inv) => inv.id),
+    [activeFilteredInvoices],
+  );
+  const allVisibleSelected =
+    selectableVisibleIds.length > 0 &&
+    selectableVisibleIds.every((id) => selectedIds.has(id));
+
+  const toggleSelectAllVisible = () => {
+    setSelectedIds(allVisibleSelected ? new Set() : new Set(selectableVisibleIds));
+  };
+
+  // Changing the filters changes what "selected" means, and a selection that
+  // outlives its filter is a selection nobody has actually looked at. Drop it.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [arParams, monthFilter]);
 
   const openMergeConfirm = () => {
     if (!mergeValidation.ok) return;
@@ -2160,7 +2194,18 @@ export default function InvoicesPage() {
                   <Table>
                     <TableHeader>
                       <TableRow className="bg-gray-50 hover:bg-gray-50">
-                        {canMerge && <TableHead className="w-8" />}
+                        {canSelectRows && (
+                          <TableHead className="w-8">
+                            {/* Selects exactly what the active filters are
+                                showing — "select what I am looking at". */}
+                            <Checkbox
+                              checked={allVisibleSelected}
+                              onCheckedChange={() => toggleSelectAllVisible()}
+                              aria-label="Select every invoice in this list"
+                              data-testid="checkbox-select-all-invoices"
+                            />
+                          </TableHead>
+                        )}
                         <SortableHeader sortKey="customer" label="Customer" sort={sort} onSort={toggleSort} />
                         <SortableHeader sortKey="invoiceNumber" label="Invoice #" sort={sort} onSort={toggleSort} />
                         <SortableHeader sortKey="status" label="Status" sort={sort} onSort={toggleSort} />
@@ -2187,14 +2232,14 @@ export default function InvoicesPage() {
                         return (
                         <>
                         <TableRow key={invoice.id} className="hover:bg-gray-50">
-                          {canMerge && (
+                          {canSelectRows && (
                             <TableCell className="w-8">
                               {isMergeable(invoice) && (
                                 <Checkbox
                                   checked={selectedIds.has(invoice.id)}
                                   onCheckedChange={() => toggleSelected(invoice.id)}
-                                  aria-label={`Select invoice ${invoice.invoiceNumber} for merge`}
-                                  data-testid={`checkbox-merge-invoice-${invoice.id}`}
+                                  aria-label={`Select invoice ${invoice.invoiceNumber}`}
+                                  data-testid={`checkbox-select-invoice-${invoice.id}`}
                                 />
                               )}
                             </TableCell>
@@ -2280,7 +2325,7 @@ export default function InvoicesPage() {
                         {/* Version history rows — shown when the user expands the chain */}
                         {isExpanded && history.map((prev) => (
                           <TableRow key={prev.id} className="bg-amber-50 text-xs text-gray-400 italic">
-                            {canMerge && <TableCell />}
+                            {canSelectRows && <TableCell />}
                             <TableCell className="whitespace-nowrap max-w-[200px] truncate pl-8">
                               {prev.customerName}
                             </TableCell>
@@ -2324,12 +2369,12 @@ export default function InvoicesPage() {
                       <CardContent className="p-4">
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex items-center gap-2 min-w-0">
-                            {canMerge && isMergeable(invoice) && (
+                            {canSelectRows && isMergeable(invoice) && (
                               <Checkbox
                                 checked={selectedIds.has(invoice.id)}
                                 onCheckedChange={() => toggleSelected(invoice.id)}
-                                aria-label={`Select invoice ${invoice.invoiceNumber} for merge`}
-                                data-testid={`checkbox-merge-invoice-mobile-${invoice.id}`}
+                                aria-label={`Select invoice ${invoice.invoiceNumber}`}
+                                data-testid={`checkbox-select-invoice-mobile-${invoice.id}`}
                               />
                             )}
                             <div className="min-w-0">
@@ -2546,8 +2591,9 @@ export default function InvoicesPage() {
         />
       )}
 
-      {/* Task #1425 — merge selection action bar */}
-      {canMerge && selectedIds.size > 0 && (
+      {/* Task #1425 — selection action bar (Task #1888: shared with the batch
+          reminder send, so it shows whichever actions this user holds) */}
+      {canSelectRows && selectedIds.size > 0 && (
         <div className="fixed inset-x-0 bottom-0 z-40 border-t border-gray-200 bg-white shadow-lg">
           <div className="max-w-6xl mx-auto px-4 lg:px-6 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
@@ -2556,30 +2602,57 @@ export default function InvoicesPage() {
                 size="sm"
                 className="text-gray-500"
                 onClick={clearSelection}
-                data-testid="button-clear-merge-selection"
+                data-testid="button-clear-selection"
               >
                 <X className="w-4 h-4 mr-1" />
                 Clear
               </Button>
               <div className="min-w-0">
-                <p className="text-sm font-medium text-gray-900">
+                <p className="text-sm font-medium text-gray-900" data-testid="text-selection-count">
                   {selectedIds.size} selected · {formatCurrency(selectedTotal)}
                 </p>
-                {!mergeValidation.ok && (
+                {canMerge && !mergeValidation.ok && (
                   <p className="text-xs text-amber-600 truncate">{mergeValidation.reason}</p>
                 )}
               </div>
             </div>
-            <Button
-              onClick={openMergeConfirm}
-              disabled={!mergeValidation.ok}
-              data-testid="button-merge-invoices"
-            >
-              <GitMerge className="w-4 h-4 mr-2" />
-              Merge invoices
-            </Button>
+            <div className="flex items-center gap-2">
+              {/* Task #1888 — nothing is sent from this button. It opens the
+                  confirmation list, which is where the send actually lives. */}
+              {canBatchRemind && (
+                <Button
+                  variant={canMerge ? "outline" : "default"}
+                  onClick={() => setBatchReminderOpen(true)}
+                  data-testid="button-batch-remind"
+                >
+                  <Send className="w-4 h-4 mr-2" />
+                  Send reminders
+                </Button>
+              )}
+              {canMerge && (
+                <Button
+                  onClick={openMergeConfirm}
+                  disabled={!mergeValidation.ok}
+                  data-testid="button-merge-invoices"
+                >
+                  <GitMerge className="w-4 h-4 mr-2" />
+                  Merge invoices
+                </Button>
+              )}
+            </div>
           </div>
         </div>
+      )}
+
+      {/* Task #1888 — batch reminders. Opening this sends nothing: it previews
+          every selected invoice and waits for a human to confirm. */}
+      {canBatchRemind && (
+        <BatchReminderDialog
+          open={batchReminderOpen}
+          onOpenChange={setBatchReminderOpen}
+          invoiceIds={Array.from(selectedIds)}
+          onSent={clearSelection}
+        />
       )}
 
       {/* Task #1425 — merge confirmation dialog */}

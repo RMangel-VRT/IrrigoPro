@@ -548,12 +548,21 @@ describe("bookkeeper controls", () => {
     expect(screen.getByTestId("button-mark-sent-invoice-1")).toBeTruthy();
   });
 
-  it("offers her no merge checkbox on the row", async () => {
+  // Task #1888 opened the row checkbox to CAN_SEND_INVOICE_EMAIL, so it is no
+  // longer merge-specific. What must stay true is that selecting rows never
+  // hands her the merge action itself.
+  it("offers her the row checkbox but never the merge action", async () => {
     roleRef.current = "bookkeeper";
     rowsForResponse = [overdueInvoice()];
     renderInvoices();
     await waitFor(() => expect(screen.getByTestId("ar-balance-1")).toBeTruthy());
-    expect(screen.queryByTestId("checkbox-merge-invoice-1")).toBeNull();
+
+    const checkbox = firstByTestId("checkbox-select-invoice-1");
+    expect(checkbox).toBeTruthy();
+    fireEvent.click(checkbox);
+
+    await waitFor(() => expect(screen.getByTestId("button-batch-remind")).toBeTruthy());
+    expect(screen.queryByTestId("button-merge-invoices")).toBeNull();
   });
 
   it("still offers a billing manager the authoring controls", async () => {
