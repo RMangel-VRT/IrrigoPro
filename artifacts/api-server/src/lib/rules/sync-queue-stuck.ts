@@ -1,4 +1,4 @@
-import type { Rule, RuleEvalResult } from "./types";
+import { runbook, type Rule, type RuleEvalResult } from "./types";
 
 // Task #1857: field_work_sessions table was dropped as part of retiring the
 // field-portal prototype. This rule previously counted stuck offline sync
@@ -7,6 +7,7 @@ import type { Rule, RuleEvalResult } from "./types";
 export const syncQueueStuckRule: Rule = {
   id: "sync_queue_stuck",
   severity: "P3",
+  runbookUrl: runbook("sync_queue_stuck"),
   async evaluate(): Promise<RuleEvalResult> {
     return {
       firing: false,

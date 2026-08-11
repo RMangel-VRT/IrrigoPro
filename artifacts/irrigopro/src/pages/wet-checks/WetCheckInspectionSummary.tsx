@@ -17,9 +17,9 @@ import { PropertyContextHeader } from "./PropertyContextHeader";
 import { ZoneStatusGrid, type ZoneRecordWithFindings } from "./ZoneStatusGrid";
 import type {
   WetCheckWithDetails,
-  PropertyController,
   WetCheckFinding,
 } from "@workspace/db/schema";
+import type { CustomerController } from "@/lib/controller-types";
 
 // ─── Single finding row ────────────────────────────────────────────────────────
 
@@ -70,7 +70,7 @@ function FindingsSummary({
   controllers,
 }: {
   zoneRecords: ZoneRecordWithFindings[];
-  controllers: PropertyController[];
+  controllers: CustomerController[];
 }) {
   const allFindings = zoneRecords.flatMap((z) => asArray(z.findings));
   // Use techDisposition (the field's self-reported intent) as the primary signal,
@@ -303,7 +303,7 @@ export function WetCheckInspectionSummary({ id }: { id: number }) {
     enabled: !isNaN(id) && id > 0,
   });
 
-  const { data: controllers = [] } = useArrayQuery<PropertyController>({
+  const { data: controllers = [] } = useArrayQuery<CustomerController>({
     queryKey: ["/api/properties", wc?.customerId, "controllers"],
     queryFn: () => cachedApiRequest(`/api/properties/${wc!.customerId}/controllers`),
     enabled: !!wc?.customerId,
@@ -363,13 +363,13 @@ export function WetCheckInspectionSummary({ id }: { id: number }) {
   // Zone status counts relative to the full controller definition so that
   // zones with no record (never visited) count as not_checked.
   let checkedOk = 0, checkedIssues = 0, notApplicable = 0;
-  const totalZoneCount = controllers.reduce((n, c) => n + c.zoneCount, 0);
+  const totalZoneCount = controllers.reduce((n, c) => n + (c.zoneCount ?? 0), 0);
 
   const recordMap = new Map(
     wcZoneRecords.map((r) => [`${r.controllerLetter}-${r.zoneNumber}`, r]),
   );
   for (const ctrl of controllers) {
-    for (let z = 1; z <= ctrl.zoneCount; z++) {
+    for (let z = 1; z <= (ctrl.zoneCount ?? 0); z++) {
       const r = recordMap.get(`${ctrl.controllerLetter}-${z}`);
       if (!r || r.status === "not_checked") continue;
       if (r.status === "checked_ok") checkedOk++;

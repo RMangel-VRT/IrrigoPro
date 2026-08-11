@@ -44,7 +44,6 @@ function makePayload(
       laborRate: "45",
       laborMode: "flat",
       totalLaborHours: 0,
-      companyId: 1,
       status: "pending_approval",
       internalStatus: "pending_approval",
       ...overrides,

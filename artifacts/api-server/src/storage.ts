@@ -8903,6 +8903,7 @@ export class DatabaseStorage implements IStorage {
       // Fall back to property_controllers only when no irrigation profile exists.
       const branchKey = wc.branchName ?? "";
       const irrigCtrls = await tx.select({
+        id: irrigationControllers.id,
         letter: irrigationControllers.letter,
         totalZones: irrigationControllers.totalZones,
       }).from(irrigationControllers).where(and(
@@ -8915,9 +8916,10 @@ export class DatabaseStorage implements IStorage {
       // Task #1857: irrigation_controllers is the sole source of truth.
       // No property_controllers fallback.
       type CtrlEntry = { id: number; letter: string; zoneCount: number };
-      const ctrlEntries: CtrlEntry[] = irrigCtrls
-        .filter(c => c.letter != null && c.id != null)
-        .map(c => ({ id: c.id as number, letter: c.letter as string, zoneCount: c.totalZones ?? 0 }));
+      const ctrlEntries: CtrlEntry[] = irrigCtrls.flatMap(c =>
+        c.letter == null
+          ? []
+          : [{ id: c.id, letter: c.letter, zoneCount: c.totalZones ?? 0 }]);
 
       const existing = await tx.select({
         letter: wetCheckZoneRecords.controllerLetter,

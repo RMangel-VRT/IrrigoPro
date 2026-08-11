@@ -259,8 +259,9 @@ async function main(): Promise<void> {
         const toDelete: number[] = [];
         for (const zone of notCheckedZones) {
           const maxZones = zoneCountByLetter.get(zone.controllerLetter);
-          if (maxZones === undefined) {
-            // Controller not found in property_controllers — skip to be safe.
+          if (maxZones == null) {
+            // Controller not found, or its zone count has never been
+            // recorded (total_zones is nullable) — skip to be safe.
             continue;
           }
           if (zone.zoneNumber <= maxZones) {

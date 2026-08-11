@@ -25,10 +25,8 @@ import {
   hasPendingMutationsForWetCheck,
 } from "@/lib/offline/api";
 import { isOfflineQueueEnabled } from "@/lib/offline/engine";
-import type {
-  WetCheckWithDetails,
-  PropertyController,
-} from "@workspace/db/schema";
+import type { WetCheckWithDetails } from "@workspace/db/schema";
+import type { CustomerController } from "@/lib/controller-types";
 import { buildWetCheckCsv, downloadCsv, wetCheckCsvFilename } from "@/lib/wet-check-csv";
 import { PropertyContextHeader } from "./PropertyContextHeader";
 import { PhotoCaptureButton } from "./PhotoCaptureButton";
@@ -118,7 +116,7 @@ export function WetCheckDetail({ id, clientId: routeClientId }: { id?: number; c
     },
   });
 
-  const { data: controllers = [] } = useArrayQuery<PropertyController>({
+  const { data: controllers = [] } = useArrayQuery<CustomerController>({
     queryKey: ["/api/properties", wc?.customerId, "controllers"],
     queryFn: () => cachedApiRequest(`/api/properties/${wc!.customerId}/controllers`),
     enabled: !!wc?.customerId,
@@ -337,7 +335,7 @@ export function WetCheckDetail({ id, clientId: routeClientId }: { id?: number; c
 
     // Flat ordered zone list across all controllers for prev/next navigation
     const allZones = controllers.flatMap(c =>
-      Array.from({ length: c.zoneCount }, (_, i) => ({
+      Array.from({ length: c.zoneCount ?? 0 }, (_, i) => ({
         letter: c.controllerLetter,
         zone: i + 1,
       })),
@@ -865,7 +863,7 @@ export function WetCheckDetail({ id, clientId: routeClientId }: { id?: number; c
             return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200">In Progress</span>;
           return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-600 border border-gray-300">{s?.replace(/_/g, " ") ?? "—"}</span>;
         })();
-        const totalZones = controllers.reduce((n, c) => n + c.zoneCount, 0);
+        const totalZones = controllers.reduce((n, c) => n + (c.zoneCount ?? 0), 0);
         const workDate = wc.startedAt
           ? new Date(wc.startedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
           : null;
@@ -958,7 +956,7 @@ export function WetCheckDetail({ id, clientId: routeClientId }: { id?: number; c
             if (zr.markedCompleteAt) markedComplete++;
           }
         }
-        const totalZones = controllers.reduce((n, c) => n + c.zoneCount, 0);
+        const totalZones = controllers.reduce((n, c) => n + (c.zoneCount ?? 0), 0);
         const gray = Math.max(0, totalZones - ok - issues);
         const total = ok + issues + gray;
         const pct = (n: number) => (total > 0 ? Math.round((n / total) * 100) : 0);
@@ -1047,7 +1045,7 @@ export function WetCheckDetail({ id, clientId: routeClientId }: { id?: number; c
           const recs = zonesByLetter(c.controllerLetter);
           const ok = recs.filter(r => r.status === "checked_ok").length;
           const issues = recs.filter(r => r.status === "checked_with_issues").length;
-          const gray = Math.max(0, c.zoneCount - ok - issues);
+          const gray = Math.max(0, (c.zoneCount ?? 0) - ok - issues);
           const total = ok + issues + gray;
           const photoCount = recs.reduce((n, r) => n + countZonePhotos(wc, r), 0);
           const findingCount = recs.reduce((n, r) => n + asArray(r.findings).length, 0);
@@ -1085,7 +1083,7 @@ export function WetCheckDetail({ id, clientId: routeClientId }: { id?: number; c
                 <div className="flex items-start justify-between gap-2">
                   <div>
                     <div className="font-semibold text-gray-900">Controller {c.controllerLetter}</div>
-                    <div className="text-xs text-gray-500 mt-0.5">{c.zoneCount} zones</div>
+                    <div className="text-xs text-gray-500 mt-0.5">{c.zoneCount ?? 0} zones</div>
                   </div>
                   {ctrlStatusPill}
                 </div>

@@ -62,11 +62,11 @@ import {
 } from "lucide-react";
 import type {
   WetCheckWithDetails,
-  PropertyController,
   WetCheckFinding,
   WetCheckZoneRecord,
   Customer,
 } from "@workspace/db/schema";
+import type { CustomerController } from "@/lib/controller-types";
 import { ZoneStatusGrid, type ZoneRecordWithFindings } from "./ZoneStatusGrid";
 import { safeGet } from "@/utils/safeStorage";
 
@@ -329,7 +329,7 @@ function FindingsSummary({
   wetCheckId,
 }: {
   zoneRecords: ZoneRecordWithFindings[];
-  controllers: PropertyController[];
+  controllers: CustomerController[];
   wetCheckId: number;
 }) {
   const allFindings = zoneRecords.flatMap((z) => asArray(z.findings));
@@ -760,7 +760,7 @@ function ManagerWetCheckDetailView({ id }: { id: number }) {
     enabled: !isNaN(id) && id > 0,
   });
 
-  const { data: controllers = [] } = useArrayQuery<PropertyController>({
+  const { data: controllers = [] } = useArrayQuery<CustomerController>({
     queryKey: ["/api/properties", wc?.customerId, "controllers"],
     queryFn: () => cachedApiRequest(`/api/properties/${wc!.customerId}/controllers`),
     enabled: !!wc?.customerId,
@@ -802,13 +802,13 @@ function ManagerWetCheckDetailView({ id }: { id: number }) {
   const laborRate = parseFloat(String(customer?.laborRate ?? "45")) || 45;
 
   // Zone status computation
-  const totalZoneCount = controllers.reduce((n, c) => n + c.zoneCount, 0);
+  const totalZoneCount = controllers.reduce((n, c) => n + (c.zoneCount ?? 0), 0);
   const recordMap = new Map(
     wcZoneRecords.map((r) => [`${r.controllerLetter}-${r.zoneNumber}`, r]),
   );
   let checkedOk = 0, checkedIssues = 0, notApplicable = 0;
   for (const ctrl of controllers) {
-    for (let z = 1; z <= ctrl.zoneCount; z++) {
+    for (let z = 1; z <= (ctrl.zoneCount ?? 0); z++) {
       const r = recordMap.get(`${ctrl.controllerLetter}-${z}`);
       if (!r || r.status === "not_checked") continue;
       if (r.status === "checked_ok") checkedOk++;

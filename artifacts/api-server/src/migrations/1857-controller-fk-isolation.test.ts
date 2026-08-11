@@ -38,7 +38,6 @@ before(async () => {
   // don't pollute or depend on any existing seed data.
   const [company] = await db.insert(companies).values({
     name: `_test_1857_${Date.now()}`,
-    slug: `_test_1857_${Date.now()}`,
     createdAt: new Date(),
     updatedAt: new Date(),
   }).returning();
@@ -48,8 +47,6 @@ before(async () => {
     companyId: testCompanyId,
     name: "_test_customer_1857",
     email: `_test_1857_${Date.now()}@example.test`,
-    createdAt: new Date(),
-    updatedAt: new Date(),
   }).returning();
   testCustomerId = customer.id;
 });
@@ -138,7 +135,6 @@ describe("Test 22 — Company isolation", () => {
     // Company 2 owns a controller with letter "B".
     const [company2] = await db.insert(companies).values({
       name: `_test_1857_co2_${Date.now()}`,
-      slug: `_test_1857_co2_${Date.now()}`,
       createdAt: new Date(),
       updatedAt: new Date(),
     }).returning();
@@ -147,8 +143,6 @@ describe("Test 22 — Company isolation", () => {
       companyId: company2.id,
       name: "_test_customer_1857_co2",
       email: `_test_1857_co2_${Date.now()}@example.test`,
-      createdAt: new Date(),
-      updatedAt: new Date(),
     }).returning();
 
     const [ctrlCo2] = await db.insert(irrigationControllers).values({

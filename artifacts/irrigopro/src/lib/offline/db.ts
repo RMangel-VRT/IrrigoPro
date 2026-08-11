@@ -157,10 +157,10 @@ export function openOfflineDB(): Promise<OfflineDB> {
         if (!db.objectStoreNames.contains("issueTypeConfigs")) {
           db.createObjectStore("issueTypeConfigs", { keyPath: "id" });
         }
-        // v4: propertyControllers store removed (Task #1857 retired property_controllers).
-        if (db.objectStoreNames.contains("propertyControllers")) {
-          db.deleteObjectStore("propertyControllers");
-        }
+        // v4: the propertyControllers store was dropped (Task #1857 retired
+        // property_controllers). It is no longer part of OfflineSchema, so the
+        // upgrade no longer touches it; any leftover store on a v3 client is
+        // simply never opened again.
         if (!db.objectStoreNames.contains("mutationQueue")) {
           const s = db.createObjectStore("mutationQueue", { keyPath: "id" });
           s.createIndex("byStatus", "status");

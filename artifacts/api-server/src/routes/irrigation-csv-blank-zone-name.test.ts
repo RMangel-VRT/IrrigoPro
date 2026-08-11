@@ -17,6 +17,7 @@ import type { AddressInfo } from "node:net";
 
 import { storage } from "../storage";
 import { resolveZoneName } from "../storage";
+import type { IrrigationProfileZone } from "@workspace/db/schema";
 import { registerIrrigationProfileRoutes } from "./irrigation-profile-routes";
 
 // ── Test server factory ────────────────────────────────────────────────────────
@@ -197,7 +198,10 @@ describe("CSV import — blank Zone Name: all-blank into new controller", () => 
     const profile = await storage.getIrrigationController(companyId, ctrl!.id);
     assert.ok(profile, "profile should exist");
     for (let i = 1; i <= 3; i++) {
-      const z = profile!.zones.find((z: any) => z.zoneNumber === i);
+      // Explicit annotation: inside a loop, narrowing `z` with assert.ok
+      // feeds back into the inferred type of its own initializer (TS7022).
+      const z: IrrigationProfileZone | undefined =
+        profile!.zones.find((zone) => zone.zoneNumber === i);
       assert.ok(z, `Zone ${i} should exist`);
       assert.equal(z.name, `Zone ${i}`, `Zone ${i} should be named 'Zone ${i}'`);
     }

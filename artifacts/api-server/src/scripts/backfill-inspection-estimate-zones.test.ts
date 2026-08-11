@@ -165,7 +165,8 @@ describe("isInspectionOriginEstimate", () => {
     return {
       id: 1, estimateId: 1, description: "", partId: null, partName: "Part",
       partPrice: "0.00", quantity: 1, laborHours: "0.00", totalPrice: "0.00",
-      sortOrder: 0, controllerLetter: null, zoneNumber: null, issueType: null,
+      sortOrder: 0, controllerId: null, controllerLetter: null, zoneNumber: null,
+      issueType: null,
       ...overrides,
     };
   }
@@ -554,7 +555,7 @@ describe("post-backfill isInspectionOriginEstimate", () => {
     ]);
     const { items } = buildInspectionEstimateItems(findings, zones);
     const fakeItems = items.map((d, i) => ({
-      id: i + 1, estimateId: 99, ...d,
+      id: i + 1, estimateId: 99, controllerId: null, ...d,
     }));
     assert.equal(isInspectionOriginEstimate(fakeItems), true);
   });
@@ -565,7 +566,8 @@ describe("post-backfill isInspectionOriginEstimate", () => {
         id: 1, estimateId: 1, description: "Repair pipe", partId: null,
         partName: "PVC Pipe", partPrice: "5.00", quantity: 2,
         laborHours: "0.00", totalPrice: "10.00", sortOrder: 0,
-        controllerLetter: null, zoneNumber: null, issueType: null,
+        controllerId: null, controllerLetter: null, zoneNumber: null,
+        issueType: null,
       },
     ];
     assert.equal(isInspectionOriginEstimate(fakeItems), false);

@@ -2793,9 +2793,9 @@ export function registerEstimateRoutes(
       try {
         await recordAuditEvent(req, {
           action: "estimate.new_link_requested",
-          targetId: estimate.id,
+          targetId: String(estimate.id),
           targetType: "estimate",
-          companyId: estimate.companyId ?? null,
+          actorCompanyId: estimate.companyId ?? null,
           summary: `Customer ${estimate.customerName} requested a new approval link for estimate ${formatEstimateNumber(estimate.estimateNumber)}`,
           details: { estimateNumber: estimate.estimateNumber, customerEmail: estimate.customerEmail },
         });

@@ -26,7 +26,8 @@ import { LocationFields } from "@/components/location/location-fields";
 import { CustomerLocationPicker } from "@/components/location/customer-location-picker";
 import { useCustomerBoundary } from "@/hooks/use-customer-boundary";
 import { MapPin, Cpu, Droplets, Briefcase } from "lucide-react";
-import type { Customer, PropertyController } from "@workspace/db/schema";
+import type { Customer } from "@workspace/db/schema";
+import type { CustomerController } from "@/lib/controller-types";
 
 export interface WorkLocation {
   lat: number;
@@ -119,7 +120,7 @@ export function CustomerLocationStep({
     }
   }, [customer?.id, value.useDifferentAddress, form]);
 
-  const { data: controllers = [], isLoading: controllersLoading } = useArrayQuery<PropertyController>({
+  const { data: controllers = [], isLoading: controllersLoading } = useArrayQuery<CustomerController>({
     queryKey: ["/api/properties", customer?.id, "controllers"],
     enabled: !!customer,
   });

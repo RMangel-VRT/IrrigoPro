@@ -4,7 +4,8 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import type { PropertyController, WetCheckZoneRecord } from "@workspace/db/schema";
+import type { WetCheckZoneRecord } from "@workspace/db/schema";
+import type { CustomerController } from "@/lib/controller-types";
 
 export function ControllerHeader({
   controller,
@@ -14,7 +15,7 @@ export function ControllerHeader({
   customerName,
   propertyAddress,
 }: {
-  controller: PropertyController | undefined;
+  controller: CustomerController | undefined;
   customerId: number;
   readOnly: boolean;
   zoneRecords?: WetCheckZoneRecord[];

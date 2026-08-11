@@ -2,7 +2,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Button } from "@/components/ui/button";
 import { AlertTriangle } from "lucide-react";
 import { ZoneStatusGrid, type ZoneRecordWithFindings } from "./ZoneStatusGrid";
-import type { PropertyController } from "@workspace/db/schema";
+import type { CustomerController } from "@/lib/controller-types";
 
 export function ZoneOverviewSheet({
   open,
@@ -16,7 +16,7 @@ export function ZoneOverviewSheet({
 }: {
   open: boolean;
   onClose: () => void;
-  controllers: PropertyController[];
+  controllers: CustomerController[];
   zoneRecords: ZoneRecordWithFindings[];
   activeLetter: string;
   activeZone: number;
@@ -33,7 +33,7 @@ export function ZoneOverviewSheet({
   let uncheckedCount = 0;
 
   for (const c of controllers) {
-    for (let z = 1; z <= c.zoneCount; z++) {
+    for (let z = 1; z <= (c.zoneCount ?? 0); z++) {
       const r = recordMap.get(`${c.controllerLetter}-${z}`);
       if (!r || r.status === "not_checked") uncheckedCount++;
       else if (r.status === "checked_ok") okCount++;

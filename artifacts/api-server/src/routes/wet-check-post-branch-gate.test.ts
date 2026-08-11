@@ -103,15 +103,18 @@ function mountHandler(
   cid = 1,
 ) {
   const noopAuth: RequestHandler = (req, _res, next) => {
-    (req as Record<string, unknown>).authenticatedUserId = 7;
-    (req as Record<string, unknown>).authenticatedUserRole = "field_tech";
-    (req as Record<string, unknown>).authenticatedUserCompanyId = cid;
-    (req as Record<string, unknown>).log = { error: () => {}, info: () => {} };
+    req.authenticatedUserId = 7;
+    req.authenticatedUserRole = "field_tech";
+    req.authenticatedUserCompanyId = cid;
     next();
   };
 
   app.post("/api/wet-checks", noopAuth, async (req, res) => {
-    const companyCid: number = (req as Record<string, number>).authenticatedUserCompanyId;
+    const companyCid = req.authenticatedUserCompanyId;
+    if (companyCid == null) {
+      res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
 
     // ── Real schema parse (same object used by routes.ts) ──────────────────
     const parsed = wetCheckCreateBody.safeParse(req.body ?? {});

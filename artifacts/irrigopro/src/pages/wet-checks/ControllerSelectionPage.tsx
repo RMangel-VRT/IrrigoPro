@@ -20,7 +20,8 @@ import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import type { Customer, PropertyController, WetCheckWithDetails, WetCheck } from "@workspace/db/schema";
+import type { Customer, WetCheckWithDetails, WetCheck } from "@workspace/db/schema";
+import type { CustomerController } from "@/lib/controller-types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -43,7 +44,7 @@ function formatDate(raw: string | Date): string {
 // ─── Controller card ──────────────────────────────────────────────────────────
 
 interface ControllerCardProps {
-  controller: PropertyController;
+  controller: CustomerController;
   selected: boolean;
   lastCheckedAt: Date | null;
   hadIssues: boolean;
@@ -140,7 +141,7 @@ export function ControllerSelectionPage({ customerId, branchName }: ControllerSe
     ? `/api/properties/${customerId}/controllers?branch=${encodeURIComponent(branchName)}`
     : `/api/properties/${customerId}/controllers`;
 
-  const { data: controllers = [], isLoading: loadingControllers } = useArrayQuery<PropertyController>({
+  const { data: controllers = [], isLoading: loadingControllers } = useArrayQuery<CustomerController>({
     queryKey: ["/api/properties", customerId, "controllers", branchName ?? null],
     queryFn: () => apiRequest(controllersUrl),
   });

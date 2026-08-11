@@ -1,7 +1,8 @@
 import { AlertTriangle, CheckCircle2, Camera } from "lucide-react";
 import { asArray } from "@/lib/queryClient";
 import { tintForControllerLetter } from "@workspace/shared";
-import type { PropertyController, WetCheckZoneRecord, WetCheckFinding } from "@workspace/db/schema";
+import type { WetCheckZoneRecord, WetCheckFinding } from "@workspace/db/schema";
+import type { CustomerController } from "@/lib/controller-types";
 
 export type ZoneRecordWithFindings = WetCheckZoneRecord & { findings: WetCheckFinding[] };
 
@@ -31,7 +32,7 @@ export function ZoneStatusGrid({
   photos = [],
   onCellClick,
 }: {
-  controllers: PropertyController[];
+  controllers: CustomerController[];
   zoneRecords: ZoneRecordWithFindings[];
   activeLetter?: string | null;
   activeZone?: number | null;
@@ -77,7 +78,7 @@ export function ZoneStatusGrid({
               Controller {ctrl.controllerLetter}
             </div>
             <div className="grid grid-cols-6 sm:grid-cols-10 gap-1.5">
-              {Array.from({ length: ctrl.zoneCount }, (_, i) => i + 1).map((n) => {
+              {Array.from({ length: ctrl.zoneCount ?? 0 }, (_, i) => i + 1).map((n) => {
                 const r = recordMap.get(`${ctrl.controllerLetter}-${n}`);
                 const status = r?.status ?? "not_checked";
                 const isMarkedComplete =
