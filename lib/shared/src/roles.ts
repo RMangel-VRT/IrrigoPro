@@ -142,6 +142,53 @@ export const CAN_VIEW_COSTS = new Set<Role>([
   "billing_manager",
 ]);
 
+// ─── UI landing defaults ────────────────────────────────────────────────────
+//
+// Task #1890 — which roles land on a non-default *view* is a presentation
+// decision, not an authorization decision. Declaring it as another
+// `ReadonlySet<Role>` alongside the capability sets would make the two
+// interchangeable at every call site: a UI default handed to `hasCapability`
+// compiles cleanly and silently grants access to whoever is in it.
+//
+// Branding the set is not enough. A branded `ReadonlySet<Role>` is still
+// structurally a `ReadonlySet<Role>`, so it still satisfies `Capability` and
+// still passes into `hasCapability` with no error. The wrapper below is not a
+// Set at all, which is what makes the compiler reject it in both directions —
+// a UI default cannot be used as a capability, and a capability cannot be used
+// as a UI default — without changing the shape of the existing capability sets.
+
+/** A set of roles that changes what the UI shows first. Never an allowlist. */
+export interface UiDefaultRoles {
+  readonly kind: "ui-default";
+  readonly roles: readonly Role[];
+}
+
+/**
+ * Roles whose invoice list opens on collections work — unpaid and overdue,
+ * biggest balance first within the oldest bucket first — instead of the
+ * newest-first billing view.
+ *
+ * This grants nothing. A bookkeeper can already read invoices because she is
+ * in `CAN_READ_INVOICES`; this only decides what she sees before she touches a
+ * control. Every other role keeps the newest-first landing.
+ */
+export const COLLECTIONS_LANDING_DEFAULT: UiDefaultRoles = {
+  kind: "ui-default",
+  roles: ["bookkeeper"],
+};
+
+/**
+ * The only way to ask a landing-default question. Mirrors `hasCapability`'s
+ * safety: unknown role strings, `null` and `undefined` all return false.
+ */
+export function usesUiDefault(
+  role: string | null | undefined,
+  uiDefault: UiDefaultRoles,
+): boolean {
+  if (!isRole(role)) return false;
+  return uiDefault.roles.includes(role);
+}
+
 /** A capability is just a role set from this module. */
 export type Capability = ReadonlySet<Role>;
 

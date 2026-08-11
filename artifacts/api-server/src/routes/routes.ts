@@ -389,13 +389,13 @@ import {
   lookupQbInvoiceByDocNumber as _lookupQbInvoiceByDocNumber,
 } from "./qb-invoice-ops";
 import { registerInvoiceMarkSentRoutes } from "./invoice-mark-sent-routes";
+import { registerInvoiceListRoutes } from "./invoice-list-routes";
 import { registerInvoiceCorrectionRoutes } from "./invoice-correction-routes";
 import { registerInvoiceEditabilityRoutes } from "./invoice-editability-routes";
-import {
-  registerQbPaymentSyncRoutes,
-  computeEffectiveDueDate,
-  isInvoiceOverdue,
-} from "./qb-payment-sync";
+// Task #1890 — computeEffectiveDueDate / isInvoiceOverdue were imported here
+// for the inline invoice list handler. That handler now lives in
+// ./invoice-list-routes and imports them from @workspace/shared directly.
+import { registerQbPaymentSyncRoutes } from "./qb-payment-sync";
 import { registerAdminMigrationsRoutes } from "./admin-migrations-routes";
 import { registerWcLaborBackfillRoutes } from "./admin-wc-labor-backfill-routes";
 import { registerInspectionZoneBackfillRoutes } from "./admin-inspection-zone-backfill-routes";
@@ -10110,67 +10110,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // CAN_READ_INVOICES (field_tech is refused; irrigation_manager keeps the
   // access it had, now by declaration rather than by omission). The existing
   // company scoping and the super_admin → null convention below are unchanged.
-  app.get("/api/invoices", requireAuthentication, requireInvoiceRead, async (req, res) => {
-    try {
-      const customerId = req.query.customerId ? parseInt(req.query.customerId as string) : undefined;
-
-      const _invoiceCallerRole = (req as any).authenticatedUserRole as string | undefined;
-      if (_invoiceCallerRole !== 'super_admin' && !(req as any).authenticatedUserCompanyId) {
-        res.status(403).json({ message: "Forbidden: user has no company association" });
-        return;
-      }
-      const callerCompanyId9543 = _invoiceCallerRole === 'super_admin' ? null : ((req as any).authenticatedUserCompanyId ?? null);
-      const allInvoices = await storage.getInvoices(callerCompanyId9543);
-
-      // Filter by customer if provided
-      let invoices = customerId
-        ? allInvoices.filter(inv => inv.customerId === customerId)
-        : allInvoices;
-
-      // Sort by creation date, newest first BEFORE paginating so page
-      // boundaries are stable regardless of insertion order.
-      invoices.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
-      // Task #532 — opt-in pagination via ?limit=&offset=. Falls back to
-      // the legacy single-page slice (50 rows by default) when only
-      // `limit` is provided and no `offset` — matching the previous
-      // behavior. Sets X-Total-Count when paginated.
-      if (req.query.offset != null && req.query.offset !== "") {
-        invoices = paginate(req, res, invoices, { limit: 50, max: 500 });
-      } else {
-        const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
-        invoices = invoices.slice(0, Math.max(1, Math.min(500, limit)));
-      }
-
-      // Task #1831 — annotate each invoice with a derived `isOverdue` flag.
-      // Overdue = (paymentStatus != paid) AND effectiveDueDate < now.
-      // Effective due date uses dueDate when set; otherwise falls back to
-      // createdAt + customer payment terms (net_30 / net_15 / due_on_receipt).
-      const uniqueCustomerIds = [...new Set(invoices.map((inv: any) => inv.customerId as number))];
-      const customerTermsRows = uniqueCustomerIds.length > 0
-        ? await db
-            .select({ id: customers.id, paymentTerms: customers.paymentTerms })
-            .from(customers)
-            .where(inArray(customers.id, uniqueCustomerIds))
-        : [];
-      const customerTermsMap = new Map(customerTermsRows.map((c) => [c.id, c.paymentTerms]));
-
-      const nowTs = new Date();
-      const annotated = invoices.map((inv: any) => {
-        const paymentTerms = customerTermsMap.get(inv.customerId) ?? undefined;
-        const effDue = computeEffectiveDueDate(inv.dueDate, inv.createdAt, paymentTerms);
-        const overdue = isInvoiceOverdue(inv.paymentStatus, effDue, nowTs);
-        // Task #1833 — include the pre-computed effective due date so the
-        // frontend aging filter can bucket consistently with computeArAging
-        // without needing to re-derive payment terms client-side.
-        return { ...inv, isOverdue: overdue, effectiveDueDate: effDue.toISOString() };
-      });
-
-      res.json(applyPricingVisibility(req, annotated));
-    } catch (error) {
-      console.error('Error fetching invoices:', error);
-      res.status(500).json({ message: "Failed to fetch invoices" });
-    }
+  // Task #1890 — GET /api/invoices now lives in ./invoice-list-routes so the
+  // A/R annotate → filter → sort → paginate pipeline can be tested against a
+  // storage spy. Registered here, alongside the other invoice route modules,
+  // to keep route ordering identical to when it was inline.
+  registerInvoiceListRoutes(app, {
+    requireAuthentication,
+    requireInvoiceRead,
+    applyPricingVisibility,
   });
 
   app.post("/api/work-orders/:id/create-invoice", requireAuthentication, requireSameCompanyAsWorkOrder, async (req, res) => {

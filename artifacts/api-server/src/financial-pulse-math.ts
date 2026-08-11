@@ -4,6 +4,19 @@
 // extracted from the route module so the KPI math can be exercised in a
 // vanilla node:test fixture without spinning up Express or Postgres.
 
+// Task #1890 — the due-date / aging rules are shared with the invoice list
+// route and the web app. See lib/shared/src/invoice-aging.ts; the boundaries
+// there are frozen because every aging total below depends on them.
+import {
+  AGING_BUCKET_KEYS,
+  AGING_BUCKET_LABELS,
+  agingBucketRank,
+  classifyAgingBucket,
+  computeEffectiveDueDate,
+  daysOverdue,
+  type AgingBucketKey,
+} from "@workspace/shared";
+
 export interface InvoiceLike {
   id: number;
   customerId: number;
@@ -535,7 +548,11 @@ export interface RevenueMixResult {
 
 // ─── Slice 3 helpers (Task #692) ────────────────────────────────────────────
 
-export type AgingBucketKey = "current" | "days30" | "days60" | "days90";
+// Task #1890 — the bucket keys, labels and boundary rule now come from the
+// shared module so this computation, the invoice list route and the invoice
+// page's client-side matcher cannot drift apart. The key type is re-exported
+// under its original name for existing importers.
+export type { AgingBucketKey };
 export interface AgingBucket {
   key: AgingBucketKey;
   label: string;
@@ -544,22 +561,21 @@ export interface AgingBucket {
 }
 
 /**
- * A/R aging buckets — Current (<30d), 30 (30–59), 60 (60–89), 90+ (≥90).
- * Uses the same outstanding-invoice filter as `computeOutstandingAr` so
- * the four bucket amounts sum to the Outstanding A/R KPI within
- * rounding. Age is calendar days since `createdAt`.
+ * A/R aging buckets, keyed off how far past its effective due date each
+ * outstanding invoice is: Current (not yet due), 0–29, 30–59, 60+ days
+ * overdue. Uses the same outstanding-invoice filter as `computeOutstandingAr`
+ * so the four bucket amounts sum to the Outstanding A/R KPI within rounding.
  */
 export function computeArAging(
   invoices: InvoiceLike[],
   now: Date,
 ): AgingBucket[] {
-  const buckets: AgingBucket[] = [
-    { key: "current", label: "Current", amount: 0, count: 0 },
-    { key: "days30", label: "1–30 days overdue", amount: 0, count: 0 },
-    { key: "days60", label: "31–60 days overdue", amount: 0, count: 0 },
-    { key: "days90", label: "60+ days overdue", amount: 0, count: 0 },
-  ];
-  const MS = 24 * 60 * 60 * 1000;
+  const buckets: AgingBucket[] = AGING_BUCKET_KEYS.map((key) => ({
+    key,
+    label: AGING_BUCKET_LABELS[key],
+    amount: 0,
+    count: 0,
+  }));
   for (const inv of invoices) {
     if (INVOICE_EXCLUDED_STATUSES.has(inv.status) || inv.status === "paid")
       continue;
@@ -571,13 +587,9 @@ export function computeArAging(
     if (!created) continue;
     // Bucket by effective due date: dueDate if set, else createdAt + customer
     // payment terms (net_30=30d, net_15=15d, due_on_receipt=0d; default net_30).
-    const TERMS_DAYS: Record<string, number> = { net_30: 30, net_15: 15, due_on_receipt: 0 };
-    const termsDays = TERMS_DAYS[inv.paymentTerms ?? "net_30"] ?? 30;
-    const due = inv.dueDate
-      ? toDate(inv.dueDate) ?? new Date(created.getTime() + termsDays * MS)
-      : new Date(created.getTime() + termsDays * MS);
-    const age = (now.getTime() - due.getTime()) / MS;
-    const i = age < 0 ? 0 : age < 30 ? 1 : age < 60 ? 2 : 3;
+    const due = computeEffectiveDueDate(inv.dueDate, created, inv.paymentTerms);
+    const bucket = classifyAgingBucket(daysOverdue(due, now));
+    const i = agingBucketRank(bucket);
     const amount = ps === "partially_paid" && inv.balance != null ? Math.max(0, toNum(inv.balance)) : toNum(inv.totalAmount);
     buckets[i].amount += amount;
     buckets[i].count += 1;

@@ -408,38 +408,18 @@ async function _syncImpl(
   return summary;
 }
 
-// ── Overdue derivation (pure, exported for tests) ──────────────────────────
-
-// Payment terms → days until due (fallback)
-const PAYMENT_TERMS_DAYS: Record<string, number> = {
-  net_30: 30,
-  net_15: 15,
-  due_on_receipt: 0,
-};
-
-export function computeEffectiveDueDate(
-  dueDate: Date | string | null | undefined,
-  createdAt: Date | string,
-  paymentTerms?: string | null,
-): Date {
-  if (dueDate) {
-    const d = dueDate instanceof Date ? dueDate : new Date(dueDate);
-    if (!Number.isNaN(d.getTime())) return d;
-  }
-  const created = createdAt instanceof Date ? createdAt : new Date(createdAt);
-  const days = PAYMENT_TERMS_DAYS[paymentTerms ?? "net_30"] ?? 30;
-  return new Date(created.getTime() + days * 24 * 60 * 60 * 1000);
-}
-
-export function isInvoiceOverdue(
-  paymentStatus: string | null | undefined,
-  effectiveDueDate: Date,
-  now: Date,
-): boolean {
-  const ps = paymentStatus ?? "unpaid";
-  if (ps === "paid") return false;
-  return effectiveDueDate < now;
-}
+// ── Overdue derivation ─────────────────────────────────────────────────────
+//
+// Task #1890 — these two used to be defined here, with the payment-terms table
+// inline. They now live in `@workspace/shared` alongside the aging bucket
+// classifier so the API server and the web app share one copy of the rule.
+// Re-exported under the original names because callers (and this module's own
+// test file) import them from here.
+export {
+  computeEffectiveDueDate,
+  isInvoiceOverdue,
+  PAYMENT_TERMS_DAYS,
+} from "@workspace/shared";
 
 // ── Route registration ─────────────────────────────────────────────────────
 

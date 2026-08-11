@@ -49,8 +49,13 @@ export const PRICING_FIELDS_BY_TABLE = {
   ],
   // work_order_items per-line money.
   workOrderItems: ["partPrice", "totalPrice"],
-  // invoices header.
-  invoices: ["laborSubtotal", "partsSubtotal", "totalAmount"],
+  // invoices header. Task #1890 — `balance` is the amount QuickBooks says is
+  // still owed and `balanceDue` is the derived figure the A/R list shows
+  // (synced balance, or the invoice total when no sync has run). Both are
+  // pricing values. The invoice list endpoint is behind an invoice-read guard
+  // that already excludes field_tech, so this is defence in depth for any
+  // other path that returns an invoice row.
+  invoices: ["laborSubtotal", "partsSubtotal", "totalAmount", "balance", "balanceDue"],
   // invoice_items per-line money.
   invoiceItems: ["unitPrice", "totalPrice", "laborRate", "laborTotal"],
   // Legacy / computed aliases that have appeared on response payloads

@@ -1,11 +1,23 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
-import { Link, useSearch } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import {
   hasCapability,
+  usesUiDefault,
   CAN_EDIT_INVOICES,
   CAN_SEND_INVOICE_EMAIL,
   CAN_VIEW_COSTS,
+  COLLECTIONS_LANDING_DEFAULT,
+  AGING_BUCKET_LABELS,
+  AR_FLAG_LABELS,
+  AR_FLAG_TOOLTIPS,
+  classifyAgingBucket,
+  computeArFlags,
+  daysOverdue as daysOverdueOf,
+  isBalanceFallback,
+  resolveBalanceDue,
+  type AgingBucketKey,
+  type ArFlag,
 } from "@workspace/shared";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -142,6 +154,18 @@ interface Invoice {
   // Task #1848 — QBO void detection. Set when the sync loop detects the
   // invoice was voided in QuickBooks. Null means no void detected.
   qbVoidDetectedAt?: string | null;
+  // Task #1890 — A/R annotation. The server computes all of these across the
+  // whole invoice set before paginating, so they are correct for sorting and
+  // filtering rather than only for the rows already on screen. Every field is
+  // optional so a cached payload from before this change still renders; the
+  // fallbacks below re-derive each one from the same shared helpers.
+  paidAt?: string | null;
+  qbNote?: string | null;
+  daysOverdue?: number;
+  agingBucket?: AgingBucketKey;
+  balanceDue?: string;
+  balanceIsFallback?: boolean;
+  arFlags?: ArFlag[];
 }
 
 const MONTH_NAMES = [
@@ -353,30 +377,45 @@ function SortableHeader({
 
 // Task #708 — A/R aging filter values mirror the
 // `/api/financial-pulse/ar-aging` bucket keys (with `days90Plus`
-// matching the inclusive 90+ bucket). The mapping lives here so the
+// matching the inclusive 60+ bucket). The mapping lives here so the
 // widget can deep-link via `?aging=`.
 // Task #1833 — labels updated to "days past due" framing to match
 // the updated computeArAging bucket labels.
-type AgingFilter = "all" | "current" | "days30" | "days60" | "days90Plus";
+// Task #1890 — labels now come from AGING_BUCKET_LABELS so this control, the
+// Financial Pulse widget and the server all name a bucket identically, and a
+// new `overdue` value covers "anything at or past due". `overdue` is an
+// addition to this same parameter, NOT a second one: the collections landing
+// default and the widget's deep links share one `?aging=`.
+type AgingFilter = "all" | "current" | "days30" | "days60" | "days90Plus" | "overdue";
 const AGING_OPTIONS: { value: AgingFilter; label: string }[] = [
   { value: "all", label: "All ages" },
+  { value: "overdue", label: "Any overdue" },
   { value: "current", label: "Not yet due" },
-  { value: "days30", label: "1–30 days overdue" },
-  { value: "days60", label: "31–60 days overdue" },
-  { value: "days90Plus", label: "60+ days overdue" },
+  { value: "days30", label: AGING_BUCKET_LABELS.days30 },
+  { value: "days60", label: AGING_BUCKET_LABELS.days60 },
+  { value: "days90Plus", label: AGING_BUCKET_LABELS.days90 },
 ];
+
+/** Bucket key (as the server reports it) → the wire value of this filter. */
+const BUCKET_TO_AGING_VALUE: Record<AgingBucketKey, AgingFilter> = {
+  current: "current",
+  days30: "days30",
+  days60: "days60",
+  days90: "days90Plus",
+};
 
 function parseAging(search: string): AgingFilter {
   const v = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search).get("aging");
-  if (v === "current" || v === "days30" || v === "days60" || v === "days90Plus") {
+  if (
+    v === "current" ||
+    v === "days30" ||
+    v === "days60" ||
+    v === "days90Plus" ||
+    v === "overdue"
+  ) {
     return v;
   }
   return "all";
-}
-
-function readAgingFromUrl(): AgingFilter {
-  if (typeof window === "undefined") return "all";
-  return parseAging(window.location.search);
 }
 
 // Same exclusion set as `computeOutstandingAr` — paid / draft /
@@ -396,35 +435,281 @@ function isOpenAr(inv: Invoice): boolean {
 // exactly with the backend computeArAging logic for all payment term
 // variations (net_30 / net_15 / due_on_receipt).
 function daysPastDue(inv: Invoice, now: Date): number {
-  // Prefer the pre-computed effective due date the API returns (Task #1833).
-  // Fall back through explicit dueDate, then a safe net_30 approximation so
-  // this function stays safe on cached/stale payloads that pre-date the field.
+  // Prefer the days-overdue figure the API already computed (Task #1890) —
+  // then the number on this row and the number Financial Pulse reports for the
+  // same invoice cannot disagree. Fall back through the pre-computed effective
+  // due date (Task #1833), then explicit dueDate, then a net_30 approximation
+  // so this stays safe on cached payloads that pre-date those fields.
+  if (typeof inv.daysOverdue === "number") return inv.daysOverdue;
   const due = inv.effectiveDueDate
     ? new Date(inv.effectiveDueDate)
     : inv.dueDate
       ? new Date(inv.dueDate)
       : new Date(new Date(inv.createdAt).getTime() + 30 * 86_400_000);
-  return (now.getTime() - due.getTime()) / 86_400_000;
+  return daysOverdueOf(due, now);
+}
+
+/** The bucket an invoice sits in — the server's answer when it sent one. */
+function agingBucketOf(inv: Invoice, now: Date): AgingBucketKey {
+  return inv.agingBucket ?? classifyAgingBucket(daysPastDue(inv, now));
 }
 
 function matchesAging(inv: Invoice, filter: AgingFilter, now: Date): boolean {
   if (filter === "all") return true;
   if (!isOpenAr(inv)) return false;
-  // `paidAt` may or may not be on the wire — guard it.
-  if ((inv as unknown as { paidAt?: string | null }).paidAt) return false;
+  if (inv.paidAt) return false;
   // Skip fully-paid records even if status hasn't caught up.
   if (inv.paymentStatus === "paid") return false;
-  const dpd = daysPastDue(inv, now);
-  switch (filter) {
-    case "current":
-      return dpd < 0;           // not yet past due
-    case "days30":
-      return dpd >= 0 && dpd < 30;   // 1–30 days overdue
-    case "days60":
-      return dpd >= 30 && dpd < 60;  // 31–60 days overdue
-    case "days90Plus":
-      return dpd >= 60;              // 61–90+ days overdue
+  // Task #1890 — the boundary rule lives in classifyAgingBucket now. This used
+  // to be a hand-written comparison chain whose comments ("1–30", "31–60",
+  // "61–90+") had drifted a full day away from the boundaries beside them.
+  const bucket = agingBucketOf(inv, now);
+  if (filter === "overdue") return bucket !== "current";
+  return BUCKET_TO_AGING_VALUE[bucket] === filter;
+}
+
+// ─── A/R flags and balance (Task #1890) ─────────────────────────────────────
+
+/** The flags the server annotated, or the same rules applied locally. */
+function arFlagsOf(inv: Invoice, now: Date): ArFlag[] {
+  if (inv.arFlags) return inv.arFlags;
+  const overdue = inv.isOverdue ?? daysPastDue(inv, now) >= 0;
+  return computeArFlags(inv, now, overdue);
+}
+
+/** Outstanding balance, falling back to the invoice total when unsynced. */
+function balanceDueOf(inv: Invoice): number {
+  if (inv.balanceDue != null) return parseFloat(inv.balanceDue) || 0;
+  return resolveBalanceDue(inv);
+}
+
+function balanceIsFallbackOf(inv: Invoice): boolean {
+  return inv.balanceIsFallback ?? isBalanceFallback(inv);
+}
+
+const PAYMENT_STATUS_LABELS: Record<string, string> = {
+  unpaid: "Unpaid",
+  partially_paid: "Partially paid",
+  paid: "Paid",
+};
+
+/**
+ * Every flag as a text badge with a plain-language tooltip.
+ *
+ * Text, not colour alone — a bookkeeper reading this list in greyscale, or
+ * with a colour-vision deficiency, has to get the same information.
+ */
+function ArFlagBadges({
+  invoice,
+  now,
+  variant = "",
+}: {
+  invoice: Invoice;
+  now: Date;
+  /** Suffix for the test ids, so the desktop row and the mobile card — which
+   *  render the same badges — stay individually addressable. */
+  variant?: "" | "mobile-";
+}) {
+  const flags = arFlagsOf(invoice, now);
+  if (flags.length === 0) {
+    return (
+      <span className="text-xs text-gray-300" data-testid={`ar-flags-none-${variant}${invoice.id}`}>
+        —
+      </span>
+    );
   }
+  return (
+    <div
+      className="flex flex-wrap items-center gap-1"
+      data-testid={`ar-flags-${variant}${invoice.id}`}
+    >
+      {flags.map((flag) => (
+        <Badge
+          key={flag}
+          variant="outline"
+          className="text-[11px] font-medium cursor-help border-gray-300 bg-gray-50 text-gray-700"
+          title={AR_FLAG_TOOLTIPS[flag]}
+          data-testid={`ar-flag-${variant}${flag}-${invoice.id}`}
+        >
+          {AR_FLAG_LABELS[flag]}
+        </Badge>
+      ))}
+    </div>
+  );
+}
+
+// ─── A/R query state, mirrored in the URL (Task #1890) ──────────────────────
+//
+// Every filter and the sort live in the query string, so a view is
+// bookmarkable, shareable and survives a reload. They are also sent to the
+// server, which filters and sorts the WHOLE invoice set before paginating —
+// sorting only the 50 rows already scrolled into view is backwards from what
+// collections needs.
+
+type ArSortKey =
+  | "balanceDue"
+  | "effectiveDueDate"
+  | "daysOverdue"
+  | "agingBucket"
+  | "paymentStatus"
+  | "sent";
+
+const AR_SORT_KEYS: readonly ArSortKey[] = [
+  "balanceDue",
+  "effectiveDueDate",
+  "daysOverdue",
+  "agingBucket",
+  "paymentStatus",
+  "sent",
+];
+
+type PaymentStatusFilter = "all" | "unpaid" | "partially_paid" | "paid";
+type SentFilter = "all" | "sent" | "unsent";
+
+interface ArQuery {
+  aging: AgingFilter;
+  paymentStatus: PaymentStatusFilter;
+  sent: SentFilter;
+  customerId: string;
+  dateFrom: string;
+  dateTo: string;
+  amountMin: string;
+  amountMax: string;
+  flagged: boolean;
+  sort: ArSortKey | null;
+  dir: SortDir;
+}
+
+const EMPTY_AR_QUERY: ArQuery = {
+  aging: "all",
+  paymentStatus: "all",
+  sent: "all",
+  customerId: "",
+  dateFrom: "",
+  dateTo: "",
+  amountMin: "",
+  amountMax: "",
+  flagged: false,
+  sort: null,
+  dir: "desc",
+};
+
+/**
+ * The collections landing view: unpaid and overdue, oldest bucket first with
+ * the biggest balance first inside it. Expressed as a URL rather than a
+ * separate route, so there is still exactly one canonical invoice list.
+ */
+const COLLECTIONS_DEFAULT_QUERY: ArQuery = {
+  ...EMPTY_AR_QUERY,
+  aging: "overdue",
+  paymentStatus: "unpaid",
+  sort: "agingBucket",
+  dir: "desc",
+};
+
+function readArQuery(search: string): ArQuery {
+  const p = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const ps = p.get("paymentStatus");
+  const sent = p.get("sent");
+  const sort = p.get("sort");
+  return {
+    aging: parseAging(search),
+    paymentStatus:
+      ps === "unpaid" || ps === "partially_paid" || ps === "paid" ? ps : "all",
+    sent: sent === "sent" || sent === "unsent" ? sent : "all",
+    customerId: p.get("customerId") ?? "",
+    dateFrom: p.get("dateFrom") ?? "",
+    dateTo: p.get("dateTo") ?? "",
+    amountMin: p.get("amountMin") ?? "",
+    amountMax: p.get("amountMax") ?? "",
+    flagged: p.get("flagged") === "1",
+    sort: AR_SORT_KEYS.includes(sort as ArSortKey) ? (sort as ArSortKey) : null,
+    dir: p.get("dir") === "asc" ? "asc" : "desc",
+  };
+}
+
+/** Only non-default values are written, so a clean view has a clean URL. */
+function arQueryToParams(q: ArQuery): URLSearchParams {
+  const p = new URLSearchParams();
+  if (q.aging !== "all") p.set("aging", q.aging);
+  if (q.paymentStatus !== "all") p.set("paymentStatus", q.paymentStatus);
+  if (q.sent !== "all") p.set("sent", q.sent);
+  if (q.customerId) p.set("customerId", q.customerId);
+  if (q.dateFrom) p.set("dateFrom", q.dateFrom);
+  if (q.dateTo) p.set("dateTo", q.dateTo);
+  if (q.amountMin) p.set("amountMin", q.amountMin);
+  if (q.amountMax) p.set("amountMax", q.amountMax);
+  if (q.flagged) p.set("flagged", "1");
+  if (q.sort) {
+    p.set("sort", q.sort);
+    p.set("dir", q.dir);
+  }
+  return p;
+}
+
+/** True when nothing is narrowing or reordering the list. */
+function isEmptyArQuery(q: ArQuery): boolean {
+  return arQueryToParams(q).toString() === "";
+}
+
+/**
+ * Balance, due, days overdue, aging, payment, sent, flags, and the two inert
+ * reminder columns. Used to span them in the version-history rows.
+ */
+const AR_COLUMN_COUNT = 9;
+
+const AR_SORT_LABELS: Record<ArSortKey, string> = {
+  balanceDue: "Balance due",
+  effectiveDueDate: "Due",
+  daysOverdue: "Days overdue",
+  agingBucket: "Aging",
+  paymentStatus: "Payment",
+  sent: "Sent",
+};
+
+/**
+ * A column header that drives the SERVER-side sort via the URL, as opposed to
+ * `SortableHeader`, which sorts the loaded rows inside their month group.
+ * Only one of the two can be active at a time; each clears the other.
+ */
+function ArSortableHeader({
+  sortKey,
+  align = "left",
+  sort,
+  dir,
+  onSort,
+}: {
+  sortKey: ArSortKey;
+  align?: "left" | "right";
+  sort: ArSortKey | null;
+  dir: SortDir;
+  onSort: (key: ArSortKey) => void;
+}) {
+  const active = sort === sortKey;
+  return (
+    <TableHead className={align === "right" ? "text-right" : undefined}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={`inline-flex items-center gap-1 whitespace-nowrap font-medium hover:text-gray-900 ${
+          active ? "text-gray-900" : "text-muted-foreground"
+        } ${align === "right" ? "flex-row-reverse" : ""}`}
+        data-testid={`ar-sort-${sortKey}`}
+        aria-sort={active ? (dir === "asc" ? "ascending" : "descending") : "none"}
+      >
+        {AR_SORT_LABELS[sortKey]}
+        {active ? (
+          dir === "asc" ? (
+            <ArrowUp className="w-3.5 h-3.5" />
+          ) : (
+            <ArrowDown className="w-3.5 h-3.5" />
+          )
+        ) : (
+          <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />
+        )}
+      </button>
+    </TableHead>
+  );
 }
 
 export default function InvoicesPage() {
@@ -441,20 +726,44 @@ export default function InvoicesPage() {
   // navigation. The effect below resyncs state whenever the URL
   // changes underneath us.
   const search = useSearch();
-  const [agingFilter, setAgingFilter] = useState<AgingFilter>(() => readAgingFromUrl());
-  useEffect(() => {
-    const next = parseAging(search ?? "");
-    setAgingFilter((prev) => (prev === next ? prev : next));
-  }, [search]);
+  const [, setLocation] = useLocation();
+  // Task #1890 — the URL is the single source of truth for every A/R filter
+  // and for the A/R sort. State derived from it (rather than mirrored into
+  // useState) is what makes a view survive a reload and share as a link.
+  const arQuery = useMemo(() => readArQuery(search ?? ""), [search]);
+  const agingFilter = arQuery.aging;
+  const setArQuery = (next: ArQuery) => {
+    const qs = arQueryToParams(next).toString();
+    setLocation(qs ? `/invoices?${qs}` : "/invoices");
+  };
+  const patchArQuery = (patch: Partial<ArQuery>) => setArQuery({ ...arQuery, ...patch });
+
   const [sort, setSort] = useState<SortState | null>(null);
   const [cancelledExpanded, setCancelledExpanded] = useState(false);
+  // The legacy within-month sort and the A/R global sort are mutually
+  // exclusive: two active orderings would be ambiguous, so each clears the
+  // other rather than silently layering.
   const toggleSort = (key: SortKey) => {
+    if (arQuery.sort) patchArQuery({ sort: null });
     setSort((prev) => {
       if (!prev || prev.key !== key) return { key, dir: "asc" };
       if (prev.dir === "asc") return { key, dir: "desc" };
       return null;
     });
   };
+  const toggleArSort = (key: ArSortKey) => {
+    setSort(null);
+    if (arQuery.sort !== key) {
+      // Descending first: the biggest balance and the oldest bucket are what a
+      // bookkeeper wants at the top, not the smallest and newest.
+      patchArQuery({ sort: key, dir: "desc" });
+    } else if (arQuery.dir === "desc") {
+      patchArQuery({ sort: key, dir: "asc" });
+    } else {
+      patchArQuery({ sort: null });
+    }
+  };
+  const arSortActive = arQuery.sort != null;
   const [pdfModal, setPdfModal] = useState<{ id: number; number: string; email: string } | null>(null);
   const [auditInvoice, setAuditInvoice] = useState<{ id: number; label: string; total: string } | null>(null);
   const [exportingInvoiceId, setExportingInvoiceId] = useState<number | null>(null);
@@ -471,6 +780,29 @@ export default function InvoicesPage() {
   // 403 on her landing page, so it is gated on the same capability the server
   // checks. CAN_VIEW_COSTS mirrors the financial-pulse allowlist exactly.
   const canViewCosts = hasCapability(userRole, CAN_VIEW_COSTS);
+
+  // Task #1890 — the collections landing default.
+  //
+  // Resolved through `usesUiDefault` against a UI-default membership, never a
+  // role-string comparison and never a capability set. The distinction is
+  // enforced by the type: `COLLECTIONS_LANDING_DEFAULT` is not a
+  // `ReadonlySet<Role>`, so it cannot be handed to `hasCapability` and quietly
+  // turned into an authorization decision. It grants nothing — a bookkeeper
+  // already reads invoices via CAN_READ_INVOICES; this only decides what she
+  // sees first. Every other role keeps the newest-first landing.
+  const usesCollectionsDefault = usesUiDefault(userRole, COLLECTIONS_LANDING_DEFAULT);
+  const defaultArQuery = usesCollectionsDefault ? COLLECTIONS_DEFAULT_QUERY : EMPTY_AR_QUERY;
+  // Applied once per mount, and only when the caller arrived with no view of
+  // their own — a shared link or a Financial Pulse deep link must win.
+  const appliedLandingDefault = useRef(false);
+  useEffect(() => {
+    if (appliedLandingDefault.current) return;
+    appliedLandingDefault.current = true;
+    if (!usesCollectionsDefault) return;
+    if (!isEmptyArQuery(arQuery)) return;
+    setArQuery(COLLECTIONS_DEFAULT_QUERY);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [usesCollectionsDefault]);
 
   // Task #1425 — invoice merge selection. `selectedIds` holds the invoices
   // ticked for merging; `survivingId` is the chosen survivor in the confirm
@@ -585,6 +917,11 @@ export default function InvoicesPage() {
   // for up to 500. Driven by the X-Total-Count header set by the
   // server's `paginate()` helper.
   const PAGE_SIZE = 50;
+  // Task #1890 — the A/R filters and sort go to the server, which applies them
+  // across every invoice before slicing a page. The query string is part of
+  // the cache key so changing a filter refetches from offset 0 rather than
+  // re-filtering whatever happened to be loaded.
+  const arParams = useMemo(() => arQueryToParams(arQuery).toString(), [arQuery]);
   const {
     data: invoicePages,
     isLoading,
@@ -593,11 +930,12 @@ export default function InvoicesPage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery<{ rows: Invoice[]; total: number; nextOffset: number | null }>({
-    queryKey: ["/api/invoices", { paginated: true, pageSize: PAGE_SIZE }],
+    queryKey: ["/api/invoices", { paginated: true, pageSize: PAGE_SIZE, ar: arParams }],
     initialPageParam: 0,
     queryFn: async ({ pageParam = 0 }) => {
       const offset = Number(pageParam) || 0;
-      const res = await fetch(`/api/invoices?limit=${PAGE_SIZE}&offset=${offset}`);
+      const suffix = arParams ? `&${arParams}` : "";
+      const res = await fetch(`/api/invoices?limit=${PAGE_SIZE}&offset=${offset}${suffix}`);
       if (!res.ok) throw new Error("Failed to fetch invoices");
       const rows = (await res.json()) as Invoice[];
       const total = Number(res.headers.get("X-Total-Count") ?? rows.length);
@@ -934,6 +1272,121 @@ export default function InvoicesPage() {
   // Sorting is applied within each month group so the outer
   // most-recent-first month structure stays intact (Task #1423).
   const sortedInvoices = (items: Invoice[]) => sortInvoices(items, sort);
+
+  // Task #1890 — reconciling the two orderings.
+  //
+  // The month grouping exists because someone producing invoices thinks in
+  // billing periods. Someone chasing them does not: "the oldest, biggest
+  // balance" is a statement about the whole ledger, and a global ordering
+  // sliced back into month buckets is not that ordering any more. So when an
+  // A/R sort is active the list renders flat, in exactly the order the server
+  // returned; when it is not, the grouped view is untouched. The cancelled
+  // drawer is unaffected either way.
+  const flatSections = useMemo(
+    () =>
+      arSortActive
+        ? [{ key: "__flat__", label: null as string | null, invoices: activeFilteredInvoices }]
+        : groups,
+    [arSortActive, activeFilteredInvoices, groups],
+  );
+
+  // One clock for the whole render, so two rows cannot be bucketed a
+  // millisecond apart and disagree about the same boundary.
+  const nowForAr = useMemo(() => new Date(), [invoices]);
+
+  // Customer options for the A/R filter, accumulated from every invoice seen
+  // so far. Deliberately not a separate /api/customers fetch: the bookkeeper's
+  // landing page should not fire a request she may not be allowed to make, and
+  // the names are already on the rows. Accumulating means selecting a customer
+  // does not collapse the list to that one customer.
+  const seenCustomers = useRef(new Map<number, string>());
+  const customerOptions = useMemo(() => {
+    for (const inv of invoices) seenCustomers.current.set(inv.customerId, inv.customerName);
+    return [...seenCustomers.current.entries()]
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+  }, [invoices]);
+
+  /**
+   * The A/R block of a desktop row: balance, due date, days overdue, bucket,
+   * payment status, sent, flags, and the two inert reminder columns.
+   * Kept as one function so the column count here and `AR_COLUMN_COUNT` in the
+   * history rows cannot drift.
+   */
+  const renderArCells = (invoice: Invoice) => {
+    const bucket = agingBucketOf(invoice, nowForAr);
+    const dpd = daysPastDue(invoice, nowForAr);
+    const fallback = balanceIsFallbackOf(invoice);
+    const paymentStatus = invoice.paymentStatus ?? "unpaid";
+    return (
+      <>
+        <TableCell className="text-right whitespace-nowrap">
+          <span
+            className={fallback ? "text-gray-500" : "font-semibold text-gray-900"}
+            title={
+              fallback
+                ? "No payment balance has been synced from QuickBooks for this invoice, so the invoice total is shown instead. It may not reflect payments already received."
+                : `Balance last synced from QuickBooks${invoice.paymentSyncedAt ? ` on ${formatDate(invoice.paymentSyncedAt)}` : ""}.`
+            }
+            data-testid={`ar-balance-${invoice.id}`}
+          >
+            {formatCurrency(balanceDueOf(invoice))}
+          </span>
+        </TableCell>
+        <TableCell
+          className="text-xs text-gray-600 whitespace-nowrap"
+          data-testid={`ar-due-${invoice.id}`}
+        >
+          {invoice.effectiveDueDate ? formatDate(invoice.effectiveDueDate) : "—"}
+        </TableCell>
+        <TableCell
+          className="text-right text-xs whitespace-nowrap"
+          data-testid={`ar-days-overdue-${invoice.id}`}
+        >
+          {bucket === "current" ? (
+            <span className="text-gray-300">—</span>
+          ) : (
+            <span className="font-medium text-red-700">{Math.max(0, Math.floor(dpd))}</span>
+          )}
+        </TableCell>
+        <TableCell className="text-xs whitespace-nowrap" data-testid={`ar-bucket-${invoice.id}`}>
+          {AGING_BUCKET_LABELS[bucket]}
+        </TableCell>
+        <TableCell
+          className="text-xs whitespace-nowrap"
+          data-testid={`ar-payment-status-${invoice.id}`}
+        >
+          {PAYMENT_STATUS_LABELS[paymentStatus] ?? paymentStatus}
+        </TableCell>
+        <TableCell className="text-xs whitespace-nowrap" data-testid={`ar-sent-${invoice.id}`}>
+          {invoice.sentAt ? formatDate(invoice.sentAt) : <span className="text-gray-400">Not sent</span>}
+        </TableCell>
+        <TableCell className="max-w-[220px]">
+          <ArFlagBadges invoice={invoice} now={nowForAr} />
+        </TableCell>
+        {/* Task #1890 — reminders are out of scope here and land in their own
+            task. These two columns render permanently and inert, with an
+            empty state, so the table does not reflow when they do. */}
+        <TableCell
+          className="text-xs text-gray-300 whitespace-nowrap"
+          data-testid={`ar-last-reminder-${invoice.id}`}
+        >
+          —
+        </TableCell>
+        <TableCell className="text-xs whitespace-nowrap">
+          <button
+            type="button"
+            disabled
+            className="text-gray-300 cursor-not-allowed"
+            title="Payment reminders are not available yet."
+            data-testid={`ar-reminder-action-${invoice.id}`}
+          >
+            —
+          </button>
+        </TableCell>
+      </>
+    );
+  };
 
   // Superseded invoices are kept in activeFilteredInvoices so they can be shown as
   // version history beneath their replacement; exclude them from every total.
@@ -1398,7 +1851,7 @@ export default function InvoicesPage() {
           </Select>
           <Select
             value={agingFilter}
-            onValueChange={(v) => setAgingFilter(v as AgingFilter)}
+            onValueChange={(v) => patchArQuery({ aging: v as AgingFilter })}
           >
             <SelectTrigger
               className="w-full sm:w-52"
@@ -1417,14 +1870,170 @@ export default function InvoicesPage() {
           </Select>
         </div>
 
+        {/* Task #1890 — A/R filters. Every one of these is in the query
+            string, so this whole view is a link: it survives a reload and can
+            be handed to someone else. They combine with AND, and they are
+            applied by the server across the entire invoice set. */}
+        <div className="flex flex-wrap items-end gap-3 mb-6" data-testid="ar-filters">
+          <div className="flex flex-col gap-1">
+            <Label className="text-xs text-gray-500">Payment</Label>
+            <Select
+              value={arQuery.paymentStatus}
+              onValueChange={(v) => patchArQuery({ paymentStatus: v as PaymentStatusFilter })}
+            >
+              <SelectTrigger className="w-40" data-testid="ar-filter-payment-status">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Any payment</SelectItem>
+                <SelectItem value="unpaid">Unpaid</SelectItem>
+                <SelectItem value="partially_paid">Partially paid</SelectItem>
+                <SelectItem value="paid">Paid</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <Label className="text-xs text-gray-500">Sent</Label>
+            <Select
+              value={arQuery.sent}
+              onValueChange={(v) => patchArQuery({ sent: v as SentFilter })}
+            >
+              <SelectTrigger className="w-36" data-testid="ar-filter-sent">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Sent or not</SelectItem>
+                <SelectItem value="sent">Sent</SelectItem>
+                <SelectItem value="unsent">Never sent</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <Label className="text-xs text-gray-500">Customer</Label>
+            <Select
+              value={arQuery.customerId === "" ? "all" : arQuery.customerId}
+              onValueChange={(v) => patchArQuery({ customerId: v === "all" ? "" : v })}
+            >
+              <SelectTrigger className="w-52" data-testid="ar-filter-customer">
+                <SelectValue placeholder="All customers" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All customers</SelectItem>
+                {customerOptions.map((c) => (
+                  <SelectItem key={c.id} value={String(c.id)}>
+                    {c.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <Label className="text-xs text-gray-500" htmlFor="ar-date-from">
+              Created from
+            </Label>
+            <Input
+              id="ar-date-from"
+              type="date"
+              className="w-40"
+              value={arQuery.dateFrom}
+              onChange={(e) => patchArQuery({ dateFrom: e.target.value })}
+              data-testid="ar-filter-date-from"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label className="text-xs text-gray-500" htmlFor="ar-date-to">
+              to
+            </Label>
+            <Input
+              id="ar-date-to"
+              type="date"
+              className="w-40"
+              value={arQuery.dateTo}
+              onChange={(e) => patchArQuery({ dateTo: e.target.value })}
+              data-testid="ar-filter-date-to"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <Label className="text-xs text-gray-500" htmlFor="ar-amount-min">
+              Amount min
+            </Label>
+            <Input
+              id="ar-amount-min"
+              type="number"
+              inputMode="decimal"
+              className="w-28"
+              value={arQuery.amountMin}
+              onChange={(e) => patchArQuery({ amountMin: e.target.value })}
+              data-testid="ar-filter-amount-min"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label className="text-xs text-gray-500" htmlFor="ar-amount-max">
+              Amount max
+            </Label>
+            <Input
+              id="ar-amount-max"
+              type="number"
+              inputMode="decimal"
+              className="w-28"
+              value={arQuery.amountMax}
+              onChange={(e) => patchArQuery({ amountMax: e.target.value })}
+              data-testid="ar-filter-amount-max"
+            />
+          </div>
+
+          <div className="flex items-center gap-2 pb-2">
+            <Checkbox
+              id="ar-flagged-only"
+              checked={arQuery.flagged}
+              onCheckedChange={(v) => patchArQuery({ flagged: v === true })}
+              data-testid="ar-filter-flagged"
+            />
+            <Label htmlFor="ar-flagged-only" className="text-sm text-gray-700">
+              Flagged only
+            </Label>
+          </div>
+
+          {/* Reminder filter — inert, for the same layout-stability reason as
+              the two reminder columns. */}
+          <div className="flex flex-col gap-1">
+            <Label className="text-xs text-gray-400">Reminders</Label>
+            <Select value="all" disabled>
+              <SelectTrigger className="w-40" data-testid="ar-filter-reminders">
+                <SelectValue placeholder="Not available yet" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Not available yet</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {!isEmptyArQuery(arQuery) && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="pb-2"
+              onClick={() => setArQuery(defaultArQuery)}
+              data-testid="ar-filter-clear"
+            >
+              <X className="w-4 h-4 mr-1" />
+              Clear filters
+            </Button>
+          )}
+        </div>
+
         {/* Empty state */}
-        {groups.length === 0 && (
+        {flatSections.length === 0 && (
           <Card>
             <CardContent className="p-12 text-center">
               <FileText className="w-12 h-12 mx-auto mb-3 text-gray-300" />
               <p className="font-medium text-gray-500">No invoices found</p>
               <p className="text-sm text-gray-400 mt-1">
-                {searchTerm || monthFilter !== "all"
+                {searchTerm || monthFilter !== "all" || !isEmptyArQuery(arQuery)
                   ? "Try adjusting your filters."
                   : "Invoices will appear here once they are generated."}
               </p>
@@ -1432,9 +2041,10 @@ export default function InvoicesPage() {
           </Card>
         )}
 
-        {/* Grouped invoice list */}
+        {/* Invoice list — grouped by billing month, or flat when an A/R sort
+            is active (Task #1890). */}
         <div className="space-y-8">
-          {groups.map((group) => {
+          {flatSections.map((group) => {
             // Terminal invoices (superseded, merged) are excluded from the
             // group total and collapsed as version history beneath their survivor.
             const activeInvoices = group.invoices.filter(
@@ -1482,22 +2092,28 @@ export default function InvoicesPage() {
             };
             return (
               <div key={group.key}>
-                {/* Month Header */}
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2">
-                    <Calendar className="w-4 h-4 text-blue-600" />
-                    <h2 className="text-base font-semibold text-gray-800">{group.label}</h2>
-                    <Badge variant="secondary" className="text-xs">
-                      {activeInvoices.length} invoice{activeInvoices.length !== 1 ? "s" : ""}
-                    </Badge>
+                {/* Month Header — suppressed under an A/R sort, where the
+                    ordering is global and a month heading would imply a
+                    grouping that is no longer there. */}
+                {group.label != null && (
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <Calendar className="w-4 h-4 text-blue-600" />
+                      <h2 className="text-base font-semibold text-gray-800">{group.label}</h2>
+                      <Badge variant="secondary" className="text-xs">
+                        {activeInvoices.length} invoice{activeInvoices.length !== 1 ? "s" : ""}
+                      </Badge>
+                    </div>
+                    <span className="text-sm font-semibold text-gray-700">{formatCurrency(groupTotal)}</span>
                   </div>
-                  <span className="text-sm font-semibold text-gray-700">{formatCurrency(groupTotal)}</span>
-                </div>
+                )}
 
                 {/* Invoice Table — desktop (Task #1439: compacted to
                     fit one view; QuickBooks folded into a status icon,
-                    period shortened, row actions in a ⋯ menu). */}
-                <div className="hidden md:block rounded-lg border border-gray-200 bg-white overflow-hidden">
+                    period shortened, row actions in a ⋯ menu).
+                    Task #1890 added the A/R columns, so the table scrolls
+                    horizontally rather than crushing the existing ones. */}
+                <div className="hidden md:block rounded-lg border border-gray-200 bg-white overflow-x-auto">
                   <Table>
                     <TableHeader>
                       <TableRow className="bg-gray-50 hover:bg-gray-50">
@@ -1506,6 +2122,24 @@ export default function InvoicesPage() {
                         <SortableHeader sortKey="invoiceNumber" label="Invoice #" sort={sort} onSort={toggleSort} />
                         <SortableHeader sortKey="status" label="Status" sort={sort} onSort={toggleSort} />
                         <SortableHeader sortKey="amount" label="Amount" sort={sort} onSort={toggleSort} align="right" />
+                        {/* Task #1890 — A/R columns. These sort on the server,
+                            over every invoice, not just the loaded rows. */}
+                        <ArSortableHeader sortKey="balanceDue" align="right" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
+                        <ArSortableHeader sortKey="effectiveDueDate" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
+                        <ArSortableHeader sortKey="daysOverdue" align="right" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
+                        <ArSortableHeader sortKey="agingBucket" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
+                        <ArSortableHeader sortKey="paymentStatus" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
+                        <ArSortableHeader sortKey="sent" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
+                        <TableHead className="whitespace-nowrap">Flags</TableHead>
+                        {/* Reminder columns render inert and permanently
+                            visible so the layout does not shift when
+                            reminders actually land. */}
+                        <TableHead className="whitespace-nowrap text-muted-foreground">
+                          Last reminder
+                        </TableHead>
+                        <TableHead className="whitespace-nowrap text-muted-foreground">
+                          Reminders
+                        </TableHead>
                         <SortableHeader sortKey="period" label="Period" sort={sort} onSort={toggleSort} />
                         <TableHead className="w-10" />
                       </TableRow>
@@ -1596,6 +2230,7 @@ export default function InvoicesPage() {
                               </span>
                             ) : formatCurrency(invoice.totalAmount)}
                           </TableCell>
+                          {renderArCells(invoice)}
                           <TableCell
                             className="text-xs text-gray-600 whitespace-nowrap"
                             title={periodRangeOf(invoice)}
@@ -1625,6 +2260,9 @@ export default function InvoicesPage() {
                             <TableCell className="text-right whitespace-nowrap line-through">
                               {formatCurrency(prev.totalAmount)}
                             </TableCell>
+                            {/* A superseded/merged predecessor carries no live
+                                A/R position — the survivor holds the money. */}
+                            <TableCell colSpan={AR_COLUMN_COUNT} />
                             <TableCell className="whitespace-nowrap" title={periodRangeOf(prev)}>
                               {periodLabelOf(prev)}
                             </TableCell>
@@ -1694,6 +2332,34 @@ export default function InvoicesPage() {
                           <span className="font-bold text-gray-900">
                             {formatCurrency(invoice.totalAmount)}
                           </span>
+                        </div>
+                        {/* Task #1890 — the A/R position, condensed for a
+                            narrow screen. Same numbers as the desktop
+                            columns, same shared helpers. */}
+                        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600">
+                          <span data-testid={`ar-balance-mobile-${invoice.id}`}>
+                            <span className="text-gray-400">Balance </span>
+                            <span className={balanceIsFallbackOf(invoice) ? "" : "font-semibold text-gray-900"}>
+                              {formatCurrency(balanceDueOf(invoice))}
+                            </span>
+                          </span>
+                          <span data-testid={`ar-due-mobile-${invoice.id}`}>
+                            <span className="text-gray-400">Due </span>
+                            {invoice.effectiveDueDate ? formatDate(invoice.effectiveDueDate) : "—"}
+                          </span>
+                          <span data-testid={`ar-bucket-mobile-${invoice.id}`}>
+                            {AGING_BUCKET_LABELS[agingBucketOf(invoice, nowForAr)]}
+                          </span>
+                        </div>
+                        <div className="mt-1">
+                          <ArFlagBadges invoice={invoice} now={nowForAr} variant="mobile-" />
+                        </div>
+                        {/* Inert reminder row — see the desktop columns. */}
+                        <div
+                          className="mt-1 text-xs text-gray-300"
+                          data-testid={`ar-last-reminder-mobile-${invoice.id}`}
+                        >
+                          Last reminder — · Reminders —
                         </div>
                         <div
                           className="mt-2 text-xs text-gray-500"

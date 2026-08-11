@@ -20,6 +20,7 @@ import { ChevronRight, AlertCircle, TrendingUp } from "lucide-react";
 import { MetricTile } from "@/components/financial-pulse/metric-tile";
 import { adaptiveRefetchInterval } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
+import { AGING_BUCKET_LABELS } from "@workspace/shared";
 
 export type FinancialPulseVariant =
   | "admin-dashboard"
@@ -591,10 +592,12 @@ function ArAgingVariant() {
   const buckets =
     data?.buckets ??
     ([
-      { key: "current", label: "Current", amount: 0, count: 0 },
-      { key: "days30", label: "1–30 days overdue", amount: 0, count: 0 },
-      { key: "days60", label: "31–60 days overdue", amount: 0, count: 0 },
-      { key: "days90", label: "60+ days overdue", amount: 0, count: 0 },
+      // Task #1890 — labels come from the shared aging module so this
+      // placeholder cannot disagree with what the server sends.
+      { key: "current", label: AGING_BUCKET_LABELS.current, amount: 0, count: 0 },
+      { key: "days30", label: AGING_BUCKET_LABELS.days30, amount: 0, count: 0 },
+      { key: "days60", label: AGING_BUCKET_LABELS.days60, amount: 0, count: 0 },
+      { key: "days90", label: AGING_BUCKET_LABELS.days90, amount: 0, count: 0 },
     ] as AgingBucket[]);
   return (
     <WidgetCard
