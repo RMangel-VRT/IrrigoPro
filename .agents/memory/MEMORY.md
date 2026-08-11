@@ -22,4 +22,5 @@
 - [Silent empty lists](silent-empty-list-degradation.md) — catch-and-return-[] hides connection-acquisition failures; classify, rethrow, and render an error branch.
 - [ESM TDZ hidden by the bundler](esm-tdz-after-merge.md) — a merge can move a const below its use; the bundled server still runs while every ESM test dies at import.
 - [TS7022 from assert.ok in a loop](ts7022-assert-in-loop.md) — an inferred const narrowed by assert inside a for-loop goes implicitly any; annotate it explicitly.
+- [Validation run resource exhaustion](validation-run-resource-exhaustion.md) — EAGAIN/uv_thread/pino worker-init failures in parallel validation are transient; rerun solo, then retry completion.
 - [Dev DB lags merged schema](dev-db-schema-drift.md) — 42P01 for a just-merged feature's table is environment drift, not your bug; don't adopt it into your diff.
