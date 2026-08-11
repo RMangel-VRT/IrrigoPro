@@ -575,3 +575,72 @@ describe("bookkeeper controls", () => {
     expect(screen.getByTestId("button-void-invoice-1")).toBeTruthy();
   });
 });
+
+// ── 7. internal A/R note indicator (Task #1889) ─────────────────────────────
+//
+// The server decides who may know a note exists; these tests check the client
+// honours the payload it is given. The critical case is the one in the middle:
+// an ABSENT count and a ZERO count must both render nothing, but they mean
+// different things and neither may produce a badge.
+
+describe("internal A/R note indicator", () => {
+  // The bookkeeper lands on unpaid-and-overdue, so a row she can see at all
+  // has to be overdue and unpaid.
+  const overdueInvoice = (overrides: Row = {}) =>
+    cleanInvoice({
+      isOverdue: true,
+      daysOverdue: 45,
+      agingBucket: "days60",
+      effectiveDueDate: new Date(NOW - 45 * DAY).toISOString(),
+      dueDate: new Date(NOW - 45 * DAY).toISOString(),
+      arFlags: ["overdue"],
+      ...overrides,
+    });
+
+  it("shows the count and a hover preview when the server sent them", async () => {
+    roleRef.current = "bookkeeper";
+    rowsForResponse = [
+      overdueInvoice({
+        arNoteCount: 3,
+        lastArNoteAt: new Date(NOW - 2 * DAY).toISOString(),
+        lastArNotePreview: "AP says it's in the next check run",
+      }),
+    ];
+    renderInvoices();
+    await waitFor(() => expect(screen.getByTestId("ar-balance-1")).toBeTruthy());
+
+    const badge = firstByTestId("ar-note-indicator-1");
+    expect(badge.textContent).toContain("3");
+    // The preview rides along with the row, so hovering costs no request.
+    expect(badge.getAttribute("title")).toContain("AP says it's in the next check run");
+    expect(badge.getAttribute("title")).toContain("Internal only");
+  });
+
+  it("renders nothing when the row carries no notes", async () => {
+    roleRef.current = "bookkeeper";
+    rowsForResponse = [overdueInvoice({ arNoteCount: 0, lastArNoteAt: null, lastArNotePreview: null })];
+    renderInvoices();
+    await waitFor(() => expect(screen.getByTestId("ar-balance-1")).toBeTruthy());
+    expect(screen.queryByTestId("ar-note-indicator-1")).toBeNull();
+  });
+
+  it("renders nothing when the server stripped the fields for this role", async () => {
+    // What an irrigation_manager actually receives: the keys are simply not
+    // there. No badge, no placeholder, no "0" — nothing that hints a
+    // conversation about this customer exists.
+    roleRef.current = "irrigation_manager";
+    rowsForResponse = [cleanInvoice()];
+    renderInvoices();
+    await waitFor(() => expect(screen.getByTestId("ar-balance-1")).toBeTruthy());
+    expect(screen.queryByTestId("ar-note-indicator-1")).toBeNull();
+    expect(screen.queryByTestId("ar-note-indicator-mobile-1")).toBeNull();
+  });
+
+  it("appears on the mobile card too", async () => {
+    roleRef.current = "bookkeeper";
+    rowsForResponse = [overdueInvoice({ arNoteCount: 1, lastArNotePreview: "Left a voicemail" })];
+    renderInvoices();
+    await waitFor(() => expect(screen.getByTestId("ar-balance-1")).toBeTruthy());
+    expect(screen.getByTestId("ar-note-indicator-mobile-1")).toBeTruthy();
+  });
+});

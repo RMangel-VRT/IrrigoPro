@@ -72,6 +72,7 @@ import {
   Trash2,
   CheckSquare,
   Send,
+  MessageSquare,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -173,6 +174,17 @@ interface Invoice {
   // in either of these. Optional for the same cached-payload reason as above.
   lastReminderAt?: string | null;
   reminderCount?: number;
+  // Task #1889 — internal A/R notes, rolled up server-side in one query so the
+  // indicator does not cost a request per row.
+  //
+  // ABSENT, not zero, for a role without CAN_READ_AR_NOTES: the server strips
+  // these three keys from the payload entirely, because a count of 3 on a row
+  // is itself the disclosure that a dispute is in flight. Do not "fix" a
+  // missing badge by defaulting the count somewhere upstream — if the key is
+  // gone, the reader was not meant to know.
+  arNoteCount?: number;
+  lastArNoteAt?: string | null;
+  lastArNotePreview?: string | null;
 }
 
 const MONTH_NAMES = [
@@ -547,14 +559,50 @@ function ArFlagBadges({
   );
 }
 
-// ─── A/R query state, mirrored in the URL (Task #1890) ──────────────────────
-//
-// Every filter and the sort live in the query string, so a view is
-// bookmarkable, shareable and survives a reload. They are also sent to the
-// server, which filters and sorts the WHOLE invoice set before paginating —
-// sorting only the 50 rows already scrolled into view is backwards from what
-// collections needs.
-
+/**
+ * Task #1889 — "there is already a conversation about this one".
+ *
+ * A bookkeeper scanning the A/R list needs to know which invoices someone is
+ * already chasing before they pick up the phone and repeat the last person's
+ * call. The count and the preview arrive with the row (one rollup query for
+ * the whole set, not one request per row), so hovering costs nothing.
+ *
+ * Renders NOTHING when `arNoteCount` is undefined. That is not the "no notes"
+ * case — it is the "you are not allowed to know" case: the server strips these
+ * keys for a role without CAN_READ_AR_NOTES, so an irrigation manager reading
+ * this list never learns from a badge that a payment dispute exists. `0` is
+ * the genuine no-notes case and also renders nothing, quietly.
+ */
+function ArNoteIndicator({
+  invoice,
+  variant = "",
+}: {
+  invoice: Invoice;
+  variant?: "" | "mobile-";
+}) {
+  const count = invoice.arNoteCount;
+  if (count === undefined || count === null || count <= 0) return null;
+  const when = invoice.lastArNoteAt ? formatDate(invoice.lastArNoteAt) : null;
+  const preview = invoice.lastArNotePreview?.trim();
+  const title = [
+    `${count} internal follow-up note${count === 1 ? "" : "s"}${when ? ` · latest ${when}` : ""}`,
+    preview ? `“${preview}”` : null,
+    "Internal only — never shown to the customer. Open the invoice to read the full thread.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return (
+    <span
+      className="inline-flex items-center gap-0.5 text-[11px] font-medium text-slate-700 bg-slate-100 border border-slate-200 rounded px-1 py-0.5 cursor-help"
+      title={title}
+      aria-label={`${count} internal follow-up note${count === 1 ? "" : "s"}`}
+      data-testid={`ar-note-indicator-${variant}${invoice.id}`}
+    >
+      <MessageSquare className="w-3 h-3" />
+      {count}
+    </span>
+  );
+}
 type ArSortKey =
   | "balanceDue"
   | "effectiveDueDate"
@@ -2275,6 +2323,10 @@ export default function InvoicesPage() {
                                 {history.length}
                               </button>
                             )}
+                            {/* Task #1889 — a conversation is already in
+                                flight on this invoice. Absent entirely for a
+                                role the server strips the data for. */}
+                            <ArNoteIndicator invoice={invoice} />
                             </div>
                           </TableCell>
                           <TableCell className="whitespace-nowrap">
@@ -2442,6 +2494,10 @@ export default function InvoicesPage() {
                           {`Last reminder ${
                             invoice.lastReminderAt ? formatDate(invoice.lastReminderAt) : "never"
                           } · Reminders ${invoice.reminderCount ?? 0}`}
+                        </div>
+                        {/* Task #1889 — same indicator as the desktop row. */}
+                        <div className="mt-1">
+                          <ArNoteIndicator invoice={invoice} variant="mobile-" />
                         </div>
                         <div
                           className="mt-2 text-xs text-gray-500"

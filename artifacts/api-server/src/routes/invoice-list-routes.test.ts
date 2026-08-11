@@ -123,6 +123,7 @@ function buildApp(
     requireAuthentication: makeAuth(role, companyId),
     requireInvoiceRead,
     applyPricingVisibility: (_req, data) => data,
+    applyArNoteVisibility: (_req, data) => data,
     _storageApi: {
       async getInvoices(scoped) {
         calls.getInvoices.push(scoped);

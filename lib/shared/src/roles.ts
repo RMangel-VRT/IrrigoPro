@@ -59,6 +59,38 @@ export const CAN_READ_INVOICES = new Set<Role>([
 ]);
 
 /**
+ * Read and append the internal A/R note thread on an invoice — the collections
+ * follow-up history ("left a voicemail", "AP says it's in the next check run",
+ * "disputing the second ticket").
+ *
+ * This set is DELIBERATELY NARROWER than `CAN_READ_INVOICES`, and the
+ * difference is the whole point of it existing. Do not "align" the two.
+ *
+ * `irrigation_manager` is in `CAN_READ_INVOICES` and is excluded here **by
+ * decision**. A manager reads a customer's invoice history from the customer
+ * profile, which is a record of what was billed. An A/R note is not that: it
+ * is candid commentary *about* a customer — that their AP is stalling, that
+ * they are disputing a ticket, that the cheque story keeps changing — written
+ * by the people chasing the money. Irrigation managers work alongside those
+ * same customers every day, and that commentary does not belong in the hands
+ * of the person walking their property next week. Removing this exclusion is a
+ * product decision about candour, not a tidy-up of an inconsistency.
+ *
+ * `field_tech` is excluded for the same reason it is excluded from invoice
+ * reads: none of A/R is a tech's job.
+ *
+ * Nothing in this set grants a note *edit* or *delete*. The thread is
+ * append-only for everyone, including super_admin, and that is enforced by
+ * there being no such endpoint at all rather than by a capability check.
+ */
+export const CAN_READ_AR_NOTES = new Set<Role>([
+  "super_admin",
+  "company_admin",
+  "billing_manager",
+  "bookkeeper",
+]);
+
+/**
  * Mutate invoices: create, edit, correct, void, merge, delete, regenerate a
  * PDF, adjust payment state.
  *

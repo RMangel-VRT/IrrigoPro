@@ -68,6 +68,14 @@ args = "invoice-reminders-batch"
 task = "workflow.run"
 args = "invoice-batch-reminders-ui"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "invoice-ar-notes"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "invoice-ar-notes-panel"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -182,9 +190,31 @@ isValidation = true
 name = "invoice-ar-ui"
 author = "agent"
 
+[workflows.workflow.metadata]
+isValidation = true
+
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/irrigopro exec vitest run src/pages/invoices-ar-collections.test.tsx"
+
+[[workflows.workflow]]
+name = "invoice-ar-notes"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/routes/invoice-ar-notes.test.ts"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "invoice-ar-notes-panel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/irrigopro exec vitest run src/components/billing/invoice-ar-notes-panel.test.tsx"
 
 [workflows.workflow.metadata]
 isValidation = true

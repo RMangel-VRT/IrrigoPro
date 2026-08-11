@@ -17,6 +17,8 @@ import { FileText, Download, Mail, Loader2, AlertCircle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { InvoiceReminderPanel } from "./invoice-reminder-panel";
+import { InvoiceArNotesPanel } from "./invoice-ar-notes-panel";
+import { hasCapability, CAN_READ_AR_NOTES } from "@workspace/shared";
 
 interface InvoicePdfPreviewModalProps {
   invoiceId: number;
@@ -152,6 +154,17 @@ export function InvoicePdfPreviewModal({
   // A 422 from the fetch route carries the reconciliation drift details —
   // surface them instead of the generic "PDF Not Available" message.
   const queryError = parsePdfFetchError(error);
+
+  // Task #1889 — the signed-in role, read the same way the rest of this file
+  // reads it. Used only to decide whether the internal A/R note panel renders.
+  const currentUserRole: string | null = (() => {
+    try {
+      const u = JSON.parse(safeGet("user") || "{}");
+      return typeof u?.role === "string" ? u.role : null;
+    } catch {
+      return null;
+    }
+  })();
 
   const getAuthParams = () => {
     const user = JSON.parse(safeGet("user") || "{}");
@@ -395,6 +408,24 @@ export function InvoicePdfPreviewModal({
                 open={open}
               />
             </div>
+
+            {/* Task #1889 — the internal note thread, deliberately adjacent to
+                the reminder history: together they are what we said to the
+                customer and what the customer said back.
+
+                CAN_READ_AR_NOTES is NARROWER than invoice read — an irrigation
+                manager gets this far and must not see the panel. This check is
+                a courtesy to avoid rendering a panel whose every request would
+                403; the enforcement is the server's, on both endpoints. */}
+            {hasCapability(currentUserRole, CAN_READ_AR_NOTES) && (
+              <div className="mt-6">
+                <InvoiceArNotesPanel
+                  invoiceId={invoiceId}
+                  invoiceNumber={invoiceNumber}
+                  open={open}
+                />
+              </div>
+            )}
           </div>
         </DialogContent>
       </Dialog>

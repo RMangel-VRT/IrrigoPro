@@ -15,4 +15,6 @@
 - [Invoice balance needs a payment sync](invoice-balance-fixtures.md) — an unsynced invoice resolves to its full total; a fixture wanting a partial balance must carry a sync timestamp.
 - [Radix Select in jsdom](radix-select-jsdom.md) — shim the pointer-capture methods or opening a Select throws an unhandled error beside a confusing waitFor failure.
 - [Confirmation interlocks](confirmation-interlocks.md) — "a human saw the list first" must be enforced with a preview-issued token at the API boundary, never by the dialog alone.
+- [Proving web-artifact purity from api tests](proving-web-artifact-purity-from-api-tests.md) — extract the pure module, import it by computed URL; keep cross-surface leak proofs in one group.
+- [Workflow limit — use validation commands](workflow-limit-use-validation.md) — this repo is past the 10-workflow cap; register new test suites as validation commands, not workflows.
 - [A/R aging boundaries are frozen](aging-bucket-boundaries.md) — they feed Financial Pulse totals; relabel freely, never move a boundary, and leave the day-zero asymmetry alone.

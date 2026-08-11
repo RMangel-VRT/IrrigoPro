@@ -47,5 +47,6 @@ export async function withDbRetry<T>(fn: () => Promise<T>): Promise<T> {
 
 export * from "./schema";
 export * from "./pricing-fields";
+export * from "./ar-note-fields";
 export * from "./estimate-summary";
 export * from "./notification-types";

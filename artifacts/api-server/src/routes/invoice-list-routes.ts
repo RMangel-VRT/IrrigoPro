@@ -22,6 +22,9 @@ import { customers } from "@workspace/db/schema";
 import { db as dbModule } from "../db";
 import { storage as storageModule } from "../storage";
 import { paginate } from "./pagination";
+// Shared with the notes endpoints so the list hover preview and the thread can
+// never disagree about which note is latest or how it is truncated.
+import { arNotePreview } from "./invoice-ar-note-routes";
 import {
   agingBucketRank,
   classifyAgingBucket,
@@ -31,6 +34,8 @@ import {
   isBalanceFallback,
   isInvoiceOverdue,
   resolveBalanceDue,
+  hasCapability,
+  CAN_READ_AR_NOTES,
   type AgingBucketKey,
   type ArFlag,
 } from "@workspace/shared";
@@ -290,12 +295,32 @@ export interface AnnotatedInvoice extends InvoiceRowLike {
   /** Task #1887 — delivered reminders only. Null when none has ever gone out. */
   lastReminderAt: string | null;
   reminderCount: number;
+  // ── Task #1889 — internal A/R notes ───────────────────────────────────────
+  //
+  // OPTIONAL ON PURPOSE. These three keys are present only for a caller with
+  // CAN_READ_AR_NOTES. For anyone else — an irrigation_manager, who can read
+  // invoices — they are stripped out of the payload entirely by
+  // `applyArNoteVisibility` before the response is written, because a note
+  // count of 3 on a row is itself the disclosure that a dispute is in flight.
+  // Do not make them required, and do not "fix" a role's missing badge in the
+  // client. See AR_NOTE_FIELDS_TO_STRIP in lib/db/src/ar-note-fields.ts.
+  arNoteCount?: number;
+  lastArNoteAt?: string | null;
+  /** Truncated text of the most recent note, for the list hover preview. */
+  lastArNotePreview?: string | null;
 }
 
 /** Task #1887 — per-invoice reminder rollup, keyed by invoice id. */
 export interface ReminderSummary {
   reminderCount: number;
   lastReminderAt: Date;
+}
+
+/** Task #1889 — per-invoice A/R note rollup, keyed by invoice id. */
+export interface ArNoteSummary {
+  noteCount: number;
+  lastNoteAt: Date;
+  lastNoteText: string;
 }
 
 /**
@@ -310,6 +335,11 @@ export function annotateInvoiceForAr(
   paymentTerms: string | null | undefined,
   now: Date,
   reminders?: ReminderSummary,
+  // Task #1889 — passed only when the caller holds CAN_READ_AR_NOTES. When it
+  // is undefined the three note keys are never written onto the row at all, so
+  // the strip below has nothing to do for an unauthorized caller and a bug in
+  // one of the two layers cannot leak the count on its own.
+  notes?: { summary?: ArNoteSummary; visible: boolean },
 ): AnnotatedInvoice {
   const effDue = computeEffectiveDueDate(inv.dueDate, inv.createdAt, paymentTerms);
   const overdue = isInvoiceOverdue(inv.paymentStatus, effDue, now);
@@ -331,6 +361,17 @@ export function annotateInvoiceForAr(
       ? new Date(reminders.lastReminderAt).toISOString()
       : null,
     reminderCount,
+    ...(notes?.visible
+      ? {
+          arNoteCount: notes.summary?.noteCount ?? 0,
+          lastArNoteAt: notes.summary?.lastNoteAt
+            ? new Date(notes.summary.lastNoteAt).toISOString()
+            : null,
+          lastArNotePreview: notes.summary
+            ? arNotePreview(notes.summary.lastNoteText)
+            : null,
+        }
+      : {}),
   };
 }
 
@@ -489,12 +530,22 @@ export interface RegisterInvoiceListRoutesDeps {
   requireInvoiceRead: RequestHandler;
   /** Defence in depth — the guard above already excludes field_tech. */
   applyPricingVisibility: (req: any, data: any) => any;
+  /**
+   * Task #1889 — strips arNoteCount / lastArNoteAt / lastArNotePreview for a
+   * caller without CAN_READ_AR_NOTES. Defence in depth: the handler already
+   * declines to fetch or annotate note data for such a caller, so this is the
+   * second of two independent reasons the keys cannot reach the wire.
+   */
+  applyArNoteVisibility: (req: any, data: any) => any;
   /** Test seams. Production passes neither. */
   _storageApi?: {
     getInvoices(companyId: number | null): Promise<any[]>;
     getInvoiceReminderSummaries?(
       companyId: number | null,
     ): Promise<Map<number, ReminderSummary>>;
+    getInvoiceArNoteSummaries?(
+      companyId: number | null,
+    ): Promise<Map<number, ArNoteSummary>>;
   };
   _loadPaymentTerms?: (customerIds: number[]) => Promise<Map<number, string | null>>;
   _now?: () => Date;
@@ -548,9 +599,22 @@ export function registerInvoiceListRoutes(
         const reminderMap: Map<number, ReminderSummary> =
           (await storage.getInvoiceReminderSummaries?.(callerCompanyId)) ?? new Map();
 
+        // Task #1889 — the note rollup is fetched ONLY for a caller who may see
+        // notes. An irrigation_manager reaches this endpoint legitimately and
+        // must leave with no note data at all, so the cheapest and safest thing
+        // is not to load it. One query for the whole scoped set, never one per
+        // row.
+        const arNotesVisible = hasCapability(callerRole, CAN_READ_AR_NOTES);
+        const arNoteMap: Map<number, ArNoteSummary> = arNotesVisible
+          ? ((await storage.getInvoiceArNoteSummaries?.(callerCompanyId)) ?? new Map())
+          : new Map();
+
         const now = nowFn();
         const annotated = all.map((inv) =>
-          annotateInvoiceForAr(inv, termsMap.get(inv.customerId), now, reminderMap.get(inv.id)),
+          annotateInvoiceForAr(inv, termsMap.get(inv.customerId), now, reminderMap.get(inv.id), {
+            summary: arNoteMap.get(inv.id),
+            visible: arNotesVisible,
+          }),
         );
 
         const filtered = annotated.filter((row) => matchesArFilters(row, q, now));
@@ -568,7 +632,7 @@ export function registerInvoiceListRoutes(
           page = ordered.slice(0, Math.max(1, Math.min(500, limit)));
         }
 
-        res.json(deps.applyPricingVisibility(req, page));
+        res.json(deps.applyArNoteVisibility(req, deps.applyPricingVisibility(req, page)));
       } catch (error) {
         console.error("Error fetching invoices:", error);
         res.status(500).json({ message: "Failed to fetch invoices" });

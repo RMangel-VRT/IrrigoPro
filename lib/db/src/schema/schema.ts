@@ -983,6 +983,45 @@ export const invoiceReminders = pgTable("invoice_reminders", {
   invoiceIdx: index("invoice_reminders_invoice_idx").on(table.invoiceId),
 }));
 
+// Task #1889 — Internal A/R notes on an invoice.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THESE NOTES ARE INTERNAL. THEY MUST NEVER APPEAR ON A CUSTOMER-FACING
+// DOCUMENT OR EMAIL — not on the invoice PDF, not in the invoice or reminder
+// mailers, not in the CSV export, not anywhere a customer can be handed a
+// file. If you are here because you are adding a field to the PDF pipeline or
+// to an email template, this table is not a source you may read from.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// This is the collections conversation — "left a voicemail", "AP says it's in
+// the next check run", "disputing the second ticket" — and it is candid on
+// purpose. It is distinct from BOTH of the note fields that already exist on
+// an invoice: the printed notes the customer reads, and `invoices.qbNote`,
+// which describes a pending QuickBooks cleanup action. Do not merge any of the
+// three.
+//
+// Append-only. There is deliberately no `updatedAt`, no `deletedAt`, and no
+// update/delete endpoint anywhere in the product — the thread is a record of
+// what was said and when, not a scratchpad. `authorName` is captured at write
+// time alongside the FK so the history stays readable after a user is renamed
+// or deactivated, the same way reminder history captures `sentByName`.
+//
+// Reads are gated on CAN_READ_AR_NOTES (see lib/shared/src/roles.ts), which is
+// narrower than invoice-read access.
+export const invoiceArNotes = pgTable("invoice_ar_notes", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").references(() => companies.id).notNull(),
+  invoiceId: integer("invoice_id").references(() => invoices.id).notNull(),
+  // Null only if the author is later deleted; every note records who wrote it.
+  authorUserId: integer("author_user_id").references(() => users.id),
+  authorName: text("author_name"),
+  note: text("note").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  companyIdx: index("invoice_ar_notes_company_idx").on(table.companyId),
+  invoiceIdx: index("invoice_ar_notes_invoice_idx").on(table.invoiceId),
+}));
+
 // Notifications table for workflow notifications
 export const notifications = pgTable("notifications", {
   id: serial("id").primaryKey(),
@@ -1151,6 +1190,9 @@ export const insertInvoiceSchema = createInsertSchema(invoices).omit({ id: true,
 export const insertInvoiceItemSchema = createInsertSchema(invoiceItems).omit({ id: true });
 export const insertInvoicePdfSchema = createInsertSchema(invoicePdfs).omit({ id: true, createdAt: true });
 export const insertInvoiceReminderSchema = createInsertSchema(invoiceReminders).omit({ id: true, createdAt: true });
+// Task #1889 — internal A/R notes. `createdAt` is omitted deliberately: the
+// note's timestamp is the server's, never the client's.
+export const insertInvoiceArNoteSchema = createInsertSchema(invoiceArNotes).omit({ id: true, createdAt: true });
 export const insertBillingSheetSchema = createInsertSchema(billingSheets)
   .omit({
     id: true,
@@ -1225,6 +1267,8 @@ export type InvoiceItem = typeof invoiceItems.$inferSelect;
 export type InvoicePdf = typeof invoicePdfs.$inferSelect;
 export type InvoiceReminder = typeof invoiceReminders.$inferSelect;
 export type InsertInvoiceReminder = typeof invoiceReminders.$inferInsert;
+export type InvoiceArNote = typeof invoiceArNotes.$inferSelect;
+export type InsertInvoiceArNote = typeof invoiceArNotes.$inferInsert;
 export type BillingSheet = typeof billingSheets.$inferSelect;
 export type BillingNumberCounter = typeof billingNumberCounters.$inferSelect;
 export type BillingSheetItem = typeof billingSheetItems.$inferSelect;

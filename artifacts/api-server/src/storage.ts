@@ -14,6 +14,7 @@ import {
   invoiceItems,
   invoicePdfs,
   invoiceReminders,
+  invoiceArNotes,
   billingSheets,
   billingSheetItems,
   manualPartReviews,
@@ -74,6 +75,8 @@ import {
   type InvoicePdf,
   type InvoiceReminder,
   type InsertInvoiceReminder,
+  type InvoiceArNote,
+  type InsertInvoiceArNote,
   type BillingSheet,
   type BillingSheetItem,
   type ManualPartReview,
@@ -721,6 +724,18 @@ export interface IStorage {
   getInvoiceReminderSummaries(
     companyId: number | null,
   ): Promise<Map<number, { reminderCount: number; lastReminderAt: Date }>>;
+
+  // Task #1889 — internal A/R notes. Append and read ONLY. There is no
+  // updateInvoiceArNote and no deleteInvoiceArNote, and there must not be one:
+  // the thread is append-only, and the absence of a mutation path is what
+  // enforces that rather than a check someone can forget.
+  createInvoiceArNote(row: InsertInvoiceArNote): Promise<InvoiceArNote>;
+  /** Full thread for one invoice, newest first. Company-scoped. */
+  getInvoiceArNotes(invoiceId: number, companyId: number | null): Promise<InvoiceArNote[]>;
+  /** Note count + most recent note, per invoice, for the A/R list indicator. */
+  getInvoiceArNoteSummaries(
+    companyId: number | null,
+  ): Promise<Map<number, { noteCount: number; lastNoteAt: Date; lastNoteText: string }>>;
 
   mergeInvoices(params: {
     survivingId: number;
@@ -7098,6 +7113,65 @@ export class DatabaseStorage implements IStorage {
       map.set(r.invoiceId, {
         reminderCount: Number(r.reminderCount) || 0,
         lastReminderAt: new Date(r.lastReminderAt as unknown as string),
+      });
+    }
+    return map;
+  }
+
+  // ── Task #1889 — internal A/R notes ───────────────────────────────────────
+  //
+  // Append and read. There is deliberately NO update and NO delete method on
+  // this table anywhere in the storage layer: the thread is append-only, and
+  // the way that is guaranteed is that no code path exists to change a row.
+  // Do not add one — not a soft delete, not an admin override.
+  //
+  // These rows are internal. Nothing in the PDF pipeline, the mailers, or any
+  // customer-facing export may call these methods.
+
+  async createInvoiceArNote(row: InsertInvoiceArNote): Promise<InvoiceArNote> {
+    const [created] = await db.insert(invoiceArNotes).values(row).returning();
+    return created;
+  }
+
+  async getInvoiceArNotes(
+    invoiceId: number,
+    companyId: number | null,
+  ): Promise<InvoiceArNote[]> {
+    const where = companyId == null
+      ? eq(invoiceArNotes.invoiceId, invoiceId)
+      : and(eq(invoiceArNotes.invoiceId, invoiceId), eq(invoiceArNotes.companyId, companyId));
+    return await db
+      .select()
+      .from(invoiceArNotes)
+      .where(where)
+      .orderBy(desc(invoiceArNotes.createdAt), desc(invoiceArNotes.id));
+  }
+
+  async getInvoiceArNoteSummaries(
+    companyId: number | null,
+  ): Promise<Map<number, { noteCount: number; lastNoteAt: Date; lastNoteText: string }>> {
+    // One rollup for the whole company-scoped set, so the list indicator costs
+    // a single query rather than a request per row.
+    const conditions = companyId != null ? [eq(invoiceArNotes.companyId, companyId)] : [];
+    const rows = await db
+      .select({
+        invoiceId: invoiceArNotes.invoiceId,
+        noteCount: sql<number>`count(*)::int`,
+        lastNoteAt: sql<Date>`max(${invoiceArNotes.createdAt})`,
+        // The note attached to that latest timestamp. DISTINCT ON would be the
+        // other way to write this; the ordered aggregate keeps it to one pass.
+        lastNoteText: sql<string>`(array_agg(${invoiceArNotes.note} ORDER BY ${invoiceArNotes.createdAt} DESC, ${invoiceArNotes.id} DESC))[1]`,
+      })
+      .from(invoiceArNotes)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .groupBy(invoiceArNotes.invoiceId);
+
+    const map = new Map<number, { noteCount: number; lastNoteAt: Date; lastNoteText: string }>();
+    for (const r of rows) {
+      map.set(r.invoiceId, {
+        noteCount: Number(r.noteCount) || 0,
+        lastNoteAt: new Date(r.lastNoteAt as unknown as string),
+        lastNoteText: String(r.lastNoteText ?? ""),
       });
     }
     return map;

@@ -103,10 +103,10 @@ function resolveCompanyId(req: Request): string | null {
   return hdr ? String(hdr) : null;
 }
 
-// ============================================================================
+// ────────────────────────────────────────────────────────────────────────────
 // FIELD TECH PRICING VISIBILITY - Critical Security Feature
 // Field technicians must NEVER see pricing/money values anywhere in the app
-// ============================================================================
+// ────────────────────────────────────────────────────────────────────────────
 
 // Fields to strip from responses for field technicians. The set is
 // imported from `@workspace/db` (`PRICING_FIELDS_TO_STRIP`, derived
@@ -168,6 +168,10 @@ function applyPricingVisibility(req: Request, data: any): any {
   if (effectiveRole !== 'field_tech') return data;
   return sanitizePricingFieldsInPlace(data);
 }
+
+// Task #1889 — the A/R note strip lives in ./ar-note-visibility so the
+// leak-proof tests exercise the real function rather than a copy of it.
+// Imported below, alongside the invoice route modules.
 
 // ─── Authoritative server-side pricing for billing sheet line items (Task #160) ─
 // Catalog parts (items with a `partId`) must always be persisted with the
@@ -395,6 +399,8 @@ import {
   registerInvoiceReminderRoutes,
 } from "./invoice-reminder-routes";
 import { registerInvoiceReminderBatchRoutes } from "./invoice-reminder-batch-routes";
+import { registerInvoiceArNoteRoutes } from "./invoice-ar-note-routes";
+import { applyArNoteVisibility } from "./ar-note-visibility";
 import { registerInvoiceCorrectionRoutes } from "./invoice-correction-routes";
 import { registerInvoiceEditabilityRoutes } from "./invoice-editability-routes";
 // Task #1890 — computeEffectiveDueDate / isInvoiceOverdue were imported here
@@ -955,6 +961,7 @@ import {
   requireInvoiceRead,
   requireInvoiceWrite,
   requireInvoiceSend,
+  requireArNotesAccess,
   requireQuickBooksAccess,
 } from "./role-guards";
 import { db } from "../db";
@@ -7498,6 +7505,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     requireInvoiceSend,
     _core: reminderCore,
   });
+  // Task #1889 — internal A/R notes. GET + POST only; there is deliberately no
+  // update or delete route in that module and there must never be one.
+  // Gated on requireArNotesAccess (CAN_READ_AR_NOTES), which is NARROWER than
+  // requireInvoiceRead: irrigation_manager reads invoices and is refused here.
+  registerInvoiceArNoteRoutes(app, { requireAuthentication, requireArNotesAccess });
   // Task #1710 — Invoice Correction & Reissue (Guided Dispute Flow).
   // syncInvoiceToQb: inject the local closure so the qb-sync endpoint can
   // call updateQbInvoiceInPlace without duplicating QB plumbing here.
@@ -10142,6 +10154,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     requireAuthentication,
     requireInvoiceRead,
     applyPricingVisibility,
+    // Task #1889 — A/R note count + preview leave the payload entirely for a
+    // role without CAN_READ_AR_NOTES.
+    applyArNoteVisibility,
   });
 
   app.post("/api/work-orders/:id/create-invoice", requireAuthentication, requireSameCompanyAsWorkOrder, async (req, res) => {
@@ -15125,9 +15140,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // ============================================
+  // ────────────────────────────────────────────
   // External API Key Management Routes
-  // ============================================
+  // ────────────────────────────────────────────
   
   // Get all API keys for the company (admin only)
   app.get("/api/company/:companyId/api-keys", requireAuthentication, requireCompanyAdminAccess, async (req, res) => {
@@ -15214,9 +15229,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // ============================================
+  // ────────────────────────────────────────────
   // External Work Order API (for CRM Integration)
-  // ============================================
+  // ────────────────────────────────────────────
   
   // Create work order via external API with API key authentication
   app.post("/api/external/work-orders", requireApiKey, async (req, res) => {
@@ -15427,9 +15442,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     });
   }
 
-  // ============================================================================
+  // ────────────────────────────────────────────────────────────────────────────
   // AI Work Description Generator
-  // ============================================================================
+  // ────────────────────────────────────────────────────────────────────────────
   app.post("/api/ai/generate-work-description", requireAuthentication, async (req: any, res) => {
     try {
       const {

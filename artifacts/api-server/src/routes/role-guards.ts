@@ -20,6 +20,7 @@ type Guard = (req: any, res: any, next: any) => void;
 import {
   hasCapability,
   CAN_READ_INVOICES,
+  CAN_READ_AR_NOTES,
   CAN_EDIT_INVOICES,
   CAN_SEND_INVOICE_EMAIL,
   CAN_MANAGE_QUICKBOOKS,
@@ -91,6 +92,32 @@ export const requireInvoiceWrite: Guard = (req, res, next) => {
  */
 export const requireInvoiceSend: Guard = (req, res, next) => {
   if (!hasCapability(req.authenticatedUserRole, CAN_SEND_INVOICE_EMAIL)) {
+    res.status(403).json(DENIED);
+    return;
+  }
+  next();
+};
+
+// ── internal A/R notes guard ─────────────────────────────────────────────────
+
+/**
+ * Task #1889 — read or append the internal A/R note thread on an invoice.
+ *
+ * Backed by CAN_READ_AR_NOTES, which is deliberately NARROWER than
+ * CAN_READ_INVOICES: irrigation_manager may read invoices and may not read
+ * notes. See the capability's comment in lib/shared/src/roles.ts before
+ * changing anything here.
+ *
+ * One guard covers both reading and appending on purpose. Anyone who can read
+ * the thread can add to it — there is no "read-only participant" in a
+ * collections conversation — and neither endpoint can edit or delete, because
+ * no such endpoint exists.
+ *
+ * The refusal message says nothing about notes existing. A role that is not
+ * allowed to know a thread is there does not learn otherwise from a 403 body.
+ */
+export const requireArNotesAccess: Guard = (req, res, next) => {
+  if (!hasCapability(req.authenticatedUserRole, CAN_READ_AR_NOTES)) {
     res.status(403).json(DENIED);
     return;
   }
