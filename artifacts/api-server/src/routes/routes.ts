@@ -41,6 +41,8 @@ import {
   resolveAsOfCutoff,
   previousCalendarMonth,
 } from "../billing-unbilled-selectors";
+// Task #1898 — batched billing-preview assembly (replaces the per-customer fan-out).
+import { registerBillingPreviewRoute } from "./billing-preview-route";
 /**
  * Phase 5b — QB Harden #5: thrown when the detected credential environment
  * does not match the server environment and STRICT_QB_ENV_CHECK is set.
@@ -6089,113 +6091,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Customer billing preview data - includes estimates, work orders, and billing sheets
   // This must come BEFORE the :id route to avoid parameter conflicts
-  app.get("/api/customers/billing-preview", requireAuthentication, async (req, res) => {
-    try {
-      console.log("Fetching comprehensive customer billing data...");
-      const allCustomers = await storage.getCustomers();
-      const customers = allCustomers.filter(c => !c.hiddenFromBilling);
-      console.log(`Found ${customers.length} customers (${allCustomers.length - customers.length} hidden from billing)`);
-      
-      // Resolve billing month — default to the previous calendar month when
-      // the client omits selectedMonth (or sends an empty string).
-      // "all" → no date cutoff (all-open view); YYYY-MM → cutoff at
-      // 23:59:59.999 on the last day of that month in server-local time.
-      const rawSelectedMonth = req.query.selectedMonth as string | undefined;
-      const selectedMonth = rawSelectedMonth && rawSelectedMonth.trim() !== ''
-        ? rawSelectedMonth.trim()
-        : previousCalendarMonth();
-      const asOfCutoff = resolveAsOfCutoff(selectedMonth);
-      
-      // Get billing previews for all customers including work orders, estimates, and billing sheets
-      const customerPreviews = await Promise.all(customers.map(async (customer) => {
-        try {
-          // Get all four data sources for this customer
-          const callerCompanyId6058 = (req as any).authenticatedUserRole === 'super_admin' ? null : ((req as any).authenticatedUserCompanyId ?? null);
-          const workOrders = await storage.getWorkOrdersByCustomer(customer.id, callerCompanyId6058);
-          const estimates = await storage.getEstimatesByCustomer(customer.id);
-          const billingSheets = await storage.getBillingSheetsByCustomer(customer.id, callerCompanyId6058);
-          const wetCheckBillingsForCustomer = await storage.getWetCheckBillingsByCustomer(customer.id);
-
-          const approvedEstimates = estimates.filter(est => est.status === 'approved');
-
-          // Partition via canonical selector — single source of truth for both
-          // billing-preview and /api/customers/:id/billing. The cutoff is the
-          // last instant of the selected billing month (upper bound only, open
-          // start). null = all-open view. Null work-date records are always
-          // included and flagged undated:true.
-          const partition = computeUnbilledPartition(
-            workOrders,
-            billingSheets,
-            wetCheckBillingsForCustomer,
-            asOfCutoff,
-          );
-          const { approvedTotal, unapprovedTotal } = partition;
-          // combinedTotalForPayload = cutoff-scoped approved + unapproved
-          const combinedTotalForPayload = partition.total;
-          // unbilledAmount kept for backward-compat (same as approvedTotal)
-          const unbilledAmount = approvedTotal;
-          // allOpenTotal: no-cutoff total (for Financial Pulse cross-check +
-          // "All open" view). Also exposed as allTimeApprovedTotal for
-          // backward-compat with frontend code that reads that field.
-          const allTimeApprovedTotal = partition.allOpenTotal;
-          const totalUnbilled = partition.allOpenTotal;
-          // currentMonthUnbilled removed — billing-month picker supersedes it.
-          const currentMonthUnbilled = 0;
-
-          return {
-            id: customer.id,
-            name: customer.name,
-            email: customer.email,
-            phone: customer.phone,
-            unbilledAmount,
-            approvedTotal,
-            unapprovedTotal,
-            combinedTotal: combinedTotalForPayload,
-            total: combinedTotalForPayload,  // cutoff-scoped; use this for list card "Total"
-            allOpenTotal: partition.allOpenTotal,  // no-cutoff; use this for "All open" view
-            totalUnbilled,
-            allTimeApprovedTotal,
-            currentMonthUnbilled,
-            currentMonthBilling: 0,
-            monthlyAverage: 0,
-            billingPace: 1,
-            lastInvoiceDate: null,
-            totalWorkOrders: workOrders.length,
-            pendingWorkOrders: workOrders.filter(wo => wo.status === 'pending' || wo.status === 'assigned' || wo.status === 'in_progress').length,
-            wetCheckBillings: wetCheckBillingsForCustomer
-          };
-        } catch (error) {
-          console.error(`Error processing customer ${customer.id}: ${error instanceof Error ? error.message : String(error)}`);
-          return {
-            id: customer.id,
-            name: customer.name,
-            email: customer.email,
-            phone: customer.phone,
-            unbilledAmount: 0,
-            approvedTotal: 0,
-            unapprovedTotal: 0,
-            combinedTotal: 0,
-            total: 0,
-            allOpenTotal: 0,
-            totalUnbilled: 0,
-            allTimeApprovedTotal: 0,
-            currentMonthUnbilled: 0,
-            currentMonthBilling: 0,
-            monthlyAverage: 0,
-            billingPace: 1,
-            lastInvoiceDate: null,
-            totalWorkOrders: 0,
-            pendingWorkOrders: 0
-          };
-        }
-      }));
-      
-      res.json(customerPreviews);
-    } catch (error) {
-      console.error("Error fetching customer billing previews:", error);
-      res.status(500).json({ message: "Failed to fetch customer billing previews" });
-    }
-  });
+  // Task #1898 — the handler lives in billing-preview-route.ts so its tenant
+  // scoping is testable against a storage stub. This is the real handler, not
+  // a mirror, so the test and production cannot drift apart.
+  registerBillingPreviewRoute(
+    app,
+    { storage, previousCalendarMonth, resolveAsOfCutoff },
+    requireAuthentication,
+  );
 
   // Get individual customer by ID
   app.get("/api/customers/:id", requireAuthentication, async (req, res) => {

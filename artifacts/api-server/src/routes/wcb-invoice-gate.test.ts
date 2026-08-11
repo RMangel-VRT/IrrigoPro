@@ -30,6 +30,13 @@ const predicatesSrc = readFileSync(
   path.join(__dirname, "..", "lib", "finding-predicates.ts"),
   "utf8",
 );
+// Task #1898 — the billing-preview customer list was batched and its
+// assembly moved out of routes.ts into this module. The visibility invariant
+// below follows it there; it is not weakened, just re-anchored.
+const previewSrc = readFileSync(
+  path.join(__dirname, "..", "billing-preview-sources.ts"),
+  "utf8",
+);
 
 /**
  * Return the N characters around the first occurrence of `anchor` in `src`.
@@ -51,13 +58,14 @@ describe("WCB invoice-gate: wcbIsEligible guard", () => {
 
   // Visibility paths — converted gate must be ABSENT (partial-parent WCBs must
   // still surface so billing managers can act on them).
-  const visibilitySites = [
+  const visibilitySites: Array<{ src: string; anchor: string }> = [
     // 1. Billing-preview customer list: WCBs fed into computeUnbilledPartition
-    //    directly from getWetCheckBillingsByCustomer, no converted gate applied.
-    "wetCheckBillingsForCustomer,",
+    //    straight from the batched loader, no converted gate applied.
+    //    (Task #1898 — assembly lives in billing-preview-sources.ts now.)
+    { src: previewSrc, anchor: "wetCheckBillings," },
     // 2. Single-customer billing page: unbilledWetCheckBillings derives from
     //    computeUnbilledPartition output (detailPartition.approvedWetCheckBillings).
-    "unbilledWetCheckBillings = detailPartition.approvedWetCheckBillings",
+    { src: routesSrc, anchor: "unbilledWetCheckBillings = detailPartition.approvedWetCheckBillings" },
   ];
 
   for (const anchor of invoiceConstructionSites) {
@@ -88,14 +96,14 @@ describe("WCB invoice-gate: wcbIsEligible guard", () => {
     assert.equal(found, 2, `Expected 2 invoice-construction filter sites, found ${found}`);
   });
 
-  for (const anchor of visibilitySites) {
+  for (const { src, anchor } of visibilitySites) {
     it(`visibility filter at "${anchor.slice(0, 50)}…" must NOT gate on wetCheckStatus`, () => {
-      const region = nearby(routesSrc, anchor, 800);
+      const region = nearby(src, anchor, 800);
       assert.ok(region, `anchor not found: ${anchor}`);
       // The gate must be absent from the filter expression itself.
       // We look for the closing ')' of the filter callback to bound the search.
       // Use a tighter 400-char window so we don't accidentally catch a nearby comment.
-      const tightRegion = nearby(routesSrc, anchor, 400) ?? "";
+      const tightRegion = nearby(src, anchor, 400) ?? "";
       assert.ok(
         !tightRegion.includes("wetCheckStatus === 'converted'"),
         `wetCheckStatus === 'converted' must NOT appear in the visibility filter near "${anchor.slice(0, 60)}…"\n\nActual region:\n${tightRegion}`,
@@ -103,10 +111,10 @@ describe("WCB invoice-gate: wcbIsEligible guard", () => {
     });
   }
 
-  it("both visibility filter sites exist in routes.ts", () => {
+  it("both visibility filter sites still exist", () => {
     let found = 0;
-    for (const anchor of visibilitySites) {
-      if (routesSrc.includes(anchor)) found++;
+    for (const { src, anchor } of visibilitySites) {
+      if (src.includes(anchor)) found++;
     }
     assert.equal(found, 2, `Expected 2 visibility filter sites, found ${found}`);
   });

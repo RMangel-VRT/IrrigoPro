@@ -33,6 +33,14 @@ interface Props {
   filters: EstimateFilterState;
   onOpen: (id: number) => void;
   onEdit: (id: number) => void;
+  /**
+   * Task #1898 — the fetch failed. Without this the list rendered its empty
+   * state ("No estimates yet") for a failed request, so a connection-pool
+   * timeout looked exactly like an account with no estimates and nobody
+   * reported it.
+   */
+  isError?: boolean;
+  onRetry?: () => void;
 }
 
 const fmt = (n: number) =>
@@ -49,7 +57,7 @@ function ageLabel(date: string | Date | null | undefined): string {
   return `${Math.floor(days / 30)}mo`;
 }
 
-export function EstimateList({ estimates, filters, onOpen, onEdit }: Props) {
+export function EstimateList({ estimates, filters, onOpen, onEdit, isError, onRetry }: Props) {
   const [sortField, setSortField] = useState<SortField>("date");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [resendDialogEstimate, setResendDialogEstimate] = useState<Estimate | null>(null);
@@ -95,6 +103,30 @@ export function EstimateList({ estimates, filters, onOpen, onEdit }: Props) {
       <ChevronDown className="inline w-3 h-3 ml-0.5" />
     );
   };
+
+  // Task #1898 — check the failure BEFORE the empty case. A failed fetch
+  // yields an empty array too, and reporting it as "no estimates yet" is how
+  // the connection-pool timeouts stayed invisible for so long.
+  if (isError) {
+    return (
+      <div
+        className="border border-red-200 bg-red-50 rounded-md p-6 text-center"
+        data-testid="estimate-list-error"
+      >
+        <p className="text-sm text-red-800 mb-3">Couldn't load estimates.</p>
+        {onRetry && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onRetry}
+            data-testid="estimate-list-error-retry"
+          >
+            Retry
+          </Button>
+        )}
+      </div>
+    );
+  }
 
   if (estimates.length === 0) {
     return (

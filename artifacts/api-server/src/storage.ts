@@ -155,6 +155,10 @@ import {
   WET_CHECK_ISSUE_TYPE_SEED,
 } from "@workspace/db";
 import { db, pool } from "./db";
+// Task #1898 — used by the list readers below that otherwise degrade a failed
+// read into an empty array. A pool-acquisition failure must NOT degrade: it
+// has to reach the route so the client renders an error state.
+import { isConnectionAcquisitionError } from "@workspace/db";
 import { sql, eq, like, ilike, desc, and, gte, lte, or, isNull, isNotNull, inArray, gt } from "drizzle-orm";
 import { logger } from "./lib/logger";
 import bcrypt from "bcrypt";
@@ -173,6 +177,17 @@ import { computeEstimateSummary } from "./estimate-summary";
 import type { EstimateSummary, WetCheckBillingListItem } from "@workspace/db";
 import { ObjectStorageService } from "./objectStorage";
 import { money } from "./lib/money";
+import {
+  computeEstimateTotals,
+  type EstimateItemTotals,
+} from "./estimate-item-totals";
+import {
+  groupByCustomerId,
+  type BillingPreviewBillingSheet,
+  type BillingPreviewSources,
+  type BillingPreviewWetCheckBilling,
+  type BillingPreviewWorkOrder,
+} from "./billing-preview-sources";
 import { resolveIssueTypeKey, seedIssueTypeConfigsForCompany } from "./seeds/issue-type-configs";
 import {
   validateMerge,
@@ -456,6 +471,13 @@ export interface IStorage {
   // Customer-related data
   getEstimatesByCustomer(customerId: number): Promise<Estimate[]>;
   getBillingSheetsByCustomer(customerId: number, companyId: number | null): Promise<BillingSheetWithItems[]>;
+  // Task #1898 — batched replacement for the billing-preview's per-customer
+  // fan-out. Three queries total, regardless of how many customers are in scope.
+  getBillingPreviewSources(
+    customerIds: number[],
+    companyId: number | null,
+  ): Promise<BillingPreviewSources>;
+  getWetCheckBillingsForCustomerIds(customerIds: number[]): Promise<WetCheckBillingListItem[]>;
   getBillingSheetsByTechnician(technicianId: number, companyId?: number | null): Promise<BillingSheetWithItems[]>;
   
   // Notifications
@@ -2737,43 +2759,50 @@ export class DatabaseStorage implements IStorage {
       ? baseQuery
       : baseQuery.where(isNull(estimates.deletedAt));
     const estimatesList = await filtered.orderBy(desc(estimates.createdAt));
-    
-    // Recalculate totals for each estimate to ensure accuracy
-    const estimatesWithCalculatedTotals = await Promise.all(
-      estimatesList.map(async (estimate) => {
-        const items = await db.select().from(estimateItems).where(eq(estimateItems.estimateId, estimate.id));
-        
-        let partsSubtotal = 0;
-        let perPartLaborHours = 0;
 
-        items.forEach(item => {
-          partsSubtotal += money(item.totalPrice);
-          perPartLaborHours += money(item.laborHours);
-        });
+    // Task #1898 — item totals used to be fetched with one query PER estimate
+    // (365 estimates = 366 round trips, each acquiring a pooled connection).
+    // Under the dashboard fan-out those acquisitions queued past the pool's
+    // timeout and the whole list 500'd. One batched read instead.
+    const itemTotals = await this._estimateItemTotals(estimatesList.map((e) => e.id));
 
-        // Prefer the SNAPSHOT appliedLaborRate (locked at creation /
-        // conversion) over the mutable customer/estimate laborRate so
-        // downstream reads never reprice an estimate if rates change later.
-        const laborRate = money(estimate.appliedLaborRate ?? estimate.laborRate);
-        // Task #396 — flat mode uses the persisted totalLaborHours; per_part
-        // mode keeps the legacy sum-of-line-hours behavior.
-        const totalLaborHours = estimate.laborMode === 'flat'
-          ? parseFloat(String(estimate.totalLaborHours ?? 0)) || 0
-          : perPartLaborHours;
-        const laborSubtotal = totalLaborHours * laborRate;
-        const totalAmount = partsSubtotal + laborSubtotal;
+    return estimatesList.map((estimate) => {
+      const t = computeEstimateTotals(estimate, itemTotals.get(estimate.id));
+      return {
+        ...estimate,
+        partsSubtotal: t.partsSubtotal.toFixed(2),
+        laborSubtotal: t.laborSubtotal.toFixed(2),
+        totalAmount: t.totalAmount.toFixed(2),
+        lifecycleStatus: computeLifecycleStatus(estimate),
+      };
+    });
+  }
 
-        return {
-          ...estimate,
-          partsSubtotal: partsSubtotal.toFixed(2),
-          laborSubtotal: laborSubtotal.toFixed(2),
-          totalAmount: totalAmount.toFixed(2),
-          lifecycleStatus: computeLifecycleStatus(estimate),
-        };
+  // Task #1898 — sum estimate_items per estimate in ONE query.
+  // Aggregating in SQL keeps the payload proportional to the number of
+  // estimates rather than the number of line items.
+  private async _estimateItemTotals(
+    estimateIds: number[],
+  ): Promise<Map<number, EstimateItemTotals>> {
+    const totals = new Map<number, EstimateItemTotals>();
+    if (estimateIds.length === 0) return totals;
+    const rows = await db
+      .select({
+        estimateId: estimateItems.estimateId,
+        partsSubtotal: sql<string>`coalesce(sum(${estimateItems.totalPrice}), 0)`,
+        laborHours: sql<string>`coalesce(sum(${estimateItems.laborHours}), 0)`,
       })
-    );
-    
-    return estimatesWithCalculatedTotals;
+      .from(estimateItems)
+      .where(inArray(estimateItems.estimateId, estimateIds))
+      .groupBy(estimateItems.estimateId);
+    for (const r of rows) {
+      if (r.estimateId == null) continue;
+      totals.set(r.estimateId, {
+        partsSubtotal: money(r.partsSubtotal),
+        perPartLaborHours: money(r.laborHours),
+      });
+    }
+    return totals;
   }
 
   // Manager review queue. Mirrors getEstimates per-row recompute, but
@@ -2802,36 +2831,19 @@ export class DatabaseStorage implements IStorage {
       .where(whereClause as any)
       .orderBy(desc(estimates.createdAt));
 
-    const estimatesWithCalculatedTotals = await Promise.all(
-      estimatesList.map(async (estimate) => {
-        const items = await db.select().from(estimateItems).where(eq(estimateItems.estimateId, estimate.id));
+    // Task #1898 — one batched item roll-up instead of one query per estimate.
+    const itemTotals = await this._estimateItemTotals(estimatesList.map((e) => e.id));
 
-        let partsSubtotal = 0;
-        let perPartLaborHours = 0;
-        items.forEach(item => {
-          partsSubtotal += money(item.totalPrice);
-          perPartLaborHours += money(item.laborHours);
-        });
-
-        const laborRate = money(estimate.appliedLaborRate ?? estimate.laborRate);
-        // Task #396 — honor flat mode using persisted totalLaborHours.
-        const totalLaborHours = estimate.laborMode === 'flat'
-          ? money(estimate.totalLaborHours ?? 0)
-          : perPartLaborHours;
-        const laborSubtotal = totalLaborHours * laborRate;
-        const totalAmount = partsSubtotal + laborSubtotal;
-
-        return {
-          ...estimate,
-          partsSubtotal: partsSubtotal.toFixed(2),
-          laborSubtotal: laborSubtotal.toFixed(2),
-          totalAmount: totalAmount.toFixed(2),
-          lifecycleStatus: computeLifecycleStatus(estimate),
-        };
-      })
-    );
-
-    return estimatesWithCalculatedTotals;
+    return estimatesList.map((estimate) => {
+      const t = computeEstimateTotals(estimate, itemTotals.get(estimate.id));
+      return {
+        ...estimate,
+        partsSubtotal: t.partsSubtotal.toFixed(2),
+        laborSubtotal: t.laborSubtotal.toFixed(2),
+        totalAmount: t.totalAmount.toFixed(2),
+        lifecycleStatus: computeLifecycleStatus(estimate),
+      };
+    });
   }
 
   // Task #683 — aggregate summary for the Estimate Command Center.
@@ -2855,29 +2867,15 @@ export class DatabaseStorage implements IStorage {
       .where(whereClause)
       .orderBy(desc(estimates.createdAt));
 
-    const recomputed = await Promise.all(
-      estimatesList.map(async (estimate) => {
-        const items = await db
-          .select()
-          .from(estimateItems)
-          .where(eq(estimateItems.estimateId, estimate.id));
-        let partsSubtotal = 0;
-        let perPartLaborHours = 0;
-        for (const item of items) {
-          partsSubtotal += parseFloat(String(item.totalPrice)) || 0;
-          perPartLaborHours += parseFloat(String(item.laborHours)) || 0;
-        }
-        const laborRate =
-          parseFloat(String(estimate.appliedLaborRate ?? estimate.laborRate)) || 0;
-        const totalLaborHours =
-          estimate.laborMode === "flat"
-            ? parseFloat(String(estimate.totalLaborHours ?? 0)) || 0
-            : perPartLaborHours;
-        const laborSubtotal = totalLaborHours * laborRate;
-        const totalAmount = partsSubtotal + laborSubtotal;
-        return { ...estimate, totalAmount: totalAmount.toFixed(2) };
-      }),
-    );
+    // Task #1898 — one batched item roll-up instead of one query per estimate.
+    const itemTotals = await this._estimateItemTotals(estimatesList.map((e) => e.id));
+    const recomputed = estimatesList.map((estimate) => ({
+      ...estimate,
+      totalAmount: computeEstimateTotals(
+        estimate,
+        itemTotals.get(estimate.id),
+      ).totalAmount.toFixed(2),
+    }));
 
     return computeEstimateSummary(recomputed, new Date());
   }
@@ -3714,6 +3712,7 @@ export class DatabaseStorage implements IStorage {
         .where(scope ?? undefined)
         .orderBy(desc(workOrders.createdAt));
     } catch (error) {
+      if (isConnectionAcquisitionError(error)) throw error;
       console.error("Error fetching work orders:", error);
       return [];
     }
@@ -3727,6 +3726,7 @@ export class DatabaseStorage implements IStorage {
         .where(cond)
         .orderBy(desc(workOrders.createdAt));
     } catch (error) {
+      if (isConnectionAcquisitionError(error)) throw error;
       console.error("Error fetching work orders by technician:", error);
       return [];
     }
@@ -3740,6 +3740,10 @@ export class DatabaseStorage implements IStorage {
         .where(cond)
         .orderBy(desc(workOrders.createdAt));
     } catch (error) {
+      // Task #1898 — the incident's silent failure. A pool timeout used to
+      // return [] here, so the customer profile rendered "No work orders yet"
+      // for a customer that had plenty.
+      if (isConnectionAcquisitionError(error)) throw error;
       console.error("Error fetching work orders by customer:", error);
       return [];
     }
@@ -3753,6 +3757,7 @@ export class DatabaseStorage implements IStorage {
         .where(cond)
         .orderBy(desc(workOrders.createdAt));
     } catch (error) {
+      if (isConnectionAcquisitionError(error)) throw error;
       console.error("Error fetching work orders by status:", error);
       return [];
     }
@@ -3766,6 +3771,7 @@ export class DatabaseStorage implements IStorage {
         .where(cond)
         .orderBy(desc(workOrders.createdAt));
     } catch (error) {
+      if (isConnectionAcquisitionError(error)) throw error;
       console.error("Error fetching work orders by estimate:", error);
       return [];
     }
@@ -4683,6 +4689,17 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getWetCheckBillingsByCustomer(customerId: number): Promise<WetCheckBillingListItem[]> {
+    return this.getWetCheckBillingsForCustomerIds([customerId]);
+  }
+
+  // Task #1898 — the batched form. `getWetCheckBillingsByCustomer` is the
+  // single-customer case of this query; keeping one implementation means the
+  // correlated unroutedFindingsCount sub-query can't drift between the
+  // customer profile and the billing preview.
+  async getWetCheckBillingsForCustomerIds(
+    customerIds: number[],
+  ): Promise<WetCheckBillingListItem[]> {
+    if (customerIds.length === 0) return [];
     const rows = await db
       .select({
         wcb: wetCheckBillings,
@@ -4715,7 +4732,7 @@ export class DatabaseStorage implements IStorage {
       .from(wetCheckBillings)
       .leftJoin(wetCheckFindings, eq(wetCheckFindings.wetCheckBillingId, wetCheckBillings.id))
       .leftJoin(wetChecks, eq(wetChecks.id, wetCheckBillings.wetCheckId))
-      .where(eq(wetCheckBillings.customerId, customerId))
+      .where(inArray(wetCheckBillings.customerId, customerIds))
       .groupBy(wetCheckBillings.id, wetChecks.status, wetChecks.mode)
       .orderBy(desc(wetCheckBillings.createdAt));
     return rows.map((r) => ({
@@ -6293,8 +6310,13 @@ export class DatabaseStorage implements IStorage {
   // the customer's current emergency rate. The "inferred classification" is
   // whichever current rate the stored rate is numerically closest to —
   // admins can override this in the UI before applying the repair.
+  //
+  // Task #1898 — the two scans are independent, so they run concurrently.
+  // Serially they cost the sum of two full-table joins on the request's
+  // critical path; in parallel the request holds the pool for roughly the
+  // slower of the two instead.
   async getLaborRateMismatchTickets(companyId: number | null) {
-    const billingRows = await db.execute(sql`
+    const billingRowsPromise = db.execute(sql`
       SELECT
         'billing_sheet'::text     AS source,
         bs.id                     AS parent_id,
@@ -6323,7 +6345,7 @@ export class DatabaseStorage implements IStorage {
         AND (${companyId}::int IS NULL OR c.company_id = ${companyId}::int)
     `);
 
-    const workOrderRows = await db.execute(sql`
+    const workOrderRowsPromise = db.execute(sql`
       SELECT
         'work_order'::text          AS source,
         wo.id                       AS parent_id,
@@ -6350,6 +6372,11 @@ export class DatabaseStorage implements IStorage {
         AND ABS(CAST(COALESCE(wo.applied_labor_rate, wo.labor_rate) AS DOUBLE PRECISION) - CAST(c.emergency_labor_rate AS DOUBLE PRECISION)) > 0.005
         AND (${companyId}::int IS NULL OR c.company_id = ${companyId}::int)
     `);
+
+    const [billingRows, workOrderRows] = await Promise.all([
+      billingRowsPromise,
+      workOrderRowsPromise,
+    ]);
 
     const merged = [...billingRows.rows, ...workOrderRows.rows] as Array<Record<string, unknown>>;
     return merged
@@ -6749,6 +6776,72 @@ export class DatabaseStorage implements IStorage {
     }));
     
     return sheetsWithItems;
+  }
+
+  // Task #1898 — batched sources for GET /api/customers/billing-preview.
+  //
+  // Replaces four storage calls per customer (plus one query per billing
+  // sheet for its items) with three set-based reads. Only the columns the
+  // preview's partition math reads are projected, so the payload stays
+  // proportional to the number of rows rather than their full width.
+  //
+  // Company scoping mirrors the per-customer methods it replaces:
+  // work orders and billing sheets are scoped by their own companyId column;
+  // wet check billings are scoped by customer id only (they have no company
+  // column, same as getWetCheckBillingsByCustomer).
+  async getBillingPreviewSources(
+    customerIds: number[],
+    companyId: number | null,
+  ): Promise<BillingPreviewSources> {
+    if (customerIds.length === 0) {
+      return {
+        workOrdersByCustomer: new Map(),
+        billingSheetsByCustomer: new Map(),
+        wetCheckBillingsByCustomer: new Map(),
+      };
+    }
+
+    const woScope = this._companyScope(companyId);
+    const woWhere = woScope
+      ? and(inArray(workOrders.customerId, customerIds), woScope)
+      : inArray(workOrders.customerId, customerIds);
+
+    const bsScope = this._companyScopeForBS(companyId);
+    const bsWhere = bsScope
+      ? and(inArray(billingSheets.customerId, customerIds), bsScope)
+      : inArray(billingSheets.customerId, customerIds);
+
+    const [woRows, bsRows, wcbRows] = await Promise.all([
+      db
+        .select({
+          id: workOrders.id,
+          customerId: workOrders.customerId,
+          status: workOrders.status,
+          invoiceId: workOrders.invoiceId,
+          totalAmount: workOrders.totalAmount,
+          completedAt: workOrders.completedAt,
+        })
+        .from(workOrders)
+        .where(woWhere),
+      db
+        .select({
+          id: billingSheets.id,
+          customerId: billingSheets.customerId,
+          status: billingSheets.status,
+          invoiceId: billingSheets.invoiceId,
+          totalAmount: billingSheets.totalAmount,
+          workDate: billingSheets.workDate,
+        })
+        .from(billingSheets)
+        .where(bsWhere),
+      this.getWetCheckBillingsForCustomerIds(customerIds),
+    ]);
+
+    return {
+      workOrdersByCustomer: groupByCustomerId(woRows as BillingPreviewWorkOrder[]),
+      billingSheetsByCustomer: groupByCustomerId(bsRows as BillingPreviewBillingSheet[]),
+      wetCheckBillingsByCustomer: groupByCustomerId(wcbRows),
+    };
   }
 
   async getBillingSheetsByTechnician(technicianId: number, companyId?: number | null): Promise<BillingSheetWithItems[]> {

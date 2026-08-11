@@ -189,11 +189,15 @@ export default function Estimates() {
                   </Button>
                 </div>
               </div>
+              {/* Task #1898 — isError was only wired into the board view, so
+                  a failed fetch rendered the list's empty state instead. */}
               <EstimateList
                 estimates={estimates ?? []}
                 filters={filters}
                 onOpen={handleOpenEstimate}
                 onEdit={handleEditEstimate}
+                isError={isError}
+                onRetry={handleRefresh}
               />
             </div>
           )}

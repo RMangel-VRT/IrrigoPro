@@ -159,9 +159,25 @@ export function resolveFinancialPulseScope(
 async function loadCustomers(
   companyId: number | null,
 ): Promise<CustomerWithBudget[]> {
+  // Task #1898 — project only the nine columns the KPI math reads. The
+  // customers table is the widest in the schema and the largest tenant has
+  // ~2,000 rows, so `select()` was pulling megabytes off the wire (and
+  // holding a pooled connection) for data nothing downstream touched.
+  const projection = {
+    id: customers.id,
+    companyId: customers.companyId,
+    contractType: customers.contractType,
+    emergencyLaborRate: customers.emergencyLaborRate,
+    name: customers.name,
+    hiddenFromBilling: customers.hiddenFromBilling,
+    monthlyBudgetCap: customers.monthlyBudgetCap,
+    annualBudgetCap: customers.annualBudgetCap,
+    budgetSoftThresholdPercent: customers.budgetSoftThresholdPercent,
+    budgetHardThresholdPercent: customers.budgetHardThresholdPercent,
+  };
   const rows = companyId == null
-    ? await db.select().from(customers)
-    : await db.select().from(customers).where(eq(customers.companyId, companyId));
+    ? await db.select(projection).from(customers)
+    : await db.select(projection).from(customers).where(eq(customers.companyId, companyId));
   return rows.map((c) => ({
     id: c.id,
     companyId: c.companyId,
@@ -225,12 +241,19 @@ async function loadInvoicesForCustomers(
 
 // Task #726 — load all work orders / billing sheets for a customer scope so
 // computeAllBillableYtd can include uninvoiced pipeline in the YTD tile.
+// Task #1898 — `customerId` is carried through so computeUnbilledExposure can
+// re-scope these same rows to non-hidden customers instead of re-querying.
+type WorkOrderBillableRow = WorkOrderBillableLike & { customerId: number | null };
+type BillingSheetBillableRow = BillingSheetBillableLike & { customerId: number | null };
+type WetCheckBillingBillableRow = WetCheckBillingBillableLike & { customerId: number | null };
+
 async function loadAllWorkOrdersForCustomers(
   customerIds: number[],
-): Promise<WorkOrderBillableLike[]> {
+): Promise<WorkOrderBillableRow[]> {
   if (customerIds.length === 0) return [];
   const rows = await db
     .select({
+      customerId: workOrders.customerId,
       invoiceId: workOrders.invoiceId,
       totalAmount: workOrders.totalAmount,
       status: workOrders.status,
@@ -239,6 +262,7 @@ async function loadAllWorkOrdersForCustomers(
     .from(workOrders)
     .where(inArray(workOrders.customerId, customerIds));
   return rows.map((w) => ({
+    customerId: w.customerId,
     invoiceId: w.invoiceId,
     totalAmount: w.totalAmount,
     status: w.status,
@@ -248,10 +272,11 @@ async function loadAllWorkOrdersForCustomers(
 
 async function loadAllBillingSheetsForCustomers(
   customerIds: number[],
-): Promise<BillingSheetBillableLike[]> {
+): Promise<BillingSheetBillableRow[]> {
   if (customerIds.length === 0) return [];
   const rows = await db
     .select({
+      customerId: billingSheets.customerId,
       invoiceId: billingSheets.invoiceId,
       totalAmount: billingSheets.totalAmount,
       status: billingSheets.status,
@@ -260,6 +285,7 @@ async function loadAllBillingSheetsForCustomers(
     .from(billingSheets)
     .where(inArray(billingSheets.customerId, customerIds));
   return rows.map((b) => ({
+    customerId: b.customerId,
     invoiceId: b.invoiceId,
     totalAmount: b.totalAmount,
     status: b.status,
@@ -271,8 +297,14 @@ async function loadInvoiceItemsForInvoices(
   invoiceIds: number[],
 ): Promise<InvoiceItemLike[]> {
   if (invoiceIds.length === 0) return [];
+  // Task #1898 — projected (was `select()`); only these four fields are read.
   const rows = await db
-    .select()
+    .select({
+      invoiceId: invoiceItems.invoiceId,
+      laborRate: invoiceItems.laborRate,
+      laborTotal: invoiceItems.laborTotal,
+      totalPrice: invoiceItems.totalPrice,
+    })
     .from(invoiceItems)
     .where(inArray(invoiceItems.invoiceId, invoiceIds));
   return rows.map((it) => ({
@@ -287,8 +319,15 @@ async function loadWorkOrdersForInvoices(
   invoiceIds: number[],
 ): Promise<WorkOrderLike[]> {
   if (invoiceIds.length === 0) return [];
+  // Task #1898 — projected (was `select()`); work_orders is a wide table.
   const rows = await db
-    .select()
+    .select({
+      invoiceId: workOrders.invoiceId,
+      totalHours: workOrders.totalHours,
+      totalPartsCost: workOrders.totalPartsCost,
+      assignedTechnicianId: workOrders.assignedTechnicianId,
+      completedByUserId: workOrders.completedByUserId,
+    })
     .from(workOrders)
     .where(inArray(workOrders.invoiceId, invoiceIds));
   return rows.map((w) => ({
@@ -304,8 +343,14 @@ async function loadBillingSheetsForInvoices(
   invoiceIds: number[],
 ): Promise<BillingSheetLike[]> {
   if (invoiceIds.length === 0) return [];
+  // Task #1898 — projected (was `select()`).
   const rows = await db
-    .select()
+    .select({
+      invoiceId: billingSheets.invoiceId,
+      totalHours: billingSheets.totalHours,
+      partsSubtotal: billingSheets.partsSubtotal,
+      technicianId: billingSheets.technicianId,
+    })
     .from(billingSheets)
     .where(inArray(billingSheets.invoiceId, invoiceIds));
   return rows.map((b) => ({
@@ -320,10 +365,11 @@ async function loadBillingSheetsForInvoices(
 
 async function loadAllWetCheckBillingsForCustomers(
   customerIds: number[],
-): Promise<WetCheckBillingBillableLike[]> {
+): Promise<WetCheckBillingBillableRow[]> {
   if (customerIds.length === 0) return [];
   const rows = await db
     .select({
+      customerId: wetCheckBillings.customerId,
       invoiceId: wetCheckBillings.invoiceId,
       totalAmount: wetCheckBillings.totalAmount,
       status: wetCheckBillings.status,
@@ -332,6 +378,7 @@ async function loadAllWetCheckBillingsForCustomers(
     .from(wetCheckBillings)
     .where(inArray(wetCheckBillings.customerId, customerIds));
   return rows.map((w) => ({
+    customerId: w.customerId,
     invoiceId: w.invoiceId,
     totalAmount: w.totalAmount,
     status: w.status,
@@ -363,9 +410,17 @@ async function loadWetCheckBillingsForInvoices(
 }
 
 async function loadTechs(companyId: number | null): Promise<UserWithName[]> {
+  // Task #1898 — projected; `select()` also pulled password hashes, tokens,
+  // and every profile column for rows we only need four fields from.
+  const projection = {
+    id: users.id,
+    hourlyWage: users.hourlyWage,
+    name: users.name,
+    role: users.role,
+  };
   const rows = companyId == null
-    ? await db.select().from(users)
-    : await db.select().from(users).where(eq(users.companyId, companyId));
+    ? await db.select(projection).from(users)
+    : await db.select(projection).from(users).where(eq(users.companyId, companyId));
   return rows.map((u) => ({
     id: u.id,
     hourlyWage: u.hourlyWage ?? null,
@@ -399,11 +454,25 @@ async function loadTechs(companyId: number | null): Promise<UserWithName[]> {
 // Critically, customers with `hiddenFromBilling=true` are excluded
 // from the scope so a long-tail of suppressed customers can't inflate
 // the KPI.
-async function computeUnbilledExposure(
-  companyId: number | null,
-): Promise<number> {
-  // Get all customer ids in scope, then sum totalAmount on work_orders /
-  // billing_sheets that are in an unbilled status and have no invoice id.
+//
+// Task #1898 — this is now a PURE roll-up over rows the caller already
+// holds. It used to re-query the customer list plus work_orders,
+// billing_sheets and wet_check_billings — the exact three tables /kpis had
+// just loaded for the same customer scope. That was four extra round trips
+// (in two serial waves) per dashboard load, each holding a pooled connection,
+// for data already in memory. The arithmetic and the predicates below are
+// unchanged; only the data source moved.
+//
+// Callers must pass rows carrying `customerId` so hidden-from-billing
+// customers can still be excluded.
+function computeUnbilledExposure(
+  customersInScope: Array<{ id: number; hiddenFromBilling?: boolean | null }>,
+  woRows: Array<{ customerId?: number | null; totalAmount?: string | number | null; status: string; invoiceId?: number | null }>,
+  bsRows: Array<{ customerId?: number | null; totalAmount?: string | number | null; status: string; invoiceId?: number | null }>,
+  wcbRows: Array<{ customerId?: number | null; totalAmount?: string | number | null; invoiceId?: number | null }>,
+): number {
+  // Sum totalAmount on work_orders / billing_sheets that are in an unbilled
+  // status and have no invoice id.
   // EXCLUDE customers flagged hiddenFromBilling — parity with the
   // `/api/customers/billing-preview` rollup which filters the same way.
   //
@@ -412,34 +481,14 @@ async function computeUnbilledExposure(
   // (via wcbRows below). Even though those snapshots are now labeled
   // "Pending approval" in the UI, they still represent uncommitted pipeline
   // value. Do NOT filter them out here — that would undercount exposure.
-  const cidRows = companyId == null
-    ? await db
-        .select({ id: customers.id, hiddenFromBilling: customers.hiddenFromBilling })
-        .from(customers)
-    : await db
-        .select({ id: customers.id, hiddenFromBilling: customers.hiddenFromBilling })
-        .from(customers)
-        .where(eq(customers.companyId, companyId));
-  const customerIds = cidRows
-    .filter((r) => !r.hiddenFromBilling)
-    .map((r) => r.id);
-  if (customerIds.length === 0) return 0;
-
-  const [woRows, bsRows, wcbRows] = await Promise.all([
-    db
-      .select({ total: workOrders.totalAmount, status: workOrders.status, invoiceId: workOrders.invoiceId })
-      .from(workOrders)
-      .where(inArray(workOrders.customerId, customerIds)),
-    db
-      .select({ total: billingSheets.totalAmount, status: billingSheets.status, invoiceId: billingSheets.invoiceId })
-      .from(billingSheets)
-      .where(inArray(billingSheets.customerId, customerIds)),
-    // Task #814 — WCBs have no cancelled status; uninvoiced = invoiceId IS NULL.
-    db
-      .select({ total: wetCheckBillings.totalAmount, invoiceId: wetCheckBillings.invoiceId })
-      .from(wetCheckBillings)
-      .where(inArray(wetCheckBillings.customerId, customerIds)),
-  ]);
+  const billableCustomerIds = new Set(
+    customersInScope.filter((c) => !c.hiddenFromBilling).map((c) => c.id),
+  );
+  if (billableCustomerIds.size === 0) return 0;
+  // A row with a null customerId can't be attributed to a billable customer,
+  // so it is out of scope — same as the old `inArray(customerId, ids)` filter.
+  const inScope = (r: { customerId?: number | null }) =>
+    r.customerId != null && billableCustomerIds.has(r.customerId);
 
   // Task #726 — Tile 6 "Unbilled Pipeline": include ALL uninvoiced rows
   // except cancelled. The prior narrow status allowlist
@@ -459,17 +508,20 @@ async function computeUnbilledExposure(
     return Number.isFinite(n) ? n : 0;
   };
   for (const w of woRows) {
+    if (!inScope(w)) continue;
     if (!isUnbilledWorkRow(w)) continue;
-    sum += toN(w.total);
+    sum += toN(w.totalAmount);
   }
   for (const b of bsRows) {
+    if (!inScope(b)) continue;
     if (!isUnbilledWorkRow(b)) continue;
-    sum += toN(b.total);
+    sum += toN(b.totalAmount);
   }
   // Task #814 — WCBs: no cancelled status, so just check invoiceId.
   for (const wcb of wcbRows) {
+    if (!inScope(wcb)) continue;
     if (wcb.invoiceId != null) continue;
-    sum += toN(wcb.total);
+    sum += toN(wcb.totalAmount);
   }
   return sum;
 }
@@ -599,8 +651,14 @@ export function registerFinancialPulseRoutes(
         // Task #726 — unbilledExposure must be computed BEFORE projectedMonthEnd
         // because projection now uses the unbilled pipeline as the forecast base
         // instead of billedMtd run-rate.
-        const unbilledExposure = await computeUnbilledExposure(
-          scope.companyId,
+        // Task #1898 — derived from allWos/allBss/allWcbs, which were just
+        // loaded above for the same customer scope. This used to be four more
+        // queries against the same three tables.
+        const unbilledExposure = computeUnbilledExposure(
+          cust,
+          allWos,
+          allBss,
+          allWcbs,
         );
 
         // Task #726 — Tile 4: Projected Month-End now uses unbilled pipeline

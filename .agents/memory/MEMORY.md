@@ -18,3 +18,7 @@
 - [Proving web-artifact purity from api tests](proving-web-artifact-purity-from-api-tests.md) — extract the pure module, import it by computed URL; keep cross-surface leak proofs in one group.
 - [Workflow limit — use validation commands](workflow-limit-use-validation.md) — this repo is past the 10-workflow cap; register new test suites as validation commands, not workflows.
 - [A/R aging boundaries are frozen](aging-bucket-boundaries.md) — they feed Financial Pulse totals; relabel freely, never move a boundary, and leave the day-zero asymmetry alone.
+- [Dashboard fan-out & pool budget](dashboard-fanout-pool-budget.md) — fix the slow queries before raising DB_POOL_MAX; the ceiling is a budget multiplied by replica count.
+- [Silent empty lists](silent-empty-list-degradation.md) — catch-and-return-[] hides connection-acquisition failures; classify, rethrow, and render an error branch.
+- [ESM TDZ hidden by the bundler](esm-tdz-after-merge.md) — a merge can move a const below its use; the bundled server still runs while every ESM test dies at import.
+- [Dev DB lags merged schema](dev-db-schema-drift.md) — 42P01 for a just-merged feature's table is environment drift, not your bug; don't adopt it into your diff.

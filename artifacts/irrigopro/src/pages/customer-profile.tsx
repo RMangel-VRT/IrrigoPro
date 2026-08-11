@@ -106,12 +106,16 @@ export default function CustomerProfile() {
     queryKey: [`/api/customers/${id}`],
   });
 
-  const { data: estimates = [] } = useArrayQuery<Estimate>({
+  // Task #1898 — isError must be surfaced. Both of these lists rendered
+  // "No estimates yet" / "No work orders yet" when the request failed, which
+  // is how a connection-pool timeout showed up as a customer who apparently
+  // had no history.
+  const { data: estimates = [], isError: estimatesError } = useArrayQuery<Estimate>({
     queryKey: [`/api/customers/${id}/estimates`],
     enabled: !!id,
   });
 
-  const { data: workOrders = [] } = useArrayQuery<WorkOrder>({
+  const { data: workOrders = [], isError: workOrdersError } = useArrayQuery<WorkOrder>({
     queryKey: [`/api/customers/${id}/work-orders`],
     enabled: !!id,
   });
@@ -514,7 +518,15 @@ export default function CustomerProfile() {
                   </h2>
                   <span className="text-xs font-medium text-jobtype-est">{formatCurrency(totalEstimateValue)}</span>
                 </div>
-                {estimates.length === 0 ? (
+                {estimatesError ? (
+                  <div
+                    className="border border-red-200 bg-red-50 rounded-md p-6 text-center"
+                    data-testid="customer-estimates-error"
+                  >
+                    <p className="text-sm text-red-800">Couldn't load estimates.</p>
+                    <p className="text-xs text-red-700 mt-1">Refresh to try again.</p>
+                  </div>
+                ) : estimates.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-10 text-center text-gray-400">
                     <FileText className="w-8 h-8 mb-2 opacity-40" />
                     <p className="text-sm">No estimates yet</p>
@@ -557,7 +569,15 @@ export default function CustomerProfile() {
                     <span className="text-xs bg-jobtype-wo/10 text-jobtype-wo font-bold px-1.5 py-0.5 rounded-full">{workOrders.length}</span>
                   </h2>
                 </div>
-                {workOrders.length === 0 ? (
+                {workOrdersError ? (
+                  <div
+                    className="border border-red-200 bg-red-50 rounded-md p-6 text-center"
+                    data-testid="customer-work-orders-error"
+                  >
+                    <p className="text-sm text-red-800">Couldn't load work orders.</p>
+                    <p className="text-xs text-red-700 mt-1">Refresh to try again.</p>
+                  </div>
+                ) : workOrders.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-10 text-center text-gray-400">
                     <Wrench className="w-8 h-8 mb-2 opacity-40" />
                     <p className="text-sm">No work orders yet</p>
