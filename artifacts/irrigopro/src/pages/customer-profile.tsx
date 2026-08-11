@@ -992,7 +992,12 @@ function BudgetBucketRow({ label, bucket }: { label: string; bucket: BudgetBucke
 
 function BudgetCard({ customerId }: { customerId: number }) {
   const [, setLocation] = useLocation();
-  const { data, isLoading } = useQuery<BudgetUsage>({
+  // Task #1911 — isError must be surfaced. The budget-usage route now 500s
+  // when the spend lookup fails instead of quietly reporting zero spend, and
+  // without this branch the whole card would disappear (`if (!data) return
+  // null`), which reads just as much like "nothing to see here" as a wrong
+  // number does. Same error block the estimates and work-orders lists use.
+  const { data, isLoading, isError } = useQuery<BudgetUsage>({
     queryKey: [`/api/customers/${customerId}/budget-usage`],
   });
   if (isLoading) {
@@ -1000,6 +1005,22 @@ function BudgetCard({ customerId }: { customerId: number }) {
       <Card>
         <CardHeader><CardTitle className="flex items-center gap-2"><Bell className="w-5 h-5" />Budget &amp; Alerts</CardTitle></CardHeader>
         <CardContent><div className="h-16 bg-gray-100 rounded animate-pulse" /></CardContent>
+      </Card>
+    );
+  }
+  if (isError) {
+    return (
+      <Card>
+        <CardHeader><CardTitle className="flex items-center gap-2"><Bell className="w-5 h-5" />Budget &amp; Alerts</CardTitle></CardHeader>
+        <CardContent>
+          <div
+            className="border border-red-200 bg-red-50 rounded-md p-6 text-center"
+            data-testid="customer-budget-error"
+          >
+            <p className="text-sm text-red-800">Couldn't load budget.</p>
+            <p className="text-xs text-red-700 mt-1">Refresh to try again.</p>
+          </div>
+        </CardContent>
       </Card>
     );
   }

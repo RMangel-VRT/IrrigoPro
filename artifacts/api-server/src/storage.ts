@@ -3488,28 +3488,23 @@ export class DatabaseStorage implements IStorage {
     await db.delete(oauthState).where(lte(oauthState.expiresAt, new Date()));
   }
 
+  // Task #1911 — no try/catch here on purpose. A failed lookup used to return
+  // null, which every caller read as "this realm has no QuickBooks
+  // integration". Errors now propagate like they do in the other readers in
+  // this file, so a database failure surfaces as a 500 instead of a fact.
   async getQuickBooksIntegration(realmId: string): Promise<(typeof quickbooksIntegration.$inferSelect) | null> {
-    try {
-      const result = await db.select().from(quickbooksIntegration)
-        .where(eq(quickbooksIntegration.realmId, realmId))
-        .limit(1);
-      return result.length > 0 ? result[0] : null;
-    } catch (error) {
-      console.error('Error getting QuickBooks integration:', error);
-      return null;
-    }
+    const result = await db.select().from(quickbooksIntegration)
+      .where(eq(quickbooksIntegration.realmId, realmId))
+      .limit(1);
+    return result.length > 0 ? result[0] : null;
   }
 
+  // Task #1911 — see above: a lookup failure must not read as "no connection".
   async getQuickBooksIntegrationByCompanyId(companyId: string): Promise<(typeof quickbooksIntegration.$inferSelect) | null> {
-    try {
-      const result = await db.select().from(quickbooksIntegration)
-        .where(eq(quickbooksIntegration.companyId, companyId))
-        .limit(1);
-      return result.length > 0 ? result[0] : null;
-    } catch (error) {
-      console.error('Error getting QuickBooks integration by companyId:', error);
-      return null;
-    }
+    const result = await db.select().from(quickbooksIntegration)
+      .where(eq(quickbooksIntegration.companyId, companyId))
+      .limit(1);
+    return result.length > 0 ? result[0] : null;
   }
 
   async markQuickBooksReconnectRequired(realmId: string, reason: string): Promise<void> {
@@ -3611,23 +3606,18 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
+  // Task #1911 — errors propagate; an empty array here means "no integrations".
   async getQuickBooksAllIntegrations(): Promise<(typeof quickbooksIntegration.$inferSelect)[]> {
-    try {
-      return await db.select().from(quickbooksIntegration).orderBy(quickbooksIntegration.realmId);
-    } catch (error) {
-      console.error('Error getting all QuickBooks integrations:', error);
-      return [];
-    }
+    return await db.select().from(quickbooksIntegration).orderBy(quickbooksIntegration.realmId);
   }
 
+  // Task #1911 — this is the loader for the daily QB token-refresh sweep.
+  // Swallowing an error here made the job iterate nothing and report success
+  // while tokens quietly expired, so the error propagates to the caller, which
+  // decides (loudly) what to do about it.
   async getAllActiveQuickBooksIntegrations(): Promise<(typeof quickbooksIntegration.$inferSelect)[]> {
-    try {
-      return await db.select().from(quickbooksIntegration)
-        .where(eq(quickbooksIntegration.connectionStatus, 'connected'));
-    } catch (error) {
-      console.error('Error fetching all active QuickBooks integrations:', error);
-      return [];
-    }
+    return await db.select().from(quickbooksIntegration)
+      .where(eq(quickbooksIntegration.connectionStatus, 'connected'));
   }
 
   async getQuickBooksCustomerStatus(companyId?: string | null): Promise<{ isConnected: boolean; companyName?: string; lastSync?: string; customerCount?: number; connectionStatus?: string; reconnectRequiredReason?: string | null; companyId?: string | null; realmId?: string | null }> {
@@ -6996,17 +6986,16 @@ export class DatabaseStorage implements IStorage {
     return { ...invoice, items };
   }
 
+  // Task #1911 — no try/catch. This is the invoice leg of computeCustomerSpend,
+  // so a swallowed error computed to zero spend and made a customer who is over
+  // their budget cap read as comfortably under it. An empty array must only ever
+  // mean "this customer has no invoices".
   async getInvoicesByCustomer(customerId: number, companyId: number | null): Promise<Invoice[]> {
-    try {
-      const scope = this._companyScopeForInvoice(companyId);
-      const cond = scope ? and(eq(invoices.customerId, customerId), scope) : eq(invoices.customerId, customerId);
-      return await db.select().from(invoices)
-        .where(cond)
-        .orderBy(desc(invoices.createdAt));
-    } catch (error) {
-      console.warn(`Error querying invoices for customer ${customerId}:`, error);
-      return [];
-    }
+    const scope = this._companyScopeForInvoice(companyId);
+    const cond = scope ? and(eq(invoices.customerId, customerId), scope) : eq(invoices.customerId, customerId);
+    return await db.select().from(invoices)
+      .where(cond)
+      .orderBy(desc(invoices.createdAt));
   }
 
   async getInvoices(companyId: number | null): Promise<Invoice[]> {

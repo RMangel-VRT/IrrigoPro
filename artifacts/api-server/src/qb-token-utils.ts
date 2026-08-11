@@ -1,3 +1,5 @@
+import { logger } from './lib/logger';
+
 export type QbRefreshFailureCategory =
   | 'transient'
   | 'stale_refresh_token'
@@ -229,6 +231,41 @@ export async function runProactiveRefreshForRealm(
 export const QB_IDLE_THRESHOLD_DAYS = 90;
 
 /**
+ * Task #1911 — outcome of the most recent health sweep.
+ *
+ * `getAllActiveQuickBooksIntegrations` used to swallow database errors and
+ * return `[]`, so a failed load looked exactly like "there are no connected
+ * realms": the job iterated nothing, logged nothing at error level, and
+ * finished as if all was well while tokens marched toward expiry. The storage
+ * method now throws, and the sweep records what actually happened so an
+ * operator (and a test) can tell a clean sweep from a skipped one.
+ */
+export type QbHealthSweepStatus = 'completed' | 'skipped_load_failed';
+
+export interface QbHealthSweepRecord {
+  status: QbHealthSweepStatus;
+  ranAt: Date;
+  /** Realms examined. Always 0 when the load failed. */
+  checked: number;
+  /** Realms actually refreshed during the sweep. */
+  refreshed: number;
+  /** Present only when status is 'skipped_load_failed'. */
+  error?: string;
+}
+
+let lastQbHealthSweep: QbHealthSweepRecord | null = null;
+
+/** Most recent sweep outcome, or null if no sweep has finished yet. */
+export function getLastQbHealthSweep(): QbHealthSweepRecord | null {
+  return lastQbHealthSweep;
+}
+
+/** Test seam — clears the recorded sweep outcome. */
+export function resetLastQbHealthSweep(): void {
+  lastQbHealthSweep = null;
+}
+
+/**
  * QB Token Health Job
  *
  * Runs immediately and then on the configured interval (default: 24 hours).
@@ -271,12 +308,31 @@ export function startQbTokenHealthJob(
     try {
       integrations = await getAllActiveIntegrations();
     } catch (e) {
-      console.error('[QB health job] Failed to fetch active integrations:', e);
+      // Task #1911 — a failed load is not an empty sweep. Log at error level
+      // through the structured logger and record the run as skipped so nothing
+      // downstream (or nobody on call) reads this as "checked everything, all
+      // healthy".
+      lastQbHealthSweep = {
+        status: 'skipped_load_failed',
+        ranAt: new Date(),
+        checked: 0,
+        refreshed: 0,
+        error: e instanceof Error ? e.message : String(e),
+      };
+      logger.error(
+        { err: e },
+        '[QB health job] Failed to load active integrations — sweep skipped, no realms checked',
+      );
       return;
     }
 
+    let checked = 0;
+    let refreshedCount = 0;
+
     for (const integ of integrations) {
       if (integ.connectionStatus === 'reconnect_required') continue;
+
+      checked++;
 
       const msUntilExpiry = integ.expiresAt.getTime() - Date.now();
       const isNearExpiry = msUntilExpiry <= QB_PROACTIVE_REFRESH_BUFFER_MS;
@@ -305,17 +361,28 @@ export function startQbTokenHealthJob(
 
       const result = await runProactiveRefreshForRealm(integ.realmId, doRefresh, store, effectiveBufferMs);
       if (result.refreshed) {
+        refreshedCount++;
         console.log(`[QB health job] Refreshed realmId=${integ.realmId} successfully`);
       } else if (result.isUnrecoverable) {
-        console.warn(`[QB health job] Unrecoverable error for realmId=${integ.realmId}: ${result.error?.message}`);
+        logger.warn(
+          { realmId: integ.realmId, err: result.error },
+          '[QB health job] Unrecoverable refresh error — reconnect required',
+        );
       } else if (result.skipped) {
         console.log(`[QB health job] realmId=${integ.realmId} skipped (${result.skipReason})`);
       }
     }
+
+    lastQbHealthSweep = {
+      status: 'completed',
+      ranAt: new Date(),
+      checked,
+      refreshed: refreshedCount,
+    };
   };
 
-  runHealthSweep().catch((e) => console.error('[QB health job] Initial sweep error:', e));
+  runHealthSweep().catch((e) => logger.error({ err: e }, '[QB health job] Initial sweep error'));
   return setInterval(() => {
-    runHealthSweep().catch((e) => console.error('[QB health job] Sweep error:', e));
+    runHealthSweep().catch((e) => logger.error({ err: e }, '[QB health job] Sweep error'));
   }, intervalMs);
 }

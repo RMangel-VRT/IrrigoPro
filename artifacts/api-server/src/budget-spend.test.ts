@@ -202,3 +202,55 @@ describe("computeCustomerSpend", () => {
     assert.equal(capturedCompanyId, null, "null companyId → global view for super_admin");
   });
 });
+
+// Task #1911 — budget regression guard. Do not delete these as duplicates of
+// the storage-reader tests: they pin the *consequence*, not the mechanism.
+//
+// getInvoicesByCustomer used to swallow database errors and return []. That
+// made the invoice leg of this calculation compute to zero, so a customer
+// already over their cap read as comfortably under it — the single most
+// dangerous way this function can be wrong, because nothing about the output
+// looks broken. The failure has to travel.
+describe("computeCustomerSpend — an over-budget customer must never read as under budget", () => {
+  it("propagates a failing invoice query instead of reporting zero invoiced", async () => {
+    const dbDown = new Error("Failed query: timeout exceeded when trying to connect");
+    const prev = (storage as any).getInvoicesByCustomer;
+    (storage as any).getInvoicesByCustomer = async () => {
+      throw dbDown;
+    };
+    nextWcbRows = [];
+
+    try {
+      await assert.rejects(
+        computeCustomerSpend(1, 10, monthWindow),
+        (err: unknown) => {
+          assert.equal(err, dbDown, "the database error must reach the caller");
+          return true;
+        },
+        "a failed invoice lookup must not resolve to a spend total",
+      );
+    } finally {
+      (storage as any).getInvoicesByCustomer = prev;
+    }
+  });
+
+  it("does not fall back to the wet-check leg alone when invoices fail to load", async () => {
+    // The specific bad outcome: $9,000 of invoices are invisible, $50 of
+    // uninvoiced wet-check work is not, and the caller is handed $50 as if it
+    // were this customer's whole spend.
+    const prev = (storage as any).getInvoicesByCustomer;
+    (storage as any).getInvoicesByCustomer = async () => {
+      throw new Error("Failed query: connection terminated unexpectedly");
+    };
+    nextWcbRows = [wcb(null, "50.00")];
+
+    try {
+      await assert.rejects(
+        computeCustomerSpend(1, 10, monthWindow),
+        "a partial total is worse than no total — it looks like a real number",
+      );
+    } finally {
+      (storage as any).getInvoicesByCustomer = prev;
+    }
+  });
+});

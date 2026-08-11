@@ -34,3 +34,22 @@ state is strictly better than a plausible-looking empty one.
   will still draw the empty state. Check the error branch *before* the empty
   state, and keep a test asserting the empty state still appears on a genuine
   zero-row success.
+
+## A swallowing reader makes its callers' error handling dead code
+
+Two consequences worth checking whenever one of these readers is fixed:
+
+- **Route-level `try/catch` above a swallowing reader never fires.** Correct
+  handling gets written on top of a method that made it unreachable, so the
+  route looks defended and answers 200 with an empty body. Fixing the reader is
+  what activates it — and the only way to know it works is a test that makes
+  the reader throw.
+- **A background job cannot tell a failed load from an empty fleet.** Both
+  iterate zero items and finish "successfully". A job whose loader can fail
+  must record its run outcome (completed vs. skipped-with-reason) somewhere an
+  operator and a test can read, not just log and return.
+
+Aggregation functions deserve the same suspicion: a swallowed leg of a sum is
+not a missing number, it is a *plausible wrong* one (zero spend reads as under
+budget). Pin the consequence in a test named after the consequence, not after
+the mechanism, or it gets deleted later as a duplicate of the reader test.

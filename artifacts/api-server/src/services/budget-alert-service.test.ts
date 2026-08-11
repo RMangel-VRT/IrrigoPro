@@ -197,7 +197,7 @@ describe("budget-alert-service.checkBudgetThresholds", () => {
     installDispatchers();
     // Insert real customer rows so the FK on customer_budget_alert_events
     // is satisfied. Ids are unique to this test file.
-    for (const id of [70001, 70002, 70003, 70004, 70005, 70006, 70007, 70008, 70009, 70010]) {
+    for (const id of [70001, 70002, 70003, 70004, 70005, 70006, 70007, 70008, 70009, 70010, 70011]) {
       await ensureRealCustomer(id);
     }
   });
@@ -538,5 +538,56 @@ describe("budget-alert-service.checkBudgetThresholds", () => {
     // Restore
     (storage as any).getInvoicesByCustomer = originalGetInvoicesByCustomer;
     await clearAlertRows(customerId);
+  });
+
+  // Task #1911 — budget regression guard. Keep this even though the top-level
+  // catch already existed: it is what proves the storage reader throwing is
+  // *safe* here. getInvoicesByCustomer used to return [] on a database error,
+  // which made spend compute to zero — an over-cap customer silently evaluated
+  // as healthy and no alert ever fired. Now the query throws, and the required
+  // behaviour is "evaluate nothing", not "evaluate against zero".
+  it("does not evaluate thresholds against zero spend when the invoice query fails", async () => {
+    const customerId = 70011;
+    await clearAlertRows(customerId);
+    installDispatchers();
+
+    const originalGetInvoicesByCustomer = (storage as any).getInvoicesByCustomer;
+    (storage as any).getInvoicesByCustomer = async () => {
+      throw new Error("Failed query: timeout exceeded when trying to connect");
+    };
+
+    // This customer is way over their $1,000 monthly cap in reality. With the
+    // old swallow, spend read as $0 and this call quietly concluded "healthy".
+    fakeState.customer = makeCustomer({ id: customerId });
+    const inv = makeInvoice({ id: 1101, customerId, totalAmount: "5000.00" as any });
+    fakeState.invoices = [inv];
+
+    try {
+      // Must not throw — an alert-pipeline problem must never break the
+      // invoice write that triggered it.
+      await checkBudgetThresholds(inv as unknown as Invoice);
+
+      assert.equal(
+        fakeState.notifications.length,
+        0,
+        "no in-app notification may be raised from an unknown spend",
+      );
+      assert.equal(pushCalls.length, 0, "no push from an unknown spend");
+      assert.equal(emailCalls.length, 0, "no email from an unknown spend");
+
+      const rows = await db
+        .select()
+        .from(customerBudgetAlertEvents)
+        .where(eq(customerBudgetAlertEvents.customerId, customerId));
+      assert.equal(
+        rows.length,
+        0,
+        "no threshold may be recorded as evaluated — recording one would " +
+          "suppress the real alert once the database recovers",
+      );
+    } finally {
+      (storage as any).getInvoicesByCustomer = originalGetInvoicesByCustomer;
+      await clearAlertRows(customerId);
+    }
   });
 });

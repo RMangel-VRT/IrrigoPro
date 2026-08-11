@@ -76,6 +76,10 @@ args = "invoice-ar-notes"
 task = "workflow.run"
 args = "invoice-ar-notes-panel"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "storage-error-propagation"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -237,6 +241,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/irrigopro exec vitest run src/pages/invoices-batch-reminders.test.tsx"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "storage-error-propagation"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/storage-reader-error-propagation.test.ts src/routes/qb-health-sweep-route.test.ts src/budget-spend.test.ts src/services/budget-alert-service.test.ts src/routes/qb-token-refresh.test.ts"
 
 [workflows.workflow.metadata]
 isValidation = true

@@ -23,7 +23,7 @@
 //  14. Health job skips a healthy, recently-refreshed realm.
 //  15. Health job skips a realm already in reconnect_required state.
 
-import { describe, it, beforeEach } from "node:test";
+import { describe, it, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 
 import {
@@ -31,12 +31,15 @@ import {
   runProactiveRefreshForRealm,
   startQbTokenHealthJob,
   withQbRefreshLock,
+  getLastQbHealthSweep,
+  resetLastQbHealthSweep,
   QB_PROACTIVE_REFRESH_BUFFER_MS,
   QB_IDLE_THRESHOLD_DAYS,
   qbRefreshLock,
   type QbStorageAdapter,
   type QbTokenPair,
 } from "../qb-token-utils";
+import { logger } from "../lib/logger";
 
 // ─── Minimal in-memory storage stub ────────────────────────────────────────
 
@@ -591,5 +594,97 @@ describe("startQbTokenHealthJob", () => {
 
     assert.equal(refreshCalled, false,
       "reconnect_required realm must never be silently refreshed — it needs explicit user re-auth");
+  });
+});
+
+// ─── Task #1911 — a failed load is not an empty sweep ────────────────────────
+//
+// storage.getAllActiveQuickBooksIntegrations used to swallow database errors
+// and return []. The health job then iterated nothing, refreshed nothing, and
+// finished exactly like a sweep of a fleet with no connected realms — while
+// every real token marched toward the 100-day Intuit revocation. The loader now
+// throws, and the job has to say so.
+
+describe("startQbTokenHealthJob — failed integration load (Task #1911)", () => {
+  beforeEach(() => {
+    qbRefreshLock.clear();
+    resetLastQbHealthSweep();
+  });
+
+  after(() => {
+    resetLastQbHealthSweep();
+  });
+
+  async function runSweepWithFailingLoader(): Promise<{ errorLogs: unknown[][] }> {
+    const errorLogs: unknown[][] = [];
+    const realError = logger.error.bind(logger);
+    (logger as any).error = (...args: unknown[]) => {
+      errorLogs.push(args);
+    };
+
+    const store = makeStore();
+    let refreshCalled = false;
+    const doRefresh: (r: string, s: AbortSignal) => Promise<QbTokenPair> = async () => {
+      refreshCalled = true;
+      return { access_token: "x", refresh_token: "y", expires_in: 3600 };
+    };
+
+    try {
+      const handle = startQbTokenHealthJob(
+        async () => {
+          throw new Error("Failed query: timeout exceeded when trying to connect");
+        },
+        doRefresh,
+        store,
+        24 * 60 * 60 * 1000,
+      );
+      await new Promise((r) => setTimeout(r, 50));
+      clearInterval(handle);
+    } finally {
+      (logger as any).error = realError;
+    }
+
+    assert.equal(refreshCalled, false, "nothing can be refreshed when the load failed");
+    return { errorLogs };
+  }
+
+  it("records the run as skipped instead of a clean sweep over zero integrations", async () => {
+    await runSweepWithFailingLoader();
+
+    const record = getLastQbHealthSweep();
+    assert.ok(record, "the sweep must record an outcome an operator can read");
+    assert.equal(
+      record!.status,
+      "skipped_load_failed",
+      "a failed load must never be recorded as a completed sweep",
+    );
+    assert.equal(record!.checked, 0);
+    assert.equal(record!.refreshed, 0);
+    assert.match(String(record!.error), /timeout exceeded when trying to connect/);
+  });
+
+  it("logs at error level through the structured logger", async () => {
+    const { errorLogs } = await runSweepWithFailingLoader();
+    assert.equal(errorLogs.length, 1, "exactly one error-level log for the failed load");
+    const [context, message] = errorLogs[0] as [Record<string, unknown>, string];
+    assert.ok((context as any).err, "the underlying database error must be attached");
+    assert.match(String(message), /sweep skipped/i);
+  });
+
+  it("a sweep that really has no connected realms is still recorded as completed", async () => {
+    // The other half of the fix: zero integrations is a legitimate outcome and
+    // must stay distinguishable from a load that blew up.
+    const store = makeStore();
+    const doRefresh: (r: string, s: AbortSignal) => Promise<QbTokenPair> = async () => {
+      throw new Error("must not be called");
+    };
+
+    const handle = startQbTokenHealthJob(async () => [], doRefresh, store, 24 * 60 * 60 * 1000);
+    await new Promise((r) => setTimeout(r, 50));
+    clearInterval(handle);
+
+    const record = getLastQbHealthSweep();
+    assert.equal(record?.status, "completed");
+    assert.equal(record?.checked, 0);
   });
 });
