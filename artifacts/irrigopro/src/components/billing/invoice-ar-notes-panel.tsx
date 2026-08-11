@@ -28,7 +28,11 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Loader2, Lock, MessageSquare, Plus } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import {
+  apiRequest,
+  INVOICE_AR_NOTES_STALE_MS,
+  INVOICE_EXPANSION_GC_MS,
+} from "@/lib/queryClient";
 
 /** Mirrors AR_NOTE_MAX_LENGTH on the server. */
 const NOTE_MAX_LENGTH = 4000;
@@ -80,6 +84,14 @@ export function InvoiceArNotesPanel({
   const { data, isLoading } = useQuery<ArNotesState>({
     queryKey: ["/api/invoices", invoiceId, "ar-notes"],
     enabled: open,
+    // Task #1922 — a reopen within the window renders from cache with no
+    // request. Notes get a *shorter* window than the other expanded-row reads
+    // because this is the one key the user writes to from inside the region
+    // and the one a colleague may have just appended to. Our own writes don't
+    // wait on the window at all: the mutation below invalidates this key, so
+    // the thread refreshes immediately after "Add note".
+    staleTime: INVOICE_AR_NOTES_STALE_MS,
+    gcTime: INVOICE_EXPANSION_GC_MS,
   });
 
   const addMutation = useMutation({

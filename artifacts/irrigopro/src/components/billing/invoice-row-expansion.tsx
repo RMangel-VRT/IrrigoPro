@@ -31,6 +31,10 @@
 // does not show a section it knows will be refused.
 
 import { useQuery } from "@tanstack/react-query";
+import {
+  INVOICE_EXPANSION_GC_MS,
+  INVOICE_EXPANSION_STALE_MS,
+} from "@/lib/queryClient";
 import { FileText } from "lucide-react";
 import { InvoiceArNotesPanel } from "@/components/billing/invoice-ar-notes-panel";
 import { InvoiceReminderPanel } from "@/components/billing/invoice-reminder-panel";
@@ -60,6 +64,13 @@ export function InvoiceRowExpansion({
   const { data: itemsData, isLoading: itemsLoading } = useQuery<{ items: InvoiceLineItem[] }>({
     queryKey: ["/api/invoices", invoiceId, "items"],
     enabled: open,
+    // Task #1922 — reopening a row within the window renders from cache and
+    // issues no request. Line items change only through in-app actions that
+    // invalidate this key, so the window is safe. gcTime must outlast
+    // staleTime: closing the row unmounts this query, and an evicted cache
+    // would make the staleTime a no-op on reopen.
+    staleTime: INVOICE_EXPANSION_STALE_MS,
+    gcTime: INVOICE_EXPANSION_GC_MS,
   });
 
   if (!open) return null;

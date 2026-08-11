@@ -243,6 +243,32 @@ export function useArrayQuery<T>(
   });
 }
 
+// Task #1922 — deliberate cache windows for the expanded invoice row.
+//
+// The three reads under an expanded row (line items, reminder history,
+// A/R notes) are issued only when a row opens, and working an aging list
+// means opening and closing the same rows repeatedly while comparing
+// invoices. These constants make the caching decision explicit instead of
+// inherited:
+//
+//   * Line items and reminder history change only through in-app actions
+//     that already invalidate their keys (send reminder, void, correct),
+//     so a 5-minute window is safe: a reopen within it renders straight
+//     from cache with zero requests.
+//   * A/R notes are the one thing written from inside the region, and the
+//     one thing a *colleague* may have written moments ago. The panel's
+//     own writes invalidate the key immediately (so "add a note" always
+//     shows the new note without waiting), but reads go stale after one
+//     minute so someone else's fresh note is picked up on the next reopen.
+//
+// The gc window is deliberately longer than both stale windows so a closed
+// row's cache actually survives long enough to serve the reopen — a
+// staleTime with a shorter gcTime would be a no-op, since closing the row
+// unmounts the queries.
+export const INVOICE_EXPANSION_STALE_MS = 5 * 60_000;
+export const INVOICE_AR_NOTES_STALE_MS = 60_000;
+export const INVOICE_EXPANSION_GC_MS = 10 * 60_000;
+
 export function parseApiError(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message : String(error);
   const jsonStart = message.indexOf("{");

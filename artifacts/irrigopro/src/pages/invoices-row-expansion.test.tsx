@@ -222,11 +222,17 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function renderInvoices(initialPath = "/invoices") {
+function renderInvoices(initialPath = "/invoices", opts: { gcTime?: number } = {}) {
   const nav = memoryLocation({ path: initialPath, record: true });
   const queryClient = new QueryClient({
     defaultOptions: {
-      queries: { retry: false, gcTime: 0, queryFn: getQueryFn({ on401: "returnNull" }) },
+      queries: {
+        retry: false,
+        // Most tests want a cold cache between renders; the reopen-from-cache
+        // tests pass a real gcTime so a collapsed row's cache survives.
+        gcTime: opts.gcTime ?? 0,
+        queryFn: getQueryFn({ on401: "returnNull" }),
+      },
     },
   });
   const view = render(
@@ -308,7 +314,10 @@ describe("expanding a row in place", () => {
     expect(within(row).getByText("$150.00")).toBeTruthy();
   });
 
-  it("collapsing leaves filters, sort, grouping, selection and loaded pages exactly as they were", async () => {
+  // Two pages of 60 rows rendered twice (desktop + mobile) makes this the
+  // heaviest test in the file; under a loaded validation runner it can exceed
+  // vitest's 5s default, so it carries its own timeout.
+  it("collapsing leaves filters, sort, grouping, selection and loaded pages exactly as they were", { timeout: 20_000 }, async () => {
     // Two pages, so "Load more" has something to add.
     rowsForResponse = Array.from({ length: 60 }, (_, i) =>
       invoiceRow({
@@ -454,6 +463,59 @@ describe("fetch only on expand", () => {
     for (const url of expansionRequests()) {
       expect(url).toMatch(/\/api\/invoices\/2\//);
     }
+  });
+});
+
+// ── 3b. Reopening a row renders from cache ───────────────────────────────────
+//
+// Task #1922 — the three reads carry an explicit staleTime, so collapsing and
+// reopening the same row within the window issues no request at all. The
+// component-level queries also carry a gcTime longer than the stale window;
+// here the test client supplies the gc default the app client would.
+
+describe("reopening a row within the stale window", () => {
+  it("renders all three sections from cache and issues no request", async () => {
+    renderInvoices("/invoices", { gcTime: 10 * 60_000 });
+    await waitForList();
+
+    await expandRow(1);
+    const first = screen.getByTestId("invoice-row-expansion-1");
+    await waitFor(() => expect(within(first).getByTestId("expansion-line-items")).toBeTruthy());
+    await waitFor(() => expect(within(first).getByTestId("reminder-panel")).toBeTruthy());
+    await waitFor(() => expect(within(first).getByTestId("ar-notes-panel")).toBeTruthy());
+
+    const requestsAfterFirstOpen = expansionRequests().length;
+    expect(requestsAfterFirstOpen).toBe(3);
+
+    // Collapse, then reopen the same row.
+    clickRow(1);
+    await waitFor(() => expect(screen.queryAllByTestId("invoice-row-expansion-1").length).toBe(0));
+    await expandRow(1);
+
+    // Everything is there immediately — no loading state, straight from cache…
+    const region = screen.getByTestId("invoice-row-expansion-1");
+    expect(within(region).getByText("Zone 3 head replacement")).toBeTruthy();
+    expect(within(region).getByTestId("reminder-history-row-5")).toBeTruthy();
+    expect(within(region).getByTestId("ar-note-row-3")).toBeTruthy();
+    expect(within(region).queryByTestId("reminder-panel-loading")).toBeNull();
+    expect(within(region).queryByTestId("ar-notes-panel-loading")).toBeNull();
+
+    // …and no new request went out for any of the three reads.
+    expect(expansionRequests().length).toBe(requestsAfterFirstOpen);
+  });
+
+  it("opening a different row still fetches for that row", async () => {
+    rowsForResponse = [invoiceRow(), invoiceRow({ id: 2, invoiceNumber: "INV-1002" })];
+    renderInvoices("/invoices", { gcTime: 10 * 60_000 });
+    await waitForList();
+
+    await expandRow(1);
+    await waitFor(() => expect(expansionRequests().length).toBe(3));
+
+    await expandRow(2);
+    await waitFor(() =>
+      expect(expansionRequests().filter((u) => /\/api\/invoices\/2\//.test(u)).length).toBe(3),
+    );
   });
 });
 

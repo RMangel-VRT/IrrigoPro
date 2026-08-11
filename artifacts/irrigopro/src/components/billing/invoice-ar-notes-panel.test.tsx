@@ -147,6 +147,26 @@ describe("InvoiceArNotesPanel", () => {
     expect(post.body).toEqual({ note: "Disputing the second ticket." });
   });
 
+  it("refetches the thread immediately after a note is added, despite the stale window", async () => {
+    // Task #1922 — the notes read carries a staleTime so reopening a row
+    // serves from cache, but the panel's own write must not wait on it: the
+    // mutation invalidates the key, which refetches the active query at once.
+    renderPanel();
+    await waitFor(() => expect(screen.getByTestId("ar-notes-thread")).toBeTruthy());
+    const getsBefore = requests.filter((r) => r.method === "GET").length;
+
+    fireEvent.change(screen.getByTestId("input-ar-note"), {
+      target: { value: "Cheque promised Friday." },
+    });
+    fireEvent.click(screen.getByTestId("button-add-ar-note"));
+
+    await waitFor(() =>
+      expect(
+        requests.filter((r) => r.method === "GET" && r.url.includes("/ar-notes")).length,
+      ).toBeGreaterThan(getsBefore),
+    );
+  });
+
   it("will not send an empty note", async () => {
     renderPanel();
     await waitFor(() => expect(screen.getByTestId("ar-notes-thread")).toBeTruthy());

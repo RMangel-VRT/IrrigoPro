@@ -36,7 +36,11 @@ import {
 } from "@/components/ui/alert-dialog";
 import { AlertCircle, Clock, Loader2, Send } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import {
+  apiRequest,
+  INVOICE_EXPANSION_GC_MS,
+  INVOICE_EXPANSION_STALE_MS,
+} from "@/lib/queryClient";
 
 interface ReminderRow {
   id: number;
@@ -110,6 +114,12 @@ export function InvoiceReminderPanel({
   const { data, isLoading } = useQuery<ReminderState>({
     queryKey: ["/api/invoices", invoiceId, "reminders"],
     enabled: open,
+    // Task #1922 — reopening a row within the window renders from cache and
+    // issues no request. Reminder history changes only through sends, which
+    // invalidate this key on success AND on error (a failed attempt is still
+    // recorded), so the window never hides a send.
+    staleTime: INVOICE_EXPANSION_STALE_MS,
+    gcTime: INVOICE_EXPANSION_GC_MS,
   });
 
   // The bucket only *suggests* a tone — it pre-selects, and the sender is free
