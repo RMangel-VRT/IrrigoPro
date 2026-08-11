@@ -16,6 +16,7 @@ import {
 import { FileText, Download, Mail, Loader2, AlertCircle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { InvoiceReminderPanel } from "./invoice-reminder-panel";
 
 interface InvoicePdfPreviewModalProps {
   invoiceId: number;
@@ -251,7 +252,7 @@ export function InvoicePdfPreviewModal({
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <div className="flex items-center gap-3">
               <div className="bg-blue-50 p-2 rounded-lg">
@@ -383,6 +384,17 @@ export function InvoicePdfPreviewModal({
                 </div>
               </div>
             )}
+
+            {/* Task #1887 — reminders live outside the `pdf &&` block on
+                purpose: the missing-PDF case is exactly the one that has to
+                explain itself rather than disappear. */}
+            <div className="mt-6">
+              <InvoiceReminderPanel
+                invoiceId={invoiceId}
+                invoiceNumber={invoiceNumber}
+                open={open}
+              />
+            </div>
           </div>
         </DialogContent>
       </Dialog>

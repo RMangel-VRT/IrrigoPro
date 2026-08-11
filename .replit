@@ -48,6 +48,18 @@ args = "qb-invoice-ops"
 task = "workflow.run"
 args = "wet-check-select-shape"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "invoice-reminders"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "invoice-ar-list"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "invoice-ar-ui"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -132,6 +144,39 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/wet-check-select-shape.test.ts"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "invoice-reminders"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/routes/invoice-reminder-routes.test.ts"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "invoice-ar-list"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/routes/invoice-list-routes.test.ts"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "invoice-ar-ui"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/irrigopro exec vitest run src/pages/invoices-ar-collections.test.tsx"
 
 [workflows.workflow.metadata]
 isValidation = true

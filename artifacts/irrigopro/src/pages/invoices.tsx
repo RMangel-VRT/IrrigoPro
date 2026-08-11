@@ -166,6 +166,11 @@ interface Invoice {
   balanceDue?: string;
   balanceIsFallback?: boolean;
   arFlags?: ArFlag[];
+  // Task #1887 — payment reminders. Delivered reminders only: a failed send is
+  // recorded but is not a reminder the customer received, so it never appears
+  // in either of these. Optional for the same cached-payload reason as above.
+  lastReminderAt?: string | null;
+  reminderCount?: number;
 }
 
 const MONTH_NAMES = [
@@ -474,7 +479,9 @@ function matchesAging(inv: Invoice, filter: AgingFilter, now: Date): boolean {
 function arFlagsOf(inv: Invoice, now: Date): ArFlag[] {
   if (inv.arFlags) return inv.arFlags;
   const overdue = inv.isOverdue ?? daysPastDue(inv, now) >= 0;
-  return computeArFlags(inv, now, overdue);
+  // The reminder count rides along so the local fallback can raise
+  // "Reminded, still unpaid" on the same terms the server does.
+  return computeArFlags({ ...inv, reminderCount: inv.reminderCount ?? 0 }, now, overdue);
 }
 
 /** Outstanding balance, falling back to the invoice total when unsynced. */
@@ -565,11 +572,23 @@ const AR_SORT_KEYS: readonly ArSortKey[] = [
 
 type PaymentStatusFilter = "all" | "unpaid" | "partially_paid" | "paid";
 type SentFilter = "all" | "sent" | "unsent";
+/** Task #1887 — filters on the server, over every invoice, not the loaded page. */
+type ReminderFilter = "all" | "never" | "last7" | "last30" | "last60" | "thrice";
+
+const REMINDER_FILTER_LABELS: Record<ReminderFilter, string> = {
+  all: "Any",
+  never: "Never reminded",
+  last7: "Reminded in last 7 days",
+  last30: "Reminded in last 30 days",
+  last60: "Reminded in last 60 days",
+  thrice: "Reminded 3+ times",
+};
 
 interface ArQuery {
   aging: AgingFilter;
   paymentStatus: PaymentStatusFilter;
   sent: SentFilter;
+  reminders: ReminderFilter;
   customerId: string;
   dateFrom: string;
   dateTo: string;
@@ -584,6 +603,7 @@ const EMPTY_AR_QUERY: ArQuery = {
   aging: "all",
   paymentStatus: "all",
   sent: "all",
+  reminders: "all",
   customerId: "",
   dateFrom: "",
   dateTo: "",
@@ -612,11 +632,16 @@ function readArQuery(search: string): ArQuery {
   const ps = p.get("paymentStatus");
   const sent = p.get("sent");
   const sort = p.get("sort");
+  const rem = p.get("reminders");
   return {
     aging: parseAging(search),
     paymentStatus:
       ps === "unpaid" || ps === "partially_paid" || ps === "paid" ? ps : "all",
     sent: sent === "sent" || sent === "unsent" ? sent : "all",
+    reminders:
+      rem === "never" || rem === "last7" || rem === "last30" || rem === "last60" || rem === "thrice"
+        ? rem
+        : "all",
     customerId: p.get("customerId") ?? "",
     dateFrom: p.get("dateFrom") ?? "",
     dateTo: p.get("dateTo") ?? "",
@@ -634,6 +659,7 @@ function arQueryToParams(q: ArQuery): URLSearchParams {
   if (q.aging !== "all") p.set("aging", q.aging);
   if (q.paymentStatus !== "all") p.set("paymentStatus", q.paymentStatus);
   if (q.sent !== "all") p.set("sent", q.sent);
+  if (q.reminders !== "all") p.set("reminders", q.reminders);
   if (q.customerId) p.set("customerId", q.customerId);
   if (q.dateFrom) p.set("dateFrom", q.dateFrom);
   if (q.dateTo) p.set("dateTo", q.dateTo);
@@ -653,7 +679,7 @@ function isEmptyArQuery(q: ArQuery): boolean {
 }
 
 /**
- * Balance, due, days overdue, aging, payment, sent, flags, and the two inert
+ * Balance, due, days overdue, aging, payment, sent, flags, and the two
  * reminder columns. Used to span them in the version-history rows.
  */
 const AR_COLUMN_COUNT = 9;
@@ -1364,24 +1390,34 @@ export default function InvoicesPage() {
         <TableCell className="max-w-[220px]">
           <ArFlagBadges invoice={invoice} now={nowForAr} />
         </TableCell>
-        {/* Task #1890 — reminders are out of scope here and land in their own
-            task. These two columns render permanently and inert, with an
-            empty state, so the table does not reflow when they do. */}
+        {/* Task #1887 — real reminder data. Delivered reminders only. */}
         <TableCell
-          className="text-xs text-gray-300 whitespace-nowrap"
+          className="text-xs whitespace-nowrap"
           data-testid={`ar-last-reminder-${invoice.id}`}
         >
-          —
+          {invoice.lastReminderAt ? (
+            formatDate(invoice.lastReminderAt)
+          ) : (
+            <span className="text-gray-400">Never</span>
+          )}
         </TableCell>
         <TableCell className="text-xs whitespace-nowrap">
           <button
             type="button"
-            disabled
-            className="text-gray-300 cursor-not-allowed"
-            title="Payment reminders are not available yet."
+            className="text-blue-600 hover:underline"
+            title="Open the invoice to send a payment reminder and see its history."
+            onClick={() =>
+              setPdfModal({
+                id: invoice.id,
+                number: invoice.invoiceNumber,
+                email: invoice.customerEmail,
+              })
+            }
             data-testid={`ar-reminder-action-${invoice.id}`}
           >
-            —
+            {(invoice.reminderCount ?? 0) === 0
+              ? "Send reminder"
+              : `${invoice.reminderCount} sent`}
           </button>
         </TableCell>
       </>
@@ -1998,16 +2034,23 @@ export default function InvoicesPage() {
             </Label>
           </div>
 
-          {/* Reminder filter — inert, for the same layout-stability reason as
-              the two reminder columns. */}
+          {/* Task #1887 — this filter runs on the server, over the whole
+              invoice set, alongside the others. */}
           <div className="flex flex-col gap-1">
-            <Label className="text-xs text-gray-400">Reminders</Label>
-            <Select value="all" disabled>
-              <SelectTrigger className="w-40" data-testid="ar-filter-reminders">
-                <SelectValue placeholder="Not available yet" />
+            <Label className="text-xs text-gray-500">Reminders</Label>
+            <Select
+              value={arQuery.reminders}
+              onValueChange={(v) => patchArQuery({ reminders: v as ReminderFilter })}
+            >
+              <SelectTrigger className="w-48" data-testid="ar-filter-reminders">
+                <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">Not available yet</SelectItem>
+                {(Object.keys(REMINDER_FILTER_LABELS) as ReminderFilter[]).map((key) => (
+                  <SelectItem key={key} value={key} data-testid={`ar-filter-reminders-${key}`}>
+                    {REMINDER_FILTER_LABELS[key]}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>
@@ -2131,15 +2174,8 @@ export default function InvoicesPage() {
                         <ArSortableHeader sortKey="paymentStatus" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
                         <ArSortableHeader sortKey="sent" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
                         <TableHead className="whitespace-nowrap">Flags</TableHead>
-                        {/* Reminder columns render inert and permanently
-                            visible so the layout does not shift when
-                            reminders actually land. */}
-                        <TableHead className="whitespace-nowrap text-muted-foreground">
-                          Last reminder
-                        </TableHead>
-                        <TableHead className="whitespace-nowrap text-muted-foreground">
-                          Reminders
-                        </TableHead>
+                        <TableHead className="whitespace-nowrap">Last reminder</TableHead>
+                        <TableHead className="whitespace-nowrap">Reminders</TableHead>
                         <SortableHeader sortKey="period" label="Period" sort={sort} onSort={toggleSort} />
                         <TableHead className="w-10" />
                       </TableRow>
@@ -2354,12 +2390,13 @@ export default function InvoicesPage() {
                         <div className="mt-1">
                           <ArFlagBadges invoice={invoice} now={nowForAr} variant="mobile-" />
                         </div>
-                        {/* Inert reminder row — see the desktop columns. */}
                         <div
-                          className="mt-1 text-xs text-gray-300"
+                          className="mt-1 text-xs text-gray-500"
                           data-testid={`ar-last-reminder-mobile-${invoice.id}`}
                         >
-                          Last reminder — · Reminders —
+                          {`Last reminder ${
+                            invoice.lastReminderAt ? formatDate(invoice.lastReminderAt) : "never"
+                          } · Reminders ${invoice.reminderCount ?? 0}`}
                         </div>
                         <div
                           className="mt-2 text-xs text-gray-500"

@@ -12,4 +12,6 @@
 - [Express guard typing](express-guard-typing.md) — typing a shared guard as RequestHandler re-types req.params and breaks unrelated routes; keep loose params.
 - [Verifying role-gated UI](scripted-login-acceptance.md) — nav reads role at login, so verify roles with a fresh scripted login and watch for background 403s, not screenshots.
 - [Testing URL-backed page state](wouter-jsdom-page-tests.md) — Router needs wouter's searchHook or query params read as absent; jsdom mounts desktop AND mobile, duplicating testids.
+- [Invoice balance needs a payment sync](invoice-balance-fixtures.md) — an unsynced invoice resolves to its full total; a fixture wanting a partial balance must carry a sync timestamp.
+- [Radix Select in jsdom](radix-select-jsdom.md) — shim the pointer-capture methods or opening a Select throws an unhandled error beside a confusing waitFor failure.
 - [A/R aging boundaries are frozen](aging-bucket-boundaries.md) — they feed Financial Pulse totals; relabel freely, never move a boundary, and leave the day-zero asymmetry alone.

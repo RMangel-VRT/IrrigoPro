@@ -77,6 +77,14 @@ function cleanInvoice(overrides: Row = {}): Row {
   };
 }
 
+// Radix's Select drives its open/close off pointer capture, which jsdom does
+// not implement. Without these no-ops, opening the reminder filter throws.
+const proto = Element.prototype as any;
+proto.hasPointerCapture ??= () => false;
+proto.setPointerCapture ??= () => {};
+proto.releasePointerCapture ??= () => {};
+proto.scrollIntoView ??= () => {};
+
 let requestedUrls: string[] = [];
 let rowsForResponse: Row[] = [];
 
@@ -419,14 +427,84 @@ describe("A/R columns", () => {
     expect(screen.getByTestId("ar-days-overdue-1")).toHaveTextContent("—");
   });
 
-  it("keeps the reminder columns visible but inert", async () => {
+  // Task #1887 — the two columns and the filter above them used to render
+  // permanently inert. These are the tests that they carry real data now.
+  it("shows the recorded last reminder and count", async () => {
+    rowsForResponse = [
+      cleanInvoice({
+        lastReminderAt: new Date(NOW - 3 * DAY).toISOString(),
+        reminderCount: 2,
+      }),
+    ];
     renderInvoices();
-    await waitFor(() => expect(screen.getByTestId("ar-last-reminder-1")).toBeTruthy());
-    // Present so the layout does not shift when reminders land, and plainly
-    // empty so nobody thinks a reminder was sent.
-    expect(screen.getByTestId("ar-last-reminder-1")).toHaveTextContent("—");
-    expect(screen.getByTestId("ar-reminder-action-1")).toBeDisabled();
-    expect(screen.getByTestId("ar-filter-reminders")).toBeDisabled();
+    await waitFor(() =>
+      expect(firstByTestId("ar-reminder-action-1")).toHaveTextContent("2 sent"),
+    );
+    expect(firstByTestId("ar-last-reminder-1")).not.toHaveTextContent("—");
+    expect(firstByTestId("ar-reminder-action-1")).not.toBeDisabled();
+  });
+
+  it("says 'Never' and offers the send action when no reminder has gone out", async () => {
+    rowsForResponse = [cleanInvoice({ lastReminderAt: null, reminderCount: 0 })];
+    renderInvoices();
+    await waitFor(() => expect(firstByTestId("ar-last-reminder-1")).toHaveTextContent("Never"));
+    expect(firstByTestId("ar-reminder-action-1")).toHaveTextContent("Send reminder");
+  });
+
+  it("sends the reminder filter to the server rather than filtering the loaded page", async () => {
+    const { nav } = renderInvoices();
+    await waitForInvoiceFetch();
+
+    const select = firstByTestId("ar-filter-reminders");
+    expect(select).not.toBeDisabled();
+    fireEvent.pointerDown(select, { button: 0, ctrlKey: false, pointerType: "mouse" });
+    fireEvent.click(select);
+    await waitFor(() => expect(screen.getByTestId("ar-filter-reminders-thrice")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("ar-filter-reminders-thrice"));
+
+    await waitFor(() => expect(lastInvoiceQuery().get("reminders")).toBe("thrice"));
+    // …and it survives the URL round-trip like every other A/R filter.
+    const q = new URLSearchParams(nav.history[nav.history.length - 1].split("?")[1] ?? "");
+    expect(q.get("reminders")).toBe("thrice");
+  });
+
+  it("restores the reminder filter from a deep link", async () => {
+    renderInvoices("/invoices?reminders=never");
+    await waitFor(() => expect(lastInvoiceQuery().get("reminders")).toBe("never"));
+  });
+
+  it("flags a reminded invoice that is still overdue, and only that one", async () => {
+    // No `arFlags` on either row, so the client-side fallback is what runs —
+    // the same rule the server applies, applied here.
+    rowsForResponse = [
+      cleanInvoice({
+        id: 1,
+        invoiceNumber: "INV-1",
+        isOverdue: true,
+        daysOverdue: 40,
+        agingBucket: "days60",
+        dueDate: new Date(NOW - 40 * DAY).toISOString(),
+        effectiveDueDate: new Date(NOW - 40 * DAY).toISOString(),
+        reminderCount: 1,
+        lastReminderAt: new Date(NOW - 2 * DAY).toISOString(),
+        arFlags: undefined,
+      }),
+      cleanInvoice({
+        id: 2,
+        invoiceNumber: "INV-2",
+        isOverdue: true,
+        daysOverdue: 40,
+        agingBucket: "days60",
+        dueDate: new Date(NOW - 40 * DAY).toISOString(),
+        effectiveDueDate: new Date(NOW - 40 * DAY).toISOString(),
+        reminderCount: 0,
+        lastReminderAt: null,
+        arFlags: undefined,
+      }),
+    ];
+    renderInvoices();
+    await waitFor(() => expect(screen.getAllByTestId("ar-flag-reminded_still_unpaid-1").length).toBeGreaterThan(0));
+    expect(screen.queryByTestId("ar-flag-reminded_still_unpaid-2")).toBeNull();
   });
 });
 

@@ -13,6 +13,7 @@ import {
   invoices,
   invoiceItems,
   invoicePdfs,
+  invoiceReminders,
   billingSheets,
   billingSheetItems,
   manualPartReviews,
@@ -71,6 +72,8 @@ import {
   type Invoice,
   type InvoiceItem,
   type InvoicePdf,
+  type InvoiceReminder,
+  type InsertInvoiceReminder,
   type BillingSheet,
   type BillingSheetItem,
   type ManualPartReview,
@@ -707,6 +710,18 @@ export interface IStorage {
   createInvoicePdf(pdf: InsertInvoicePdf): Promise<InvoicePdf>;
   getInvoicePdfByInvoiceId(invoiceId: number): Promise<InvoicePdf | undefined>;
   updateInvoicePdf(id: number, pdf: Partial<InsertInvoicePdf>): Promise<InvoicePdf | undefined>;
+
+  // Task #1887 — invoice payment reminders.
+  createInvoiceReminder(row: InsertInvoiceReminder): Promise<InvoiceReminder>;
+  /** Full history for one invoice, newest first. Company-scoped. */
+  getInvoiceReminders(invoiceId: number, companyId: number | null): Promise<InvoiceReminder[]>;
+  /** The most recent *delivered* reminder, which is what the throttle reads. */
+  getLastDeliveredInvoiceReminder(invoiceId: number): Promise<InvoiceReminder | undefined>;
+  /** Delivered-reminder count + last sent-at, per invoice, for the A/R list. */
+  getInvoiceReminderSummaries(
+    companyId: number | null,
+  ): Promise<Map<number, { reminderCount: number; lastReminderAt: Date }>>;
+
   mergeInvoices(params: {
     survivingId: number;
     mergedIds: number[];
@@ -7018,6 +7033,74 @@ export class DatabaseStorage implements IStorage {
       .where(eq(invoicePdfs.id, id))
       .returning();
     return updated;
+  }
+
+  // ── Task #1887 — invoice payment reminders ────────────────────────────────
+  //
+  // Reads here never recompute a reminder's balance or days-overdue: those are
+  // captured columns, and the whole point of capturing them is that history
+  // keeps saying what the customer was actually told.
+
+  async createInvoiceReminder(row: InsertInvoiceReminder): Promise<InvoiceReminder> {
+    const [created] = await db.insert(invoiceReminders).values(row).returning();
+    return created;
+  }
+
+  async getInvoiceReminders(
+    invoiceId: number,
+    companyId: number | null,
+  ): Promise<InvoiceReminder[]> {
+    const where = companyId == null
+      ? eq(invoiceReminders.invoiceId, invoiceId)
+      : and(eq(invoiceReminders.invoiceId, invoiceId), eq(invoiceReminders.companyId, companyId));
+    return await db
+      .select()
+      .from(invoiceReminders)
+      .where(where)
+      .orderBy(desc(invoiceReminders.sentAt), desc(invoiceReminders.id));
+  }
+
+  async getLastDeliveredInvoiceReminder(invoiceId: number): Promise<InvoiceReminder | undefined> {
+    const [row] = await db
+      .select()
+      .from(invoiceReminders)
+      .where(
+        and(
+          eq(invoiceReminders.invoiceId, invoiceId),
+          eq(invoiceReminders.deliveryStatus, 'sent'),
+        ),
+      )
+      .orderBy(desc(invoiceReminders.sentAt), desc(invoiceReminders.id))
+      .limit(1);
+    return row;
+  }
+
+  async getInvoiceReminderSummaries(
+    companyId: number | null,
+  ): Promise<Map<number, { reminderCount: number; lastReminderAt: Date }>> {
+    // Delivered reminders only. A failed send is recorded for the audit trail
+    // but it is not a reminder the customer received, so it must not appear in
+    // the count, in "last reminder", or in the reminder filter.
+    const conditions = [eq(invoiceReminders.deliveryStatus, 'sent')];
+    if (companyId != null) conditions.push(eq(invoiceReminders.companyId, companyId));
+    const rows = await db
+      .select({
+        invoiceId: invoiceReminders.invoiceId,
+        reminderCount: sql<number>`count(*)::int`,
+        lastReminderAt: sql<Date>`max(${invoiceReminders.sentAt})`,
+      })
+      .from(invoiceReminders)
+      .where(and(...conditions))
+      .groupBy(invoiceReminders.invoiceId);
+
+    const map = new Map<number, { reminderCount: number; lastReminderAt: Date }>();
+    for (const r of rows) {
+      map.set(r.invoiceId, {
+        reminderCount: Number(r.reminderCount) || 0,
+        lastReminderAt: new Date(r.lastReminderAt as unknown as string),
+      });
+    }
+    return map;
   }
 
   // Task #1425 — atomically merge duplicate monthly invoices for the same

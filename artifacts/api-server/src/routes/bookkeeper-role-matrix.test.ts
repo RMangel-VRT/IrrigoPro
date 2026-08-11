@@ -46,6 +46,7 @@ import {
 } from "./role-guards";
 import { registerInvoiceMarkSentRoutes } from "./invoice-mark-sent-routes";
 import { registerInvoiceMergeRoutes } from "./invoice-merge-routes";
+import { registerInvoiceReminderRoutes } from "./invoice-reminder-routes";
 import { registerBudgetRoutes } from "./budget-routes";
 import { registerFinancialPulseRoutes } from "./financial-pulse";
 import { requireEstimateApprovalAccess } from "./estimate-role-guards";
@@ -364,6 +365,105 @@ describe("invoice mark-sent / mark-unsent — real routes, real guards", () => {
     assert.equal(await post(buildApp("bookkeeper", 1), "/api/invoices/2/mark-sent"), 404);
     // Sanity: the same id resolves for the company that owns it.
     assert.equal(await post(buildApp("bookkeeper", 2), "/api/invoices/2/mark-sent"), 200);
+  });
+});
+
+// Task #1887 — the reminder endpoints are the one place in the product where a
+// misclick reaches a customer's inbox, so their gate is proven against the real
+// guard and the real route module, not against a copy of the capability set.
+describe("invoice payment reminders — real routes, real guards", () => {
+  const mailed: string[] = [];
+
+  function buildApp(role: TestRole, companyId: number | null = 1) {
+    const app = express();
+    app.use(express.json());
+    registerInvoiceReminderRoutes(app, {
+      requireAuthentication: makeAuth(role, companyId),
+      requireInvoiceSend,
+      _storageApi: {
+        async getInvoiceById(id: number, scoped: number | null) {
+          // Invoice 1 belongs to company 1; invoice 2 belongs to company 2.
+          const owner = id === 2 ? 2 : 1;
+          if (scoped !== null && scoped !== owner) return undefined;
+          return {
+            id,
+            companyId: owner,
+            invoiceNumber: `INV-${id}`,
+            customerId: 100,
+            customerName: "Acme",
+            customerEmail: "ap@acme.test",
+            status: "generated",
+            createdAt: new Date("2026-06-01T00:00:00.000Z"),
+            dueDate: new Date("2026-06-01T00:00:00.000Z"),
+            sentAt: new Date("2026-06-02T00:00:00.000Z"),
+            paymentStatus: "unpaid",
+            paymentSyncedAt: new Date("2026-08-10T00:00:00.000Z"),
+            balance: "100.00",
+            totalAmount: "100.00",
+          };
+        },
+        async getInvoicePdfByInvoiceId() {
+          return { id: 5, pdfUrl: "/pdf/x.pdf" };
+        },
+        async getUser() {
+          return { id: 7, name: "Tester" };
+        },
+        async getCompanyProfile() {
+          return { id: 1, name: "Co", email: "billing@co.test", logo: null };
+        },
+        async getInvoiceReminders() {
+          return [];
+        },
+        async getLastDeliveredInvoiceReminder() {
+          return undefined;
+        },
+        async createInvoiceReminder(row: any) {
+          return { id: 1, ...row };
+        },
+      },
+      _mailer: async (to: string) => {
+        mailed.push(to);
+        return { success: true };
+      },
+      _loadPaymentTerms: async () => "net_30",
+      _now: () => new Date("2026-08-11T12:00:00.000Z"),
+    });
+    return app;
+  }
+
+  async function call(app: Express, method: "GET" | "POST", path: string) {
+    const { url, server } = await listen(app);
+    try {
+      const res = await fetch(`${url}${path}`, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: method === "POST" ? JSON.stringify({ templateKey: "firm" }) : undefined,
+      });
+      return res.status;
+    } finally {
+      await close(server);
+    }
+  }
+
+  it("bookkeeper CAN send a reminder and read its history", async () => {
+    assert.equal(await call(buildApp("bookkeeper"), "POST", "/api/invoices/1/reminders"), 201);
+    assert.equal(await call(buildApp("bookkeeper"), "GET", "/api/invoices/1/reminders"), 200);
+  });
+
+  it("field_tech and irrigation_manager are refused, and no email is attempted", async () => {
+    for (const role of ["field_tech", "irrigation_manager", NO_ROLE as TestRole]) {
+      mailed.length = 0;
+      assert.equal(await call(buildApp(role), "POST", "/api/invoices/1/reminders"), 403);
+      assert.equal(mailed.length, 0, `${String(role)} must never reach the mailer`);
+    }
+  });
+
+  it("a bookkeeper in company A gets nothing for a company B invoice, and no email is attempted", async () => {
+    mailed.length = 0;
+    assert.equal(await call(buildApp("bookkeeper", 1), "POST", "/api/invoices/2/reminders"), 404);
+    assert.equal(mailed.length, 0);
+    // Sanity: the same id resolves for the company that owns it.
+    assert.equal(await call(buildApp("bookkeeper", 2), "POST", "/api/invoices/2/reminders"), 201);
   });
 });
 

@@ -106,11 +106,14 @@ function buildApp(
     companyId = 1 as number | null,
     terms = new Map<number, string | null>(),
     rowsByCompany,
+    reminders,
   }: {
     role?: string;
     companyId?: number | null;
     terms?: Map<number, string | null>;
     rowsByCompany?: Map<number | null, InvoiceRowLike[]>;
+    /** Task #1887 — delivered-reminder rollup, keyed by invoice id. */
+    reminders?: Map<number, { reminderCount: number; lastReminderAt: Date }>;
   } = {},
 ): { app: Express; calls: SpyCalls } {
   const calls: SpyCalls = { getInvoices: [], paymentTermsFor: [] };
@@ -125,6 +128,9 @@ function buildApp(
         calls.getInvoices.push(scoped);
         if (rowsByCompany) return rowsByCompany.get(scoped) ?? [];
         return rows;
+      },
+      async getInvoiceReminderSummaries() {
+        return reminders ?? new Map();
       },
     },
     _loadPaymentTerms: async (ids) => {
@@ -659,5 +665,147 @@ describe("collections landing default is not usable as an authorization guard", 
     // The bookkeeper still reads invoices via the capability registry.
     assert.equal(hasCapability("bookkeeper", CAN_READ_INVOICES), true);
     assert.equal(hasCapability("bookkeeper", CAN_EDIT_INVOICES), false);
+  });
+});
+
+// ── Task #1887 — reminder data on the A/R list ───────────────────────────────
+//
+// The reminder column, count and filter already rendered on this list and did
+// nothing. These tests are the proof that they now carry real data, and that
+// the filter runs over the whole invoice set on the server rather than over
+// whichever page happens to be loaded.
+
+function reminded(
+  count: number,
+  daysAgo: number,
+): { reminderCount: number; lastReminderAt: Date } {
+  return { reminderCount: count, lastReminderAt: new Date(NOW.getTime() - daysAgo * DAY) };
+}
+
+describe("GET /api/invoices — reminder columns", () => {
+  it("serves last-reminder and reminder-count on each row", async () => {
+    const { app } = buildApp([overdueBy(1, 45), overdueBy(2, 45)], {
+      reminders: new Map([[1, reminded(2, 3)]]),
+    });
+    const { body } = await get(app, "/api/invoices");
+    const byId = new Map(body.map((r: any) => [r.id, r]));
+    assert.equal((byId.get(1) as any).reminderCount, 2);
+    assert.equal(
+      (byId.get(1) as any).lastReminderAt,
+      new Date(NOW.getTime() - 3 * DAY).toISOString(),
+    );
+    // A never-reminded invoice says so explicitly rather than omitting it.
+    assert.equal((byId.get(2) as any).reminderCount, 0);
+    assert.equal((byId.get(2) as any).lastReminderAt, null);
+  });
+
+  it("raises 'Reminded, still unpaid' only when reminders exist AND it is still overdue", async () => {
+    const rows = [
+      overdueBy(1, 45), // reminded + overdue → flagged
+      overdueBy(2, 45), // overdue, never reminded → not flagged
+      inv({ id: 3, dueDate: new Date(NOW.getTime() + 10 * DAY) }), // reminded, not overdue
+    ];
+    const { app } = buildApp(rows, {
+      reminders: new Map([
+        [1, reminded(1, 2)],
+        [3, reminded(1, 2)],
+      ]),
+    });
+    const { body } = await get(app, "/api/invoices");
+    const byId = new Map(body.map((r: any) => [r.id, r]));
+    assert.equal((byId.get(1) as any).arFlags.includes("reminded_still_unpaid"), true);
+    assert.equal((byId.get(2) as any).arFlags.includes("reminded_still_unpaid"), false);
+    assert.equal(
+      (byId.get(3) as any).arFlags.includes("reminded_still_unpaid"),
+      false,
+      "a reminded invoice that is no longer overdue leaves the escalation queue",
+    );
+  });
+
+  it("drops the flag once the invoice is paid", async () => {
+    const rows = [overdueBy(1, 45, { paymentStatus: "paid", paidAt: NOW, status: "paid" })];
+    const { app } = buildApp(rows, { reminders: new Map([[1, reminded(3, 1)]]) });
+    const { body } = await get(app, "/api/invoices");
+    assert.equal(body[0].arFlags.includes("reminded_still_unpaid"), false);
+  });
+});
+
+describe("GET /api/invoices — ?reminders= filter", () => {
+  const rows = [
+    overdueBy(1, 45), // never reminded
+    overdueBy(2, 45), // reminded once, 3 days ago
+    overdueBy(3, 45), // reminded 4 times, 40 days ago
+    overdueBy(4, 45), // reminded twice, 20 days ago
+  ];
+  const summaries = new Map([
+    [2, reminded(1, 3)],
+    [3, reminded(4, 40)],
+    [4, reminded(2, 20)],
+  ]);
+
+  it("never reminded", async () => {
+    const { app } = buildApp(rows, { reminders: summaries });
+    const { body, total } = await get(app, "/api/invoices?reminders=never&offset=0");
+    assert.deepEqual(ids(body), [1]);
+    assert.equal(total, "1", "X-Total-Count is the post-filter total");
+  });
+
+  it("reminded in the last 7 days", async () => {
+    const { app } = buildApp(rows, { reminders: summaries });
+    const { body } = await get(app, "/api/invoices?reminders=last7");
+    assert.deepEqual(ids(body), [2]);
+  });
+
+  it("reminded in the last 30 days", async () => {
+    const { app } = buildApp(rows, { reminders: summaries });
+    const { body } = await get(app, "/api/invoices?reminders=last30");
+    assert.deepEqual(ids(body).sort(), [2, 4]);
+  });
+
+  it("reminded three or more times", async () => {
+    const { app } = buildApp(rows, { reminders: summaries });
+    const { body } = await get(app, "/api/invoices?reminders=thrice");
+    assert.deepEqual(ids(body), [3]);
+  });
+
+  it("filters over the whole set, not the loaded page", async () => {
+    // 60 invoices, only the last one ever reminded — it would never appear in
+    // the default 50-row page if the filter ran client-side.
+    const many = Array.from({ length: 60 }, (_, i) =>
+      overdueBy(i + 1, 45, { createdAt: new Date(NOW.getTime() - (60 - i) * DAY) }),
+    );
+    const { app } = buildApp(many, { reminders: new Map([[1, reminded(1, 2)]]) });
+    const { body, total } = await get(app, "/api/invoices?reminders=last7&offset=0");
+    assert.deepEqual(ids(body), [1]);
+    assert.equal(total, "1");
+  });
+
+  it("composes with the other filters as an intersection", async () => {
+    const mixed = [
+      overdueBy(1, 45),
+      overdueBy(2, 5),
+      inv({ id: 3, dueDate: new Date(NOW.getTime() + 10 * DAY) }),
+    ];
+    const { app } = buildApp(mixed, {
+      reminders: new Map([
+        [1, reminded(1, 2)],
+        [2, reminded(1, 2)],
+        [3, reminded(1, 2)],
+      ]),
+    });
+    const { body } = await get(app, "/api/invoices?reminders=last7&aging=days60");
+    assert.deepEqual(ids(body), [1]);
+  });
+
+  it("an unknown value falls back to no reminder filtering", async () => {
+    const { app } = buildApp(rows, { reminders: summaries });
+    const { body } = await get(app, "/api/invoices?reminders=whenever");
+    assert.equal(body.length, 4);
+    assert.equal(parseArListQuery({ reminders: "whenever" }).reminders, "all");
+    assert.equal(isUnfilteredArListQuery(parseArListQuery({ reminders: "whenever" })), true);
+  });
+
+  it("counts as a filter for the legacy-shape check", () => {
+    assert.equal(isUnfilteredArListQuery(parseArListQuery({ reminders: "never" })), false);
   });
 });

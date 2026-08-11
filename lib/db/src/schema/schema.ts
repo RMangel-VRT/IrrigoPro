@@ -22,6 +22,10 @@ export const companies = pgTable("companies", {
   // transaction). Default 50000.
   startingEstimateNumber: integer("starting_estimate_number").notNull().default(50000),
   nextEstimateNumber: integer("next_estimate_number").notNull().default(50000),
+  // Task #1887 — minimum days between two payment reminders for the same
+  // invoice. Enforced on the server, not in the UI. Configurable per company
+  // because a 7-day cadence is a policy, not a law; 7 is the default.
+  invoiceReminderThrottleDays: integer("invoice_reminder_throttle_days").notNull().default(7),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -938,6 +942,47 @@ export const invoicePdfs = pgTable("invoice_pdfs", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+// Task #1887 — Invoice payment reminders.
+//
+// One row per reminder *attempt* against an invoice. A row is written only
+// after the mailer has answered, never before, so nothing here describes an
+// email that was merely intended.
+//
+// `deliveryStatus` separates the two outcomes:
+//   'sent'   — the mailer accepted it. Consumes the next `sequenceNumber`.
+//   'failed' — the mailer refused it. `sequenceNumber` stays NULL and
+//              `deliveryError` carries the reason. A bounced email is not a
+//              reminder the customer received, so a failure must not make the
+//              next successful send read as "reminder #2".
+//
+// `balanceAtSend`, `daysOverdueAtSend` and `recipientEmail` are captured
+// copies, not lookups. A reminder is history: it has to keep saying what the
+// customer was told, at the address they were told it at, after the balance
+// moves and after someone edits the customer's billing email. Never recompute
+// these at read time.
+export const invoiceReminders = pgTable("invoice_reminders", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").references(() => companies.id).notNull(),
+  invoiceId: integer("invoice_id").references(() => invoices.id).notNull(),
+  // Null only if the acting user is later deleted; every send records who.
+  sentByUserId: integer("sent_by_user_id").references(() => users.id),
+  sentByName: text("sent_by_name"),
+  sentAt: timestamp("sent_at").defaultNow().notNull(),
+  // The address the mail actually went to, as used at send time.
+  recipientEmail: text("recipient_email").notNull(),
+  // 1, 2, 3 … per invoice, counting successful sends only. NULL on failures.
+  sequenceNumber: integer("sequence_number"),
+  templateKey: text("template_key").notNull(), // friendly | firm | final_notice
+  balanceAtSend: decimal("balance_at_send", { precision: 10, scale: 2 }).notNull(),
+  daysOverdueAtSend: integer("days_overdue_at_send").notNull(),
+  deliveryStatus: text("delivery_status").notNull().default("sent"), // sent | failed
+  deliveryError: text("delivery_error"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  companyIdx: index("invoice_reminders_company_idx").on(table.companyId),
+  invoiceIdx: index("invoice_reminders_invoice_idx").on(table.invoiceId),
+}));
+
 // Notifications table for workflow notifications
 export const notifications = pgTable("notifications", {
   id: serial("id").primaryKey(),
@@ -1105,6 +1150,7 @@ export const insertWorkOrderItemSchema = createInsertSchema(workOrderItems).omit
 export const insertInvoiceSchema = createInsertSchema(invoices).omit({ id: true, invoiceNumber: true, companyId: true, createdAt: true, updatedAt: true });
 export const insertInvoiceItemSchema = createInsertSchema(invoiceItems).omit({ id: true });
 export const insertInvoicePdfSchema = createInsertSchema(invoicePdfs).omit({ id: true, createdAt: true });
+export const insertInvoiceReminderSchema = createInsertSchema(invoiceReminders).omit({ id: true, createdAt: true });
 export const insertBillingSheetSchema = createInsertSchema(billingSheets)
   .omit({
     id: true,
@@ -1177,6 +1223,8 @@ export type WorkOrderItem = typeof workOrderItems.$inferSelect;
 export type Invoice = typeof invoices.$inferSelect;
 export type InvoiceItem = typeof invoiceItems.$inferSelect;
 export type InvoicePdf = typeof invoicePdfs.$inferSelect;
+export type InvoiceReminder = typeof invoiceReminders.$inferSelect;
+export type InsertInvoiceReminder = typeof invoiceReminders.$inferInsert;
 export type BillingSheet = typeof billingSheets.$inferSelect;
 export type BillingNumberCounter = typeof billingNumberCounters.$inferSelect;
 export type BillingSheetItem = typeof billingSheetItems.$inferSelect;

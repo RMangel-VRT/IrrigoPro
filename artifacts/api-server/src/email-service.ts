@@ -1069,11 +1069,34 @@ ${companyName}
     }
   }
 
+  /**
+   * Task #1887 — caller-supplied wording for {@link sendInvoiceDetailPdf}.
+   *
+   * The invoice mailer is one code path: fetch the stored PDF out of object
+   * storage, base64 it, attach it, send. What it *says* is now the caller's
+   * business, so a payment reminder can go out with its own subject, body and
+   * company branding without a second invoice mailer existing to drift.
+   *
+   * Every field is optional and every default is exactly what the PDF-send
+   * route sent before this parameter existed — passing nothing is byte-for-byte
+   * the old email.
+   */
   static async sendInvoiceDetailPdf(
     customerEmail: string,
     customerName: string,
     invoiceNumber: string,
-    pdfUrl: string
+    pdfUrl: string,
+    overrides?: {
+      subject?: string;
+      html?: string;
+      text?: string;
+      /** Company profile email, so customer replies reach the company. */
+      replyTo?: string | null;
+      /** Attachment filename. Defaults to `Invoice_<number>_Detail.pdf`. */
+      filename?: string;
+      /** SendGrid categories, for per-send reporting. */
+      categories?: string[];
+    },
   ): Promise<{ success: boolean; error?: string }> {
     if (!isEmailConfigured()) {
       console.error('SENDGRID_API_KEY not configured');
@@ -1100,12 +1123,8 @@ ${companyName}
       const pdfBuffer = Buffer.concat(chunks);
       const pdfBase64 = pdfBuffer.toString('base64');
 
-      // Send email with PDF attachment
-      await sgMail.send({
-        from: DEFAULT_FROM_EMAIL,
-        to: customerEmail,
-        subject: `Invoice Detail Report - ${invoiceNumber}`,
-        html: `
+      const defaultSubject = `Invoice Detail Report - ${invoiceNumber}`;
+      const defaultHtml = `
           <!DOCTYPE html>
           <html>
           <head>
@@ -1153,8 +1172,8 @@ ${companyName}
             </div>
           </body>
           </html>
-        `,
-        text: `
+        `;
+      const defaultText = `
 Invoice Detail Report - ${invoiceNumber}
 
 Hello ${customerName},
@@ -1169,16 +1188,30 @@ Thank you for your business!
 
 ---
 This is an automated email from IrrigoPro
-        `,
+        `;
+
+      const replyTo =
+        overrides?.replyTo && overrides.replyTo.trim().length > 0
+          ? overrides.replyTo.trim()
+          : undefined;
+
+      // Send email with PDF attachment
+      await sgMail.send({
+        from: DEFAULT_FROM_EMAIL,
+        ...(replyTo ? { replyTo } : {}),
+        to: customerEmail,
+        subject: overrides?.subject ?? defaultSubject,
+        html: overrides?.html ?? defaultHtml,
+        text: overrides?.text ?? defaultText,
         attachments: [
           {
-            filename: `Invoice_${invoiceNumber}_Detail.pdf`,
+            filename: overrides?.filename ?? `Invoice_${invoiceNumber}_Detail.pdf`,
             content: pdfBase64,
             type: 'application/pdf',
             disposition: 'attachment',
           },
         ],
-        categories: ['invoice-detail-pdf'],
+        categories: overrides?.categories ?? ['invoice-detail-pdf'],
       });
 
       console.log(`Invoice detail PDF sent to ${customerEmail} for invoice ${invoiceNumber}`);

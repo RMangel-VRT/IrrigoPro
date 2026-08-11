@@ -390,6 +390,7 @@ import {
 } from "./qb-invoice-ops";
 import { registerInvoiceMarkSentRoutes } from "./invoice-mark-sent-routes";
 import { registerInvoiceListRoutes } from "./invoice-list-routes";
+import { registerInvoiceReminderRoutes } from "./invoice-reminder-routes";
 import { registerInvoiceCorrectionRoutes } from "./invoice-correction-routes";
 import { registerInvoiceEditabilityRoutes } from "./invoice-editability-routes";
 // Task #1890 — computeEffectiveDueDate / isInvoiceOverdue were imported here
@@ -7474,6 +7475,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
   // Task #1438 — mark an invoice sent / unsent (records delivery, no email).
   registerInvoiceMarkSentRoutes(app, { requireAuthentication, requireInvoiceSend, requireInvoiceWrite });
+  // Task #1887 — payment reminders. Same CAN_SEND_INVOICE_EMAIL capability as
+  // the invoice PDF send route; nothing here runs on a schedule.
+  registerInvoiceReminderRoutes(app, { requireAuthentication, requireInvoiceSend });
   // Task #1710 — Invoice Correction & Reissue (Guided Dispute Flow).
   // syncInvoiceToQb: inject the local closure so the qb-sync endpoint can
   // call updateQbInvoiceInPlace without duplicating QB plumbing here.

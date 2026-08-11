@@ -63,6 +63,32 @@ const AGING_VALUE_TO_BUCKET: Record<string, AgingBucketKey> = {
 
 export type PaymentStatusFilter = "all" | "unpaid" | "partially_paid" | "paid";
 export type SentFilter = "all" | "sent" | "unsent";
+
+/**
+ * Task #1887 — `?reminders=`.
+ *
+ * The A/R list already rendered this control; it filtered nothing. It lives on
+ * the server with the others because the list now sorts and filters over the
+ * whole invoice set — a reminder filter applied to the loaded page would
+ * silently mean "…among the 50 rows you happen to be looking at".
+ *
+ *   never       — no reminder has ever been delivered
+ *   last7/30/60 — a reminder was delivered within that many days
+ *   thrice      — three or more delivered reminders, the escalation queue
+ */
+export type ReminderFilterValue =
+  | "all"
+  | "never"
+  | "last7"
+  | "last30"
+  | "last60"
+  | "thrice";
+
+const REMINDER_FILTER_WINDOW_DAYS: Partial<Record<ReminderFilterValue, number>> = {
+  last7: 7,
+  last30: 30,
+  last60: 60,
+};
 export type SortDir = "asc" | "desc";
 
 export type ArSortKey =
@@ -102,6 +128,7 @@ export interface ArListQuery {
   amountMin: number | null;
   amountMax: number | null;
   flaggedOnly: boolean;
+  reminders: ReminderFilterValue;
   sort: ArSortKey | null;
   dir: SortDir;
 }
@@ -117,6 +144,7 @@ export const DEFAULT_AR_LIST_QUERY: ArListQuery = {
   amountMin: null,
   amountMax: null,
   flaggedOnly: false,
+  reminders: "all",
   sort: null,
   dir: "desc",
 };
@@ -172,6 +200,16 @@ export function parseArListQuery(query: Record<string, unknown>): ArListQuery {
   const sentRaw = str(query.sent);
   const sent: SentFilter = sentRaw === "sent" || sentRaw === "unsent" ? sentRaw : "all";
 
+  const remRaw = str(query.reminders);
+  const reminders: ReminderFilterValue =
+    remRaw === "never" ||
+    remRaw === "last7" ||
+    remRaw === "last30" ||
+    remRaw === "last60" ||
+    remRaw === "thrice"
+      ? remRaw
+      : "all";
+
   const sortRaw = str(query.sort);
   const sort = SORT_KEYS.includes(sortRaw as ArSortKey) ? (sortRaw as ArSortKey) : null;
 
@@ -191,6 +229,7 @@ export function parseArListQuery(query: Record<string, unknown>): ArListQuery {
     amountMin: num(query.amountMin),
     amountMax: num(query.amountMax),
     flaggedOnly: boolish(query.flagged),
+    reminders,
     sort,
     dir,
   };
@@ -207,6 +246,7 @@ export function isUnfilteredArListQuery(q: ArListQuery): boolean {
     q.amountMin == null &&
     q.amountMax == null &&
     !q.flaggedOnly &&
+    q.reminders === "all" &&
     q.sort == null
   );
 }
@@ -247,6 +287,15 @@ export interface AnnotatedInvoice extends InvoiceRowLike {
   /** True when `balanceDue` is the invoice total standing in for a real balance. */
   balanceIsFallback: boolean;
   arFlags: ArFlag[];
+  /** Task #1887 — delivered reminders only. Null when none has ever gone out. */
+  lastReminderAt: string | null;
+  reminderCount: number;
+}
+
+/** Task #1887 — per-invoice reminder rollup, keyed by invoice id. */
+export interface ReminderSummary {
+  reminderCount: number;
+  lastReminderAt: Date;
 }
 
 /**
@@ -260,10 +309,12 @@ export function annotateInvoiceForAr(
   inv: InvoiceRowLike,
   paymentTerms: string | null | undefined,
   now: Date,
+  reminders?: ReminderSummary,
 ): AnnotatedInvoice {
   const effDue = computeEffectiveDueDate(inv.dueDate, inv.createdAt, paymentTerms);
   const overdue = isInvoiceOverdue(inv.paymentStatus, effDue, now);
   const days = daysOverdue(effDue, now);
+  const reminderCount = reminders?.reminderCount ?? 0;
   return {
     ...inv,
     isOverdue: overdue,
@@ -272,7 +323,14 @@ export function annotateInvoiceForAr(
     agingBucket: classifyAgingBucket(days),
     balanceDue: resolveBalanceDue(inv).toFixed(2),
     balanceIsFallback: isBalanceFallback(inv),
-    arFlags: computeArFlags(inv, now, overdue),
+    // The reminder count reaches computeArFlags so the shared helper can raise
+    // "Reminded, still unpaid" — the flag has to come from the same place as
+    // every other flag, not be bolted on here.
+    arFlags: computeArFlags({ ...inv, reminderCount }, now, overdue),
+    lastReminderAt: reminders?.lastReminderAt
+      ? new Date(reminders.lastReminderAt).toISOString()
+      : null,
+    reminderCount,
   };
 }
 
@@ -307,7 +365,11 @@ function matchesAging(row: AnnotatedInvoice, aging: AgingFilterValue): boolean {
 }
 
 /** Every filter combines with AND. */
-export function matchesArFilters(row: AnnotatedInvoice, q: ArListQuery): boolean {
+export function matchesArFilters(
+  row: AnnotatedInvoice,
+  q: ArListQuery,
+  now: Date = new Date(),
+): boolean {
   if (q.customerId != null && row.customerId !== q.customerId) return false;
   if (!matchesAging(row, q.aging)) return false;
   if (q.paymentStatus !== "all" && (row.paymentStatus ?? "unpaid") !== q.paymentStatus) {
@@ -327,7 +389,25 @@ export function matchesArFilters(row: AnnotatedInvoice, q: ArListQuery): boolean
     if (q.amountMax != null && amount > q.amountMax) return false;
   }
   if (q.flaggedOnly && row.arFlags.length === 0) return false;
+  if (!matchesReminders(row, q.reminders, now)) return false;
   return true;
+}
+
+/** Task #1887 — reminder filter, over delivered reminders only. */
+function matchesReminders(
+  row: AnnotatedInvoice,
+  filter: ReminderFilterValue,
+  now: Date,
+): boolean {
+  if (filter === "all") return true;
+  if (filter === "never") return row.reminderCount === 0;
+  if (filter === "thrice") return row.reminderCount >= 3;
+  const windowDays = REMINDER_FILTER_WINDOW_DAYS[filter];
+  if (windowDays == null) return true;
+  if (!row.lastReminderAt) return false;
+  const last = new Date(row.lastReminderAt).getTime();
+  if (Number.isNaN(last)) return false;
+  return now.getTime() - last <= windowDays * 24 * 60 * 60 * 1000;
 }
 
 // ── Sorting ─────────────────────────────────────────────────────────────────
@@ -410,7 +490,12 @@ export interface RegisterInvoiceListRoutesDeps {
   /** Defence in depth — the guard above already excludes field_tech. */
   applyPricingVisibility: (req: any, data: any) => any;
   /** Test seams. Production passes neither. */
-  _storageApi?: { getInvoices(companyId: number | null): Promise<any[]> };
+  _storageApi?: {
+    getInvoices(companyId: number | null): Promise<any[]>;
+    getInvoiceReminderSummaries?(
+      companyId: number | null,
+    ): Promise<Map<number, ReminderSummary>>;
+  };
   _loadPaymentTerms?: (customerIds: number[]) => Promise<Map<number, string | null>>;
   _now?: () => Date;
 }
@@ -457,12 +542,18 @@ export function registerInvoiceListRoutes(
         const uniqueCustomerIds = [...new Set(all.map((inv) => inv.customerId))];
         const termsMap = await loadPaymentTerms(uniqueCustomerIds);
 
+        // Task #1887 — one rollup query for the whole scoped set, for the same
+        // reason: the reminder filter runs server-side over every invoice, so
+        // reminder data cannot be a per-page lookup.
+        const reminderMap: Map<number, ReminderSummary> =
+          (await storage.getInvoiceReminderSummaries?.(callerCompanyId)) ?? new Map();
+
         const now = nowFn();
         const annotated = all.map((inv) =>
-          annotateInvoiceForAr(inv, termsMap.get(inv.customerId), now),
+          annotateInvoiceForAr(inv, termsMap.get(inv.customerId), now, reminderMap.get(inv.id)),
         );
 
-        const filtered = annotated.filter((row) => matchesArFilters(row, q));
+        const filtered = annotated.filter((row) => matchesArFilters(row, q, now));
         const ordered = sortAnnotatedInvoices(filtered, q.sort, q.dir);
 
         // Task #532 — opt-in pagination via ?limit=&offset=. Falls back to the

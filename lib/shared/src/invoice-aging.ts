@@ -134,6 +134,7 @@ export function agingBucketRank(key: AgingBucketKey): number {
 export type ArFlag =
   | "never_sent"
   | "overdue"
+  | "reminded_still_unpaid"
   | "qb_voided"
   | "not_in_qb"
   | "stale_sync"
@@ -143,6 +144,7 @@ export type ArFlag =
 export const AR_FLAGS: readonly ArFlag[] = [
   "never_sent",
   "overdue",
+  "reminded_still_unpaid",
   "qb_voided",
   "not_in_qb",
   "stale_sync",
@@ -154,6 +156,7 @@ export const AR_FLAGS: readonly ArFlag[] = [
 export const AR_FLAG_LABELS: Record<ArFlag, string> = {
   never_sent: "Never sent",
   overdue: "Overdue",
+  reminded_still_unpaid: "Reminded, still unpaid",
   qb_voided: "Voided in QB",
   not_in_qb: "Not in QB",
   stale_sync: "Stale sync",
@@ -166,6 +169,8 @@ export const AR_FLAG_TOOLTIPS: Record<ArFlag, string> = {
   never_sent:
     "This invoice was finalised but there is no record of it ever being sent to the customer.",
   overdue: "The due date has passed and the invoice is not fully paid.",
+  reminded_still_unpaid:
+    "A payment reminder has already gone out and the invoice is still past due. This is the escalation queue.",
   qb_voided:
     "QuickBooks shows this invoice as voided, but it is still open here. Void it here or restore it in QuickBooks.",
   not_in_qb:
@@ -193,6 +198,12 @@ export interface ArInvoiceLike {
   paymentStatus?: string | null;
   balance?: string | number | null;
   paymentSyncedAt?: Date | string | null;
+  /**
+   * Task #1887 — how many reminders were actually delivered for this invoice.
+   * Absent on callers that do not carry reminder data (Financial Pulse), in
+   * which case the reminder flag simply never fires rather than guessing.
+   */
+  reminderCount?: number | null;
 }
 
 function toNum(v: string | number | null | undefined): number {
@@ -240,6 +251,10 @@ export function computeArFlags(
   // A draft has not been finalised, so "never sent" is not a finding about it.
   if (!inv.sentAt && inv.status !== "draft") flags.push("never_sent");
   if (overdue) flags.push("overdue");
+  // Task #1887 — the escalation queue: we have already chased this one and the
+  // money still has not arrived. Only meaningful while it is still overdue, so
+  // a reminded invoice that got paid drops out of the queue on its own.
+  if (overdue && (inv.reminderCount ?? 0) > 0) flags.push("reminded_still_unpaid");
   if (inv.qbVoidDetectedAt) flags.push("qb_voided");
   if (!inv.quickbooksInvoiceId) flags.push("not_in_qb");
   const syncedAt = toTime(inv.paymentSyncedAt);
