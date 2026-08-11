@@ -404,6 +404,10 @@ import { registerInvoiceArNoteRoutes } from "./invoice-ar-note-routes";
 import { applyArNoteVisibility } from "./ar-note-visibility";
 import { registerInvoiceCorrectionRoutes } from "./invoice-correction-routes";
 import { registerInvoiceEditabilityRoutes } from "./invoice-editability-routes";
+// Task #1918 — the audit view's source-derivation rule, lifted into its own
+// module so the single-invoice line-item read shares it instead of growing a
+// second copy that can drift.
+import { deriveSourceWorkDate } from "./invoice-item-source";
 // Task #1890 — computeEffectiveDueDate / isInvoiceOverdue were imported here
 // for the inline invoice list handler. That handler now lives in
 // ./invoice-list-routes and imports them from @workspace/shared directly.
@@ -11977,7 +11981,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             if (wo) {
               status = wo.status || "billed";
               description = wo.projectName || item.description;
-              workDate = wo.completedAt || wo.updatedAt || item.workDate;
+              workDate = deriveSourceWorkDate("work_order", wo, item.workDate) as typeof workDate;
               createdAt = wo.createdAt ? wo.createdAt.toISOString() : null;
               approvedAt = wo.approvedAt ? wo.approvedAt.toISOString() : null;
               billedAt = wo.billedAt ? wo.billedAt.toISOString() : null;
@@ -12010,7 +12014,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             if (bs) {
               status = bs.status || "billed";
               description = bs.workDescription || item.description;
-              workDate = bs.workDate || item.workDate;
+              workDate = deriveSourceWorkDate("billing_sheet", bs, item.workDate) as typeof workDate;
               createdAt = bs.createdAt ? bs.createdAt.toISOString() : null;
               approvedAt = bs.approvedAt ? bs.approvedAt.toISOString() : null;
               billedAt = bs.billedAt ? bs.billedAt.toISOString() : null;
@@ -12044,7 +12048,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             if (wcb) {
               status = wcb.status || "billed";
               description = wcb.billingNumber || item.description;
-              workDate = wcb.workDate || item.workDate;
+              workDate = deriveSourceWorkDate("wet_check_billing", wcb, item.workDate) as typeof workDate;
               createdAt = wcb.createdAt ? wcb.createdAt.toISOString() : null;
               billedAt = wcb.billedAt ? wcb.billedAt.toISOString() : null;
               if (wcb.approvedLaborSnapshot) {

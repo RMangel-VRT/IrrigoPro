@@ -1,10 +1,11 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { Fragment, useState, useMemo, useEffect, useRef } from "react";
 import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useLocation, useSearch } from "wouter";
 import {
   hasCapability,
   usesUiDefault,
   CAN_EDIT_INVOICES,
+  CAN_READ_AR_NOTES,
   CAN_SEND_INVOICE_EMAIL,
   CAN_VIEW_COSTS,
   COLLECTIONS_LANDING_DEFAULT,
@@ -87,6 +88,14 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { InvoicePdfPreviewModal } from "@/components/billing/invoice-pdf-preview-modal";
 import { InvoiceAuditModal } from "@/components/billing/invoice-audit-modal";
+// Task #1918 — the expanded row and the one line-item view it shares with the
+// draft editor below.
+import { InvoiceRowExpansion } from "@/components/billing/invoice-row-expansion";
+import {
+  InvoiceLineItemsList,
+  ticketIdOf,
+  type InvoiceLineItem,
+} from "@/components/billing/invoice-line-items";
 import { BatchReminderDialog } from "@/components/billing/batch-reminder-dialog";
 import { FinancialPulseWidget } from "@/components/financial-pulse/financial-pulse-widget";
 import { exportSingleInvoiceCsv } from "@/lib/invoice-csv";
@@ -856,6 +865,20 @@ export default function InvoicesPage() {
   // 403 on her landing page, so it is gated on the same capability the server
   // checks. CAN_VIEW_COSTS mirrors the financial-pulse allowlist exactly.
   const canViewCosts = hasCapability(userRole, CAN_VIEW_COSTS);
+  // Task #1918 — what an expanded row is allowed to show.
+  //
+  // Both mirror a server guard exactly, and both gate by *absence*: the
+  // section is not rendered and its request is never issued. Neither is the
+  // protection — the server refuses either read on its own, and the note
+  // stripping on the invoice list stays authoritative.
+  //
+  // Reminder history is gated on the send capability because that is what
+  // guards GET /api/invoices/:id/reminders. An irrigation manager holds
+  // invoice-read without it, so her expanded row shows line items only. That
+  // is the decision, not an oversight: widening the capability to make a
+  // read-only section appear would also hand her the send.
+  const canReadReminderHistory = hasCapability(userRole, CAN_SEND_INVOICE_EMAIL);
+  const canReadArNotes = hasCapability(userRole, CAN_READ_AR_NOTES);
 
   // Task #1890 — the collections landing default.
   //
@@ -948,15 +971,9 @@ export default function InvoicesPage() {
   });
 
   // Fetch live invoice items when the draft editor is open
-  const { data: draftItemsData, isLoading: draftItemsLoading } = useQuery<{ items: Array<{
-    id: number;
-    sourceType: string;
-    billingSheetId: number | null;
-    workOrderId: number | null;
-    wetCheckBillingId: number | null;
-    description: string;
-    totalPrice: string;
-  }> }>({
+  const { data: draftItemsData, isLoading: draftItemsLoading } = useQuery<{
+    items: InvoiceLineItem[];
+  }>({
     queryKey: ["/api/invoices", draftEditorInvoice?.id, "items"],
     queryFn: async () => {
       const r = await fetch(`/api/invoices/${draftEditorInvoice!.id}/items`, { credentials: "include" });
@@ -975,6 +992,45 @@ export default function InvoicesPage() {
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
+
+  // Task #1918 — the expanded row.
+  //
+  // One id, not a set: only one row is open at a time, so opening a second row
+  // closes the first by construction rather than by a rule someone has to
+  // remember. Working an aging list is a sequence, not a comparison.
+  //
+  // Local state, deliberately. It is not in the URL and it is not in
+  // `arQuery`/`arParams`: the effect below clears the merge selection whenever
+  // the A/R params or the month filter change, so an expand routed through
+  // those would silently drop the ticks she had already made. Keeping it here
+  // also means the list query key never changes, so no page is refetched and
+  // no loaded page is dropped.
+  const [expandedRowId, setExpandedRowId] = useState<number | null>(null);
+  const toggleRowExpansion = (id: number) =>
+    setExpandedRowId((prev) => (prev === id ? null : id));
+
+  // The row is a control, so it answers to Enter and Space. Guarded on the row
+  // itself as the event target: a keypress inside the checkbox, the version
+  // chevron, or the actions menu belongs to that control, not to the row.
+  const handleRowKeyDown = (e: React.KeyboardEvent, id: number) => {
+    if (e.target !== e.currentTarget) return;
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    toggleRowExpansion(id);
+  };
+
+  // Version history and row expansion are siblings, never nested: the version
+  // chevron is its own button inside the row, so a click on it must not also
+  // toggle the expansion underneath. Anything interactive in the row — the
+  // select checkbox, the chevron, the reminder link, the ⋯ menu — swallows the
+  // row click the same way.
+  const handleRowClick = (e: React.MouseEvent, id: number) => {
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("button, a, input, select, textarea, [role='menuitem'], [role='checkbox']")) {
+      return;
+    }
+    toggleRowExpansion(id);
+  };
 
   const handleExportSingleCsv = async (invoice: Invoice) => {
     if (!canExportSingleCsv) return;
@@ -1496,6 +1552,13 @@ export default function InvoicesPage() {
   // actions this user actually holds.
   const canBatchRemind = canMarkSent;
   const canSelectRows = canMerge || canBatchRemind;
+
+  // Task #1918 — how wide the expanded region has to span on the desktop
+  // table: customer, invoice #, status, amount, the A/R block, period, and the
+  // actions cell, plus the select column when it is present. Derived from
+  // `AR_COLUMN_COUNT` for the same reason the history rows are — so the two
+  // cannot drift when a column is added.
+  const desktopColumnCount = (canSelectRows ? 1 : 0) + 4 + AR_COLUMN_COUNT + 2;
 
   const selectedInvoices = useMemo(
     () => activeFilteredInvoices.filter((inv) => selectedIds.has(inv.id)),
@@ -2277,9 +2340,21 @@ export default function InvoicesPage() {
                       {sortedInvoices(activeInvoices).map((invoice) => {
                         const history = predecessorsFor(invoice.id);
                         const isExpanded = expandedHistory.has(invoice.id);
+                        const isRowExpanded = expandedRowId === invoice.id;
+                        const rowId = `invoice-row-${invoice.id}`;
+                        const regionId = `invoice-row-region-${invoice.id}`;
                         return (
-                        <>
-                        <TableRow key={invoice.id} className="hover:bg-gray-50">
+                        <Fragment key={invoice.id}>
+                        <TableRow
+                          className="hover:bg-gray-50 cursor-pointer"
+                          id={rowId}
+                          tabIndex={0}
+                          aria-expanded={isRowExpanded}
+                          aria-controls={isRowExpanded ? regionId : undefined}
+                          onClick={(e) => handleRowClick(e, invoice.id)}
+                          onKeyDown={(e) => handleRowKeyDown(e, invoice.id)}
+                          data-testid={`invoice-row-${invoice.id}`}
+                        >
                           {canSelectRows && (
                             <TableCell className="w-8">
                               {isMergeable(invoice) && (
@@ -2402,7 +2477,31 @@ export default function InvoicesPage() {
                             <TableCell />
                           </TableRow>
                         ))}
-                        </>
+                        {/* Task #1918 — the expanded region, mounted only for
+                            the open row so a fifty-row list issues none of its
+                            three reads. */}
+                        {isRowExpanded && (
+                          <TableRow className="bg-gray-50 hover:bg-gray-50">
+                            <TableCell colSpan={desktopColumnCount} className="p-0">
+                              <div
+                                id={regionId}
+                                role="region"
+                                aria-labelledby={rowId}
+                                className="px-4 py-4"
+                                data-testid={`invoice-row-expansion-${invoice.id}`}
+                              >
+                                <InvoiceRowExpansion
+                                  invoiceId={invoice.id}
+                                  invoiceNumber={invoice.invoiceNumber}
+                                  open
+                                  canReadReminders={canReadReminderHistory}
+                                  canReadArNotes={canReadArNotes}
+                                />
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        )}
+                        </Fragment>
                       );
                       })}
                     </TableBody>
@@ -2415,10 +2514,26 @@ export default function InvoicesPage() {
                   {sortedInvoices(activeInvoices).map((invoice) => {
                     const history = predecessorsFor(invoice.id);
                     const isExpanded = expandedHistory.has(invoice.id);
+                    // Task #1918 — the card list gets the same expansion as the
+                    // table. It is the same list on a narrower screen, and the
+                    // detour it removes is the one that hurts most on a phone.
+                    const isRowExpanded = expandedRowId === invoice.id;
+                    const rowId = `invoice-card-${invoice.id}`;
+                    const regionId = `invoice-card-region-${invoice.id}`;
                     return (
                     <div key={invoice.id} className="space-y-0">
                     <Card className="border-gray-200">
-                      <CardContent className="p-4">
+                      <CardContent
+                        className="p-4 cursor-pointer"
+                        role="button"
+                        id={rowId}
+                        tabIndex={0}
+                        aria-expanded={isRowExpanded}
+                        aria-controls={isRowExpanded ? regionId : undefined}
+                        onClick={(e) => handleRowClick(e, invoice.id)}
+                        onKeyDown={(e) => handleRowKeyDown(e, invoice.id)}
+                        data-testid={`invoice-row-mobile-${invoice.id}`}
+                      >
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex items-center gap-2 min-w-0">
                             {canSelectRows && isMergeable(invoice) && (
@@ -2530,6 +2645,27 @@ export default function InvoicesPage() {
                         </CardContent>
                       </Card>
                     ))}
+                    {isRowExpanded && (
+                      <Card className="border-gray-200 bg-gray-50 mt-2">
+                        <CardContent className="p-4">
+                          <div
+                            id={regionId}
+                            role="region"
+                            aria-labelledby={rowId}
+                            data-testid={`invoice-row-expansion-mobile-${invoice.id}`}
+                          >
+                            <InvoiceRowExpansion
+                              invoiceId={invoice.id}
+                              invoiceNumber={invoice.invoiceNumber}
+                              open
+                              canReadReminders={canReadReminderHistory}
+                              canReadArNotes={canReadArNotes}
+                              testIdSuffix="-mobile"
+                            />
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )}
                     </div>
                     );
                   })}
@@ -2961,70 +3097,50 @@ export default function InvoicesPage() {
                 </Button>
               </div>
 
-              {/* Attached tickets — live item list with per-row Remove */}
+              {/* Attached tickets — the shared read-only line-item list, with
+                  the draft editor's own per-row Remove passed in.
+                  Task #1918: the rows themselves are rendered by
+                  InvoiceLineItemsList so the expanded row on the list and this
+                  editor cannot drift apart. The remove button stays here
+                  because the mutation does. */}
               <div className="space-y-2">
                 <h3 className="text-sm font-medium text-gray-700">Attached tickets</h3>
-                {draftItemsLoading ? (
-                  <div className="flex items-center gap-2 text-xs text-gray-400 py-2">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    Loading…
-                  </div>
-                ) : draftItems.length === 0 ? (
-                  <p className="text-xs text-gray-400">No tickets attached yet.</p>
-                ) : (
-                  <ul className="divide-y divide-gray-100 border border-gray-200 rounded-lg overflow-hidden">
-                    {draftItems.map((item) => {
-                      const typeLabel =
-                        item.sourceType === "billing_sheet" ? "BS"
-                        : item.sourceType === "work_order" ? "WO"
-                        : "WCB";
-                      const ticketId =
-                        item.billingSheetId ?? item.workOrderId ?? item.wetCheckBillingId ?? 0;
-                      const isRemoving =
-                        removeTicketMutation.isPending &&
-                        removeTicketMutation.variables?.ticketId === ticketId &&
-                        removeTicketMutation.variables?.ticketType === item.sourceType;
-                      const isLast = draftItems.length === 1;
-                      return (
-                        <li
-                          key={item.id}
-                          className="flex items-center justify-between gap-3 px-3 py-2 bg-white text-sm"
-                        >
-                          <span className="shrink-0 inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium bg-gray-100 text-gray-600">
-                            {typeLabel} #{ticketId}
-                          </span>
-                          <span className="flex-1 text-xs text-gray-700 truncate" title={item.description}>
-                            {item.description}
-                          </span>
-                          <span className="shrink-0 text-xs font-medium text-gray-900">
-                            ${parseFloat(item.totalPrice || "0").toFixed(2)}
-                          </span>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50 shrink-0"
-                            disabled={isRemoving || isLast}
-                            title={isLast ? "Cannot remove the last ticket — void the invoice instead" : "Remove ticket"}
-                            onClick={() => {
-                              if (!draftEditorInvoice) return;
-                              removeTicketMutation.mutate({
-                                invoiceId: draftEditorInvoice.id,
-                                ticketType: item.sourceType as "billing_sheet" | "work_order" | "wet_check_billing",
-                                ticketId,
-                              });
-                            }}
-                          >
-                            {isRemoving ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                              <Trash2 className="w-3.5 h-3.5" />
-                            )}
-                          </Button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
+                <InvoiceLineItemsList
+                  items={draftItems}
+                  isLoading={draftItemsLoading}
+                  testId="draft-line-items"
+                  renderRowAction={(item) => {
+                    const ticketId = ticketIdOf(item);
+                    const isRemoving =
+                      removeTicketMutation.isPending &&
+                      removeTicketMutation.variables?.ticketId === ticketId &&
+                      removeTicketMutation.variables?.ticketType === item.sourceType;
+                    const isLast = draftItems.length === 1;
+                    return (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50 shrink-0"
+                        disabled={isRemoving || isLast}
+                        title={isLast ? "Cannot remove the last ticket — void the invoice instead" : "Remove ticket"}
+                        onClick={() => {
+                          if (!draftEditorInvoice) return;
+                          removeTicketMutation.mutate({
+                            invoiceId: draftEditorInvoice.id,
+                            ticketType: item.sourceType as "billing_sheet" | "work_order" | "wet_check_billing",
+                            ticketId,
+                          });
+                        }}
+                      >
+                        {isRemoving ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="w-3.5 h-3.5" />
+                        )}
+                      </Button>
+                    );
+                  }}
+                />
               </div>
 
               {/* Add a ticket */}

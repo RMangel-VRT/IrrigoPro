@@ -83,10 +83,24 @@ export function InvoiceReminderPanel({
   invoiceId,
   invoiceNumber,
   open,
+  historyOnly = false,
 }: {
   invoiceId: number;
   invoiceNumber: string;
   open: boolean;
+  /**
+   * Task #1918 — history-only mode, for the expanded row on the invoices list.
+   *
+   * Sending stays in the row menu and the batch flow, so there is one send
+   * affordance rather than three. Everything that exists to support a send —
+   * the tone select, the button, the confirmation, the refusal copy, the
+   * throttle notice — is therefore absent here, along with the current-state
+   * line: a history section that reconciles a recorded balance against today's
+   * balance invites exactly the misreading the recorded values prevent.
+   *
+   * What remains is the recorded rows, rendered as stored.
+   */
+  historyOnly?: boolean;
 }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -154,13 +168,17 @@ export function InvoiceReminderPanel({
     <div className="border-t border-gray-200 pt-4 space-y-3" data-testid="reminder-panel">
       <div className="flex items-baseline justify-between">
         <h4 className="font-medium text-gray-900">Payment reminders</h4>
-        <span className="text-xs text-gray-500" data-testid="reminder-current-state">
-          {`Balance $${data.balanceDue} · ${data.daysOverdue} days overdue`}
-        </span>
+        {!historyOnly && (
+          <span className="text-xs text-gray-500" data-testid="reminder-current-state">
+            {`Balance $${data.balanceDue} · ${data.daysOverdue} days overdue`}
+          </span>
+        )}
       </div>
 
-      {/* The send control, or the reason there isn't one. */}
-      {refusal ? (
+      {/* The send control, or the reason there isn't one. Absent entirely in
+          history-only mode: nothing here can send, so nothing here explains
+          why a send is or is not currently possible. */}
+      {historyOnly ? null : refusal ? (
         <div
           className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2"
           data-testid={`reminder-refusal-${refusal.reason}`}
@@ -257,6 +275,7 @@ export function InvoiceReminderPanel({
         </ul>
       )}
 
+      {!historyOnly && (
       <AlertDialog open={confirming} onOpenChange={setConfirming}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -296,6 +315,7 @@ export function InvoiceReminderPanel({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      )}
     </div>
   );
 }

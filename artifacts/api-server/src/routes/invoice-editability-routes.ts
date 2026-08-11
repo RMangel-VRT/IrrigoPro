@@ -33,6 +33,7 @@ import {
 } from "@workspace/db/schema";
 import { storage as storageModule } from "../storage";
 import { recordAuditEvent } from "./audit-log";
+import { enrichInvoiceItemsWithSource } from "./invoice-item-source";
 
 export interface RegisterInvoiceEditabilityRoutesDeps {
   requireAuthentication: RequestHandler;
@@ -269,10 +270,21 @@ export function registerInvoiceEditabilityRoutes(
     },
   );
 
-  // ── GET /api/invoices/:id/items — fetch line items for the draft editor ──
+  // ── GET /api/invoices/:id/items — the line items of one invoice ───────────
   //
   // Returns the invoice_items for the given invoice, scoped to the caller's
-  // company. Used by the draft ticket editor UI to display the current ticket list.
+  // company. Read by the draft ticket editor and, since Task #1918, by the
+  // expanded row on the invoices list.
+  //
+  // Each item is enriched with its source ticket's human-readable number and
+  // the work date derived from that source. Raw internal ids are useless to
+  // someone trying to look a ticket up, and `invoice_items.work_date` is a
+  // snapshot that a later correction on the ticket leaves behind. The
+  // derivation is the audit view's own rule, shared from
+  // ./invoice-item-source rather than written a second time here.
+  //
+  // The company-scoped invoice resolution stays ahead of every source read: a
+  // cross-company invoice id 404s before a single ticket is loaded.
   app.get(
     "/api/invoices/:id/items",
     requireAuthentication,
@@ -296,7 +308,12 @@ export function registerInvoiceEditabilityRoutes(
           return;
         }
 
-        res.json({ items: invoice.items ?? [] });
+        const items = await enrichInvoiceItemsWithSource(invoice.items ?? [], {
+          storage,
+          callerCompanyId,
+        });
+
+        res.json({ items });
       } catch (err) {
         req.log?.error?.({ err }, "invoice items fetch failed");
         res.status(500).json({ message: "Failed to fetch invoice items" });

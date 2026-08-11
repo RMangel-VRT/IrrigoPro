@@ -21,4 +21,5 @@
 - [Dashboard fan-out & pool budget](dashboard-fanout-pool-budget.md) — fix the slow queries before raising DB_POOL_MAX; the ceiling is a budget multiplied by replica count.
 - [Silent empty lists](silent-empty-list-degradation.md) — catch-and-return-[] hides connection-acquisition failures; classify, rethrow, and render an error branch.
 - [ESM TDZ hidden by the bundler](esm-tdz-after-merge.md) — a merge can move a const below its use; the bundled server still runs while every ESM test dies at import.
+- [Per-row UI state on the invoices list](invoice-list-row-state.md) — keep row expansion in local state, out of the A/R params, or the selection-clearing effect wipes ticks and pages.
 - [Dev DB lags merged schema](dev-db-schema-drift.md) — 42P01 for a just-merged feature's table is environment drift, not your bug; don't adopt it into your diff.
