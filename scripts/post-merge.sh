@@ -13,3 +13,12 @@ pnpm --filter db push-force
 # missing any table/column defined in the Drizzle schema (guards against the
 # silent-abort failure mode above ever recurring).
 pnpm --filter db verify
+# The third drift direction: code referencing what the schema does NOT define.
+# `push-force` covers a schema diff silently not applying and `db verify`
+# covers the database missing what the schema defines; neither sees a query
+# selecting a column that was never in the schema (the #1885 phantom-column
+# outage). The compiler does. Runs last on purpose: `typecheck:libs` builds
+# lib/db, and the artifact projects read its emitted declarations, so the
+# schema has to be settled before this step.
+# Coverage, timings and known gaps: docs/merge-gate-drift-checks.md
+pnpm run typecheck
