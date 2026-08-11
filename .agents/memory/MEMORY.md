@@ -24,4 +24,5 @@
 - [TS7022 from assert.ok in a loop](ts7022-assert-in-loop.md) — an inferred const narrowed by assert inside a for-loop goes implicitly any; annotate it explicitly.
 - [Validation run resource exhaustion](validation-run-resource-exhaustion.md) — EAGAIN/uv_thread/pino worker-init failures in parallel validation are transient; rerun solo, then retry completion.
 - [Merge gate vs publish path](merge-and-publish-type-gates.md) — post-merge is the only typecheck; publish builds each artifact's own script and never runs the root build.
+- [Validation-run EAGAIN flakes](validation-eagain-flake.md) — parallel completion validation can die with EAGAIN/worker-thread crashes; if the suite passes locally, just retry markTaskComplete.
 - [Dev DB lags merged schema](dev-db-schema-drift.md) — 42P01 for a just-merged feature's table is environment drift, not your bug; don't adopt it into your diff.

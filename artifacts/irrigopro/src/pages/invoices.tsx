@@ -7,6 +7,7 @@ import {
   CAN_EDIT_INVOICES,
   CAN_READ_AR_NOTES,
   CAN_SEND_INVOICE_EMAIL,
+  CAN_VIEW_REMINDER_HISTORY,
   CAN_VIEW_COSTS,
   COLLECTIONS_LANDING_DEFAULT,
   AGING_BUCKET_LABELS,
@@ -872,12 +873,11 @@ export default function InvoicesPage() {
   // protection — the server refuses either read on its own, and the note
   // stripping on the invoice list stays authoritative.
   //
-  // Reminder history is gated on the send capability because that is what
-  // guards GET /api/invoices/:id/reminders. An irrigation manager holds
-  // invoice-read without it, so her expanded row shows line items only. That
-  // is the decision, not an oversight: widening the capability to make a
-  // read-only section appear would also hand her the send.
-  const canReadReminderHistory = hasCapability(userRole, CAN_SEND_INVOICE_EMAIL);
+  // Task #1921 — reminder history is a read, gated on its own capability
+  // (CAN_VIEW_REMINDER_HISTORY, which matches invoice-read), not on the send.
+  // An irrigation manager can now see that a reminder already went out without
+  // gaining the power to send one — the POST stays behind the send capability.
+  const canReadReminderHistory = hasCapability(userRole, CAN_VIEW_REMINDER_HISTORY);
   const canReadArNotes = hasCapability(userRole, CAN_READ_AR_NOTES);
 
   // Task #1890 — the collections landing default.

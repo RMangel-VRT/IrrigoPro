@@ -118,6 +118,34 @@ export const CAN_SEND_INVOICE_EMAIL = new Set<Role>([
 ]);
 
 /**
+ * Read the payment-reminder history on an invoice: when reminders went out,
+ * to whom, with what tone, and what was owed at the time.
+ *
+ * Task #1921 — this exists to separate reminder *history* (a read) from
+ * reminder *sending* (a write). They shared `CAN_SEND_INVOICE_EMAIL`, which
+ * meant a role with invoice-read but no send authority could not even see
+ * whether a customer had already been chased.
+ *
+ * Membership equals `CAN_READ_INVOICES` — deliberately, and unlike
+ * `CAN_READ_AR_NOTES`. A reminder record is part of the invoice's outward
+ * story: it is exactly what the customer was told, and nothing more. An A/R
+ * note is candid internal commentary *about* the customer, which is why that
+ * set stays narrower. `irrigation_manager` is therefore in here: knowing "a
+ * firm reminder went out last Tuesday" is invoice history, not collections
+ * candour.
+ *
+ * This grants no send. POST /api/invoices/:id/reminders stays on
+ * `CAN_SEND_INVOICE_EMAIL`; only the GET is gated on this set.
+ */
+export const CAN_VIEW_REMINDER_HISTORY = new Set<Role>([
+  "super_admin",
+  "company_admin",
+  "billing_manager",
+  "irrigation_manager",
+  "bookkeeper",
+]);
+
+/**
  * Manage the QuickBooks integration: connect, disconnect, read connection
  * status and health, run a manual sync.
  *

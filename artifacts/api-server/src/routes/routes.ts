@@ -966,6 +966,7 @@ import {
   requireInvoiceRead,
   requireInvoiceWrite,
   requireInvoiceSend,
+  requireReminderHistoryRead,
   requireArNotesAccess,
   requireQuickBooksAccess,
 } from "./role-guards";
@@ -7401,6 +7402,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerInvoiceReminderRoutes(app, {
     requireAuthentication,
     requireInvoiceSend,
+    // Task #1921 — history reads are gated wider than sends, on
+    // CAN_VIEW_REMINDER_HISTORY, so invoice readers can see what went out.
+    requireReminderHistoryRead,
     _core: reminderCore,
   });
   // `/api/invoices/reminders/{preview,batch}` cannot be swallowed by

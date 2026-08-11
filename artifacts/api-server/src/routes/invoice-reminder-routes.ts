@@ -314,6 +314,12 @@ export interface RegisterInvoiceReminderRoutesDeps extends ReminderCoreDeps {
   /** CAN_SEND_INVOICE_EMAIL — the same capability the PDF-send route uses. */
   requireInvoiceSend: RequestHandler;
   /**
+   * Task #1921 — CAN_VIEW_REMINDER_HISTORY, a read-only gate for the GET.
+   * Optional so existing callers keep their behaviour: absent, the GET falls
+   * back to the send guard, exactly as before.
+   */
+  requireReminderHistoryRead?: RequestHandler;
+  /**
    * An already-built core. Lets the batch endpoints and these endpoints share
    * one instance so there is literally one send path in the process.
    */
@@ -762,7 +768,10 @@ export function registerInvoiceReminderRoutes(
   app.get(
     "/api/invoices/:id/reminders",
     deps.requireAuthentication,
-    deps.requireInvoiceSend,
+    // Task #1921 — history is a read. A role with invoice-read but no send
+    // authority (irrigation_manager) may see what already went out; the POST
+    // below keeps the send capability.
+    deps.requireReminderHistoryRead ?? deps.requireInvoiceSend,
     async (req: any, res) => {
       try {
         const id = parseId(req, res);

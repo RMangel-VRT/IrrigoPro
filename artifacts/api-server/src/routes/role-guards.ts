@@ -23,6 +23,7 @@ import {
   CAN_READ_AR_NOTES,
   CAN_EDIT_INVOICES,
   CAN_SEND_INVOICE_EMAIL,
+  CAN_VIEW_REMINDER_HISTORY,
   CAN_MANAGE_QUICKBOOKS,
 } from "@workspace/shared";
 
@@ -92,6 +93,21 @@ export const requireInvoiceWrite: Guard = (req, res, next) => {
  */
 export const requireInvoiceSend: Guard = (req, res, next) => {
   if (!hasCapability(req.authenticatedUserRole, CAN_SEND_INVOICE_EMAIL)) {
+    res.status(403).json(DENIED);
+    return;
+  }
+  next();
+};
+
+/**
+ * Task #1921 — read the payment-reminder history on an invoice.
+ *
+ * Backed by CAN_VIEW_REMINDER_HISTORY, which matches CAN_READ_INVOICES on
+ * purpose: what the customer was told is invoice history. This guard grants
+ * no send — the POST stays behind requireInvoiceSend.
+ */
+export const requireReminderHistoryRead: Guard = (req, res, next) => {
+  if (!hasCapability(req.authenticatedUserRole, CAN_VIEW_REMINDER_HISTORY)) {
     res.status(403).json(DENIED);
     return;
   }

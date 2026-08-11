@@ -30,7 +30,12 @@ import {
   type ReminderMailer,
 } from "./invoice-reminder-routes";
 import { annotateInvoiceForAr } from "./invoice-list-routes";
-import { hasCapability, CAN_SEND_INVOICE_EMAIL, type Capability } from "@workspace/shared";
+import {
+  hasCapability,
+  CAN_SEND_INVOICE_EMAIL,
+  CAN_VIEW_REMINDER_HISTORY,
+  type Capability,
+} from "@workspace/shared";
 
 // ── Harness ─────────────────────────────────────────────────────────────────
 
@@ -57,6 +62,7 @@ function capabilityGuard(capability: Capability): RequestHandler {
   };
 }
 const requireInvoiceSend = capabilityGuard(CAN_SEND_INVOICE_EMAIL);
+const requireReminderHistoryRead = capabilityGuard(CAN_VIEW_REMINDER_HISTORY);
 
 interface SentEmail {
   to: string;
@@ -178,6 +184,7 @@ function harness(opts: HarnessOptions = {}) {
   registerInvoiceReminderRoutes(app, {
     requireAuthentication: makeAuth(opts.role ?? "bookkeeper", opts.companyId ?? 1),
     requireInvoiceSend,
+    requireReminderHistoryRead,
     _storageApi: storageApi,
     _mailer: mailer,
     _loadPaymentTerms: async () => opts.paymentTerms ?? "net_30",
@@ -400,9 +407,12 @@ describe("invoice reminder endpoints — capability matrix", () => {
       const { status } = await send(h.app);
       assert.equal(status, 403);
       assert.equal(h.sent.length, 0);
+      // Task #1921 — history is a separate READ capability. A send-denied role
+      // that reads invoices (irrigation_manager) still gets the history; roles
+      // outside CAN_VIEW_REMINDER_HISTORY are refused the read too.
       const hist = harness({ role });
       const res = await request(hist.app, "GET", "/api/invoices/1/reminders");
-      assert.equal(res.status, 403);
+      assert.equal(res.status, hasCapability(role, CAN_VIEW_REMINDER_HISTORY) ? 200 : 403);
     });
   }
 });

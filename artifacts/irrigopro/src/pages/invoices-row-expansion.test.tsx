@@ -571,7 +571,7 @@ describe("what each role's expanded row contains", () => {
     expect(noteRequests()).toEqual([]);
   });
 
-  it("a role without the send capability gets no reminder section, not an error or a spinner", async () => {
+  it("an irrigation manager gets reminder history — a read, separate from the send (task #1921)", async () => {
     roleRef.current = "irrigation_manager";
     renderInvoices("/invoices");
     await waitForList();
@@ -580,10 +580,9 @@ describe("what each role's expanded row contains", () => {
     const region = screen.getByTestId("invoice-row-expansion-1");
     await waitFor(() => expect(within(region).getByTestId("expansion-line-items")).toBeTruthy());
 
-    expect(within(region).queryByTestId("reminder-panel")).toBeNull();
-    expect(within(region).queryByTestId("reminder-panel-loading")).toBeNull();
-    expect(reminderRequests()).toEqual([]);
-    // Line items are all she gets, and she does get them.
+    // Reminder history renders for an invoice reader without the send.
+    await waitFor(() => expect(within(region).getByTestId("reminder-panel")).toBeTruthy());
+    // Line items are still there too.
     expect(within(region).getByText("BS-010")).toBeTruthy();
   });
 

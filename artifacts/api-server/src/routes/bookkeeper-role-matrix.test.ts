@@ -42,6 +42,7 @@ import {
   requireInvoiceRead,
   requireInvoiceWrite,
   requireInvoiceSend,
+  requireReminderHistoryRead,
   requireQuickBooksAccess,
 } from "./role-guards";
 import { registerInvoiceMarkSentRoutes } from "./invoice-mark-sent-routes";
@@ -380,6 +381,7 @@ describe("invoice payment reminders — real routes, real guards", () => {
     registerInvoiceReminderRoutes(app, {
       requireAuthentication: makeAuth(role, companyId),
       requireInvoiceSend,
+      requireReminderHistoryRead,
       _storageApi: {
         async getInvoiceById(id: number, scoped: number | null) {
           // Invoice 1 belongs to company 1; invoice 2 belongs to company 2.

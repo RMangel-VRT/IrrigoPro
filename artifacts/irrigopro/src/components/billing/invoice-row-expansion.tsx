@@ -22,9 +22,10 @@
 // a reminder all stay where they already are. The one exception is the A/R
 // note compose box, which is append-only and is the panel's own affordance.
 //
-// Role gating is by absence. A role without the invoice-send capability cannot
-// read reminder history at all, so it gets no reminder section rather than a
-// 403 rendered as an error or a spinner that never resolves; a role without
+// Role gating is by absence. A role without the reminder-history read
+// capability (task #1921 — separate from the send capability) gets no reminder
+// section rather than a 403 rendered as an error or a spinner that never
+// resolves; a role without
 // A/R-note access gets no note section and issues no note request. Neither
 // gate is the protection — the server refuses both regardless, and the note
 // stripping on the server stays authoritative. These gates exist so the UI
@@ -54,7 +55,7 @@ export function InvoiceRowExpansion({
   invoiceId: number;
   invoiceNumber: string;
   open: boolean;
-  /** CAN_SEND_INVOICE_EMAIL — the capability the reminder read is gated on. */
+  /** CAN_VIEW_REMINDER_HISTORY — a read capability, separate from the send (task #1921). */
   canReadReminders: boolean;
   /** CAN_READ_AR_NOTES — narrower than invoice-read on purpose. */
   canReadArNotes: boolean;

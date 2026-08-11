@@ -33,6 +33,7 @@ import { registerInvoiceReminderRoutes } from "./invoice-reminder-routes";
 import {
   requireInvoiceRead,
   requireInvoiceSend,
+  requireReminderHistoryRead,
   requireArNotesAccess,
   requireInvoiceWrite,
 } from "./role-guards";
@@ -242,6 +243,7 @@ function remindersHarness(opts: {
   registerInvoiceReminderRoutes(app, {
     requireAuthentication: makeAuth(opts.role ?? "bookkeeper", opts.companyId ?? 1),
     requireInvoiceSend,
+    requireReminderHistoryRead,
     _storageApi: storageApi,
     _mailer: async () => ({ success: true }),
     _loadPaymentTerms: async () => "net_30",
@@ -545,11 +547,28 @@ describe("a role without CAN_READ_AR_NOTES", () => {
   });
 });
 
-// ── (e) A role without the send capability gets no reminder history ─────────
+// ── (e) Reminder history is a read, separate from the send (task #1921) ─────
 
-describe("a role without CAN_SEND_INVOICE_EMAIL", () => {
-  it("is refused reminder history — the capability is not widened for a read", async () => {
+describe("reminder history read vs reminder send", () => {
+  it("serves history to irrigation_manager, who reads invoices but cannot send", async () => {
     const h = remindersHarness({ role: "irrigation_manager" });
+    const { status, body } = await request(h.app, "GET", "/api/invoices/1/reminders");
+
+    assert.equal(status, 200);
+    assert.ok(Array.isArray(body.reminders));
+  });
+
+  it("still refuses irrigation_manager the send — the read grants no write", async () => {
+    const h = remindersHarness({ role: "irrigation_manager" });
+    const { status } = await request(h.app, "POST", "/api/invoices/1/reminders", {
+      templateKey: "firm",
+    });
+
+    assert.equal(status, 403);
+  });
+
+  it("refuses a role outside invoice-read the history entirely", async () => {
+    const h = remindersHarness({ role: "field_tech" });
     const { status, body } = await request(h.app, "GET", "/api/invoices/1/reminders");
 
     assert.equal(status, 403);
