@@ -1,0 +1,81 @@
+#1935 - Follow-Up Work Order for Deferred Items
+What & Why
+When a crew completes an inspection work order that was created from an estimate, they sometimes finish fewer items than were quoted. Those missing items silently disappear — they aren't billed (correct), but they also aren't recorded anywhere. Woodglenn WO-1783955816671-314 is the production proof case: 18 deferred items (17 lines at quantity 1 plus one line at quantity 2, a quantity difference of 19) / 22.50 hours of approved, quoted work vanished on completion with nobody knowing to schedule a return visit.
+
+This feature diffs the completed work order against its estimate and creates a follow-up work order carrying the deferred items, so that work enters the dispatch queue automatically.
+
+Done looks like
+Completing an inspection work order with an estimateId that is missing items from its estimate automatically creates a follow-up work order carrying exactly those items and their hours.
+Completing one with nothing missing behaves exactly as today — no follow-up, no extra output.
+No completion is ever refused or blocked by this feature.
+The follow-up carries controllerLetter, zoneNumber, issueType on every item and links to its parent in both directions (parentWorkOrderId on the child, the follow-up surfaced in the parent's detail view).
+The follow-up has estimateId: null and never trips the work_orders_estimate_unique_idx constraint.
+Work orders with a null estimateId are completely unaffected.
+The pre-submit summary screen shows a plain informational sentence when items will be deferred (e.g. "18 items from the estimate aren't on this work order. They'll move to a follow-up work order and won't be billed here.").
+Re-completing the same work order produces exactly one follow-up — a pre-creation idempotency check (scoped by company) skips creation if one already exists, and logs the skip.
+If follow-up creation throws, the completion still succeeds and the error is logged at error level via the structured logger, including the parent work order number and deferred item count.
+A registered migration creates Woodglenn's follow-up retroactively after a preview review.
+Out of scope
+Correcting the two over-stated Woodglenn work orders (FIX - Correct Two Over-Stated Woodglenn Work Orders) — that runs first.
+The server per-part labor formula fix — that should land first so this adopts its shared hours function.
+Anything built on work_order_items.completedAt — the checklist is not adopted and must not be changed.
+Auto-scheduling or assigning the follow-up (it enters the queue; dispatch is a person's job).
+Notifying anyone that a follow-up was created.
+Any change to billing figures on the original work order.
+New screens — the follow-up appears in existing work order list and detail views.
+Steps
+Schema — add parentWorkOrderId
+Add a nullable integer column parentWorkOrderId (parent_work_order_id) to the workOrders table in lib/db/src/schema/schema.ts. Follow the established self-reference pattern (no .references() on the same table, same as supersededByInvoiceId/mergedIntoInvoiceId on invoices — TS7022 circular-inference is already documented). Add a with comment explaining the semantics (a follow-up carries deferred items from its parent, has estimateId: null by design, and is not a duplicate). Add a DB index on the column. Generate and register the migration file.
+
+Extract and test the diff computation
+Write a pure, side-effect-free function computeDeferredItems(estimateItems, completedItems) that:
+
+Matches on partName + controllerLetter + zoneNumber + issueType using IS NOT DISTINCT FROM semantics for null fields.
+Returns estimate lines with no counterpart on the completed work order, or lines where the completed quantity is less than the estimate quantity (carrying the shortfall quantity, not the whole line).
+Returns an empty array when all estimate items are covered.
+Place it in a new dedicated module (e.g. artifacts/api-server/src/lib/work-order-deferred-items.ts) so it can be imported by both the route and tests without Express dependencies. Write tests in a new file alongside inspection-zone-lineage.test.ts, covering:
+
+The Woodglenn fixture: estimate 50017 with 162 lines / completed work order with 144 lines → 18 deferred items (17 lines at quantity 1 plus one line at quantity 2; the quantity difference is 19) totalling exactly 22.50 hours. Use the real controller/zone distribution (A, C, D, E, F, I, J) and assert controllers B, G, H produce nothing.
+Empty diff → no follow-up created; completion output byte-identical to today.
+A work order with null estimateId → no diff computed, no follow-up.
+Quantity shortfall: estimate line qty 3, work order line qty 1 → follow-up carries qty 2.
+Null controller or zone values match each other rather than falsely reporting a line as deferred.
+Create follow-up at completion (API)
+In the POST /api/work-orders/complete handler (routes.ts:9542), after replaceWorkOrderItemsWithResync succeeds and only when the work order has a non-null estimateId: load the estimate's items, load the just-persisted completion items, call computeDeferredItems, and if the result is non-empty:
+
+a. Pre-creation idempotency guard — before inserting, query for an existing work order with parentWorkOrderId equal to the completing work order, scoped by companyId. If one already exists, log at info level that creation was skipped (include parent WO number), and do not create a second. Re-completion is a confirmed real path in this codebase (c404ba05), and without this guard re-completing a job produces duplicate follow-up work orders.
+
+b. Create via storage.createFollowUpWorkOrder (new storage method) — the follow-up must have: estimateId: null, parentWorkOrderId set to the completing work order, status: 'pending' (same start state as new work orders), companyId/customerId/branch inherited from the parent, totalHours equal to the sum of deferred line hours, description naming the parent WO number and that it carries deferred items. Items are inserted from the diff result carrying controllerLetter, zoneNumber, issueType, and findingId resolved from the original work order item where one existed.
+
+c. Failure handling — wrap follow-up creation in a try/catch. On any throw, log at error level through the structured logger (not console.warn or console.error), including the parent work order number and the deferred item count. Then continue — the completion must still succeed and return its normal response. A swallowed failure with no record means the deferred work disappears silently, which is the exact failure mode this feature exists to eliminate.
+
+d. Return the followUpWorkOrderId (or null) alongside the existing completion response.
+
+Tests to add (in the lineage test file or a new companion file):
+
+Completing the same work order twice produces exactly one follow-up (idempotency).
+When follow-up creation throws, the structured logger receives an error-level call containing the parent WO number and deferred count, and completion still returns success.
+No completion path can be refused by this feature — assert that explicitly.
+Company isolation: follow-up creation and both link reads are scoped by companyId.
+Surface the follow-up link in work order detail
+In the work order detail view, when parentWorkOrderId is set (child), show a linked label pointing to the parent. When the work order has a follow-up (parent), show a linked label pointing to the follow-up. These are read-only labels using existing work order detail UI patterns — no new screen or route needed, just additional fields on the existing WO fetch and display.
+
+Pre-submit sentence on the completion summary screen
+In work-order-completion.tsx, during the summary review stage (Stage 2, before the final "Submit Work Order" button), compute the deferred item count client-side by diffing the loaded estimate items against usedParts. When the count is non-zero and the work order has an estimateId, render one informational plain-text sentence above the submit button: "N items from the estimate aren't on this work order. They'll move to a follow-up work order and won't be billed here." Use an informational (not warning) visual treatment consistent with existing info banners. Do not block or add any confirmation dialog.
+
+Woodglenn backfill migration
+Add a new MigrationDefinition in artifacts/api-server/src/lib/migrations/ following the established pattern (see backfill-merged-invoice-status.ts). The migration targets WO-1783955816671-314 (production). check() returns already-run if the follow-up already exists. preview() reports the 18 deferred items it would create (17 lines at quantity 1, one line at quantity 2, totalling 22.50 hours) with their controller/zone distribution, and warns that the work may no longer be relevant six weeks on. run() calls the same createFollowUpWorkOrder logic used by the completion route, guarded by acknowledged in MigrationRunOptions. Register it in registry.ts. Add the new entry as a membership check (not a count) in registry.test.ts to avoid breaking the existing count assertion.
+
+Relevant files
+lib/db/src/schema/schema.ts — workOrders table (add parentWorkOrderId); estimateItems columns; supersededByInvoiceId as self-reference pattern
+artifacts/api-server/src/routes/routes.ts — POST /api/work-orders/complete handler at line 9542; replaceWorkOrderItemsWithResync call at line 9831
+artifacts/api-server/src/storage.ts — createWorkOrderFromEstimate (idempotency/uniqueness pattern at lines 3840–4007); add createFollowUpWorkOrder here
+artifacts/irrigopro/src/components/work-orders/work-order-completion.tsx — summary review stage lines 674–692; estimate info banner lines 542–564
+artifacts/api-server/src/routes/inspection-zone-lineage.test.ts — extend with diff, idempotency, error-logging, and isolation tests
+artifacts/api-server/src/lib/migrations/registry.ts — register backfill migration
+artifacts/api-server/src/lib/migrations/backfill-merged-invoice-status.ts — pattern to follow for new migration
+Dependencies
+
+Repair Woodglenn over-stated work order hours
+Open task
+Fix server-side labor doubling formula

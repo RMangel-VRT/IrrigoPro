@@ -1,0 +1,114 @@
+# FIX — Correct Two Over-Stated Woodglenn Work Orders
+
+**Urgent — two completed work orders will bill roughly $8,600 too high if converted before this lands.**
+
+**What & Why**
+Two work orders for Woodglenn Squares HOA carry labor hours that are roughly double the correct figure, caused by the pre-#1869 completion prefill. Both are **completed and unbilled** — no billing sheet, no invoice, nothing sent to the customer. This is a correction before the fact, not a credit after it.
+
+The diagnosis is already done and verified against production. This ticket applies a known correction to exactly two rows.
+
+## The cause, confirmed against production data
+
+Estimate 50017 is internally correct: header `total_labor_hours` 72.50, and its line items sum to 72.50 exactly. But `Σ(labor_hours × quantity)` across those same lines is **140.25** — and 140.25 is the number the old completion prefill displayed. The tech accepted it, and 140.00 landed on the work order header.
+
+That is the #1869 bug reproduced exactly: on inspection-derived estimates, `inspection-estimate-items.ts` merges findings by part so `labor_hours` is already a **line total**, and multiplying by quantity double-counts.
+
+## The two rows
+
+| | WO-1783955816671-314 | WO-1783955809401-62 |
+|---|---|---|
+| Customer | Woodglenn Squares HOA | Woodglenn Squares HOA |
+| Completed | 2026-07-28 | 2026-07-23 |
+| Estimate | 50017 | 50020 |
+| **Current header hours** | **140.00** | **22.00** |
+| **Correct header hours** | **50.00** | **10.75** |
+| Labor rate | $85.00 | $85.00 |
+| Current labor subtotal | $11,900.00 | $1,870.00 |
+| Correct labor subtotal | $4,250.00 | $913.75 |
+| Parts (unchanged) | $3,131.70 | $972.50 |
+| Current total | $15,031.70 | $2,842.50 |
+| **Correct total** | **$7,381.70** | **$1,886.25** |
+
+Combined overstatement: **$8,606.25**.
+
+**Both have no billing sheet and no invoice.** Verified — the `billing_sheets` and `invoices` joins return null for both.
+
+## Why 50.00 and not 72.50 for WO-...314
+
+The approved estimate carries 162 line items totalling 72.50 hours. The completed work order carries 144 items totalling 50.00 hours. The 18 missing items sum to **exactly 22.50 hours**, which closes the gap precisely.
+
+Those items are scattered across seven controllers (A, C, D, E, F, I, J) with no clustering, while controllers B, G, and H came through complete. Twelve of the seventeen are leak repairs, with three valves, two wiring issues, and one pressure issue.
+
+That distribution is deferred work, not data loss — a bug dropping rows would take a random cross-section rather than skewing toward leaks and wiring. Completion uses replace-not-append semantics (`c404ba05`), so the work order correctly holds only what the tech submitted as performed. **The work order's own line items are the record of what was done, and they sum to 50.00.**
+
+WO-...62 needs no such judgment: estimate 50020's header is 10.75 and its line sum is 10.75, agreeing exactly, against a header of 22.00.
+
+**This reading was confirmed with Randy before the correction was written.**
+
+## Steps
+
+1. **Register a migration** in the Super Admin registry, following the `repair-qb-void-mispaid` preview → acknowledge → run pattern.
+2. **Preview** must show, for both work orders: current and proposed `total_hours`, `labor_subtotal`, and `total_amount`, plus the parts component that stays unchanged, plus a confirmation that each has no `billing_sheet` and no `invoice_id`. **The preview writes nothing.**
+3. **Refuse to run if either work order has since been billed.** Re-check for a billing sheet and an invoice at run time, not just at preview. If either has been converted between now and the run, stop and report — the correction path for a billed ticket is different and is not in this ticket.
+4. **Apply**: set `total_hours` to the corrected value, recompute `labor_subtotal` as `total_hours × labor_rate`, and recompute `total_amount` as the new labor subtotal plus the existing parts component. Do not alter the parts figures, the line items, the status, or `completed_at`.
+5. **Idempotent.** Running twice changes nothing after the first. Key on the current value so an already-corrected row is skipped rather than re-corrected.
+6. **Verify** with the gate query below and attach the output.
+
+## Gate query
+
+```sql
+SELECT work_order_number, total_hours, labor_subtotal, total_amount, invoice_id
+FROM work_orders
+WHERE work_order_number IN ('WO-1783955816671-314','WO-1783955809401-62');
+```
+
+Expect `50.00 / 4250.00 / 7381.70` and `10.75 / 913.75 / 1886.25`, with `invoice_id` null on both.
+
+## Multi-tenancy (Rule 1)
+
+Both rows belong to the same company. Scope the update by company as well as work order number, and never match on work order number alone.
+
+## Decisions
+
+- **Correct to the work order's own line-item sum** (decided, confirmed with Randy) — the line items are the record of work performed.
+- **Do not restore the 18 missing items** (decided) — that work was not done. It is the subject of `BUILD - Follow-Up Work Order for Incomplete Items`, not this ticket.
+- **Refuse if billed** (decided) — a billed ticket needs the invoice correction flow, which is out of scope here.
+- **Parts are untouched** (decided) — only labor was overstated.
+
+## Done looks like
+
+- Both work orders carry the corrected hours, labor subtotal, and total.
+- Neither has been billed, and the migration refused to run if either had been.
+- Converting either to a billing sheet now produces the correct figure.
+- Running the migration a second time changes nothing.
+
+## Tests
+
+- Preview reports the six before-and-after figures and writes nothing.
+- The correction produces exactly the values in the gate query.
+- Running twice is a no-op the second time.
+- A fixture work order that has a billing sheet or an invoice is **refused**, not corrected.
+- Parts subtotals and line items are unchanged after the run.
+- Company scoping: a work order number from another company is not matched.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] Preview output for both work orders.
+- [ ] Gate query output after the run.
+- [ ] Confirmation that neither had a billing sheet or invoice at run time.
+- [ ] Proof of the second, no-op run.
+- [ ] Registry diff showing the migration registered.
+
+## Out of scope
+
+- The server-side per_part labor formula — `FIX - Server Labor Formula Still Contains the Doubling Rule`.
+- Recording the 17 items of deferred work — `BUILD - Follow-Up Work Order for Incomplete Items`.
+- Any other work order. The remaining 15 completed inspection work orders were checked and carry no per-line hours at all, which is correct flat-mode behaviour, not a defect.
+- Any invoice, credit, or customer communication. Nothing was billed.
+
+## Relevant files
+
+- `artifacts/api-server/src/lib/migrations/registry.ts` (register here)
+- `artifacts/api-server/src/lib/migrations/repair-qb-void-mispaid.ts` (pattern to follow)
+- `lib/db/src/schema/schema.ts` (`workOrders` — `total_hours`, `labor_subtotal`, `total_amount`, `labor_rate`, `invoice_id`)
+- `artifacts/irrigopro/src/components/work-orders/completion-prefill.ts` (the #1869 fix and bug history — context only, unchanged here)

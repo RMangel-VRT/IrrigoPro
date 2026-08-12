@@ -1,0 +1,115 @@
+# FIX — Server Labor Formula Still Contains the Doubling Rule
+
+**What & Why**
+`556f2794` (#1869) fixed the labor doubling in the work order completion form. It is a **client-side** fix — `computeCompletionPrefillHours` in `artifacts/irrigopro/src/components/work-orders/completion-prefill.ts`.
+
+**The server still contains the formula that caused the bug.** `routes.ts:9607–9627`, in the completion route, `per_part` mode recomputes labor as `Σ(laborHours × quantity)` across persisted work order items. On an inspection-derived work order that is the doubling formula, running server-side where no client fix can reach it.
+
+It does not fire today for one reason only: `laborMode` defaults to `flat` everywhere, so inspection work orders never take that branch. **The protection is a default value, not a guard.** This ticket makes it a guard.
+
+## Current state (confirmed in code)
+
+**The invariant that makes the formula wrong.** `inspection-estimate-items.ts:91–108` collapses findings by part:
+
+```ts
+existing.quantity += qty;
+existing.laborHours += labor;
+```
+
+So on a merged row `laborHours` is a **line total** — an "Adjust ×4" row's hours cover all four adjustments — while `quantity` is a count. Multiplying them double-counts. This invariant is documented in a comment on the client prefill file and **nowhere else**: not in the column, not in a type, not in a server assertion.
+
+**The server formula** (`routes.ts:9607–9627`):
+
+```ts
+if (completionLaborModeForCalc === 'per_part') {
+  const persistedItems = await storage.getWorkOrderItems(workOrderId);
+  const sumFromPersisted = persistedItems.reduce(
+    (s, it) => s + (parseFloat(String(it.laborHours ?? '0')) || 0)
+                 * (parseFloat(String(it.quantity ?? '0')) || 0), 0);
+  ...
+}
+```
+
+**Why it is currently unreachable for inspection work orders.** `laborMode` defaults to `"flat"` at all four schema sites (`schema.ts:267`, `:484`, `:712`, `:1448`); `estimate-payload.ts:57` hard-codes `const laborMode: "flat" = "flat"`; `storage.ts` writes `"flat"` at `:10371`, `:10417`, `:10688`.
+
+**But per_part can arrive from outside.** `estimate-routes.ts:169` accepts `laborMode: z.enum(["flat", "per_part"]).optional()` on the API, and `routes.ts:9554` reads `incomingLaborMode` straight off the completion payload. A client, an integration, or a future ticket can set it. `backfill-estimate-labor-mode.ts` exists specifically to handle rows where `laborMode = 'per_part'`, so the value is real in this system, not hypothetical.
+
+## The fix
+
+**Per-line labor is per-unit or it is a line total. Those are different data, and the row must say which.**
+
+The cleanest available signal is already on the row: **an inspection-derived item has a non-null `findingId`** (`workOrderItems.findingId`, added in the Slice 3 lineage work). Merged inspection rows are exactly the rows where `laborHours` is a line total.
+
+**Refuse to apply the per-unit formula to a line-total row.** In the `per_part` branch, when an item has a non-null `findingId`, sum its `laborHours` **without** multiplying by quantity. Field-added rows (`findingId` null) keep `× quantity`, which is correct for them.
+
+**Extract the rule into one shared, tested function** used by both the server completion route and the client prefill. Right now the client's comment says it "mirrors the server's completion formula" — two implementations kept in step by a comment is how they drift. One function, imported by both, in `lib/shared`.
+
+**Assert the invariant rather than documenting it.** Add a server-side check on the completion path: if a `per_part` work order contains inspection-derived items, log at warn level with the work order id and both computed figures. This is a tripwire, not a block — but a silent wrong number is what produced the original incident.
+
+**Write the invariant where the data lives.** Add a comment on `workOrderItems.laborHours` in `schema.ts` stating plainly that on inspection-derived rows (non-null `findingId`) the value is a **line total, not per-unit**, and that multiplying by quantity double-counts. The next person writing a sum will read the column, not a component file three directories away.
+
+## Out of scope — deliberately
+
+- **Changing what `laborMode` any existing record uses.** No backfill, no flipping estimates or work orders between modes. This ticket makes the formula correct for whatever mode a record is in.
+- **Repairing already-mis-billed tickets** — `FIX - Repair Mis-Billed Inspection Ticket`.
+- **Making check-off state reach billing** — `BUILD - Follow-Up Work Order for Incomplete Items`.
+- Removing `per_part` mode. It is legitimate for field-added parts.
+- Any change to `inspection-estimate-items.ts` merge behaviour. The merge is correct; the consumers were wrong about what it produces.
+
+## Decisions
+
+- **`findingId` non-null means `laborHours` is a line total** (decided) — the row already carries the signal; use it rather than inferring from mode.
+- **One shared function for both server and client** (decided) — a comment is not a synchronisation mechanism.
+- **Warn, do not block, on a per_part inspection work order** (decided) — a tripwire that names the discrepancy, so it is found in logs rather than in a customer's invoice.
+- **The invariant is documented on the column** (decided) — where someone writing a sum will actually see it.
+- **No labor-mode backfill** (decided).
+
+## Done looks like
+
+- A `per_part` work order containing inspection-derived items computes labor correctly — line totals summed, per-unit rows multiplied — rather than doubling.
+- Server and client compute completion hours through the same function; there is no second implementation to drift.
+- `workOrderItems.laborHours` carries a comment stating when it is a line total.
+- A per_part inspection work order produces a warn-level log naming the work order and both figures.
+- Flat mode behaviour is byte-identical to today.
+
+## Tests
+
+- **The Woodglenn regression, server-side**: a `per_part` work order whose items carry non-null `findingId` and quantities > 1 computes `Σ laborHours`, not `Σ laborHours × quantity`. Name the test after the incident.
+- A `per_part` work order with only field-added items (`findingId` null) still computes `Σ laborHours × quantity` — the per-unit case must keep working.
+- A **mixed** work order — some inspection rows, some field-added — computes each correctly in the same pass. This is the case a naive fix gets wrong.
+- Flat mode is unchanged for every fixture that passes today (regression guard).
+- The shared function produces identical output to `computeCompletionPrefillHours` on its existing test fixtures, including the 72.50 Woodglenn case, so the client fix's behaviour is preserved exactly.
+- The tripwire logs on a per_part inspection work order and stays silent otherwise.
+- `laborMode` values in the database are unchanged after this ticket (regression guard — no accidental backfill).
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the shared function, both call sites, the `per_part` branch change, and the schema comment.
+- [ ] Test output for the server-side Woodglenn regression and the mixed-items case.
+- [ ] Proof the shared function reproduces `computeCompletionPrefillHours`'s existing fixtures exactly.
+- [ ] Grep proof that no second implementation of the completion-hours formula remains.
+- [ ] A sample of the tripwire log line.
+- [ ] Confirmation that no `laborMode` value was changed.
+- [ ] Deployed; commit message matches the diff.
+
+## The pattern this belongs to
+
+This is the fourth instance of the same failure shape in this project: **an assumption held in a comment rather than enforced by the system.**
+
+- #1885: five phantom Drizzle columns — the schema was the truth, a copy-pasted select was the assumption. The type checker would have caught it; nothing ran it.
+- #1886: `requireQuickBooksAccess` was a denylist, so an unnamed role was admitted by default rather than refused.
+- The storage readers returning `[]` on a database error — a failure indistinguishable from no data.
+- **This one**: "laborHours on a merged row is a line total" lives in a comment on a client component, while a server function three directories away multiplies it by quantity.
+
+The question worth asking in review each time: *if this assumption stops holding, does anything notice?*
+
+## Relevant files
+
+- `artifacts/api-server/src/routes/routes.ts:9596–9627` (the per_part branch), `:9554` (`incomingLaborMode` from the payload)
+- `artifacts/irrigopro/src/components/work-orders/completion-prefill.ts` (client fix — becomes a caller of the shared function)
+- `artifacts/irrigopro/src/components/work-orders/completion-prefill.test.ts` (existing fixtures the shared function must reproduce)
+- `artifacts/api-server/src/inspection-estimate-items.ts:91–108` (the merge — read, do not change)
+- `lib/db/src/schema/schema.ts` (`workOrderItems.laborHours` and `findingId`; `laborMode` defaults at `:267`, `:484`, `:712`, `:1448`)
+- `artifacts/api-server/src/routes/estimate-routes.ts:169` (where per_part can enter)
+- `artifacts/api-server/src/estimate-payload.ts:57` (hard-coded flat)
+- `lib/shared/src/` (home for the shared function)

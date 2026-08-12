@@ -1,0 +1,149 @@
+# BUILD — Follow-Up Work Order for Deferred Items
+
+**What & Why**
+When a crew completes an inspection work order, they submit the items they actually worked. Completion uses replace-not-append semantics (`c404ba05`), so anything they didn't do simply disappears from the work order. It is not billed — that part is correct — but **it is also not recorded anywhere**. The remaining work exists only as the difference between an approved estimate and a completed work order, a diff nobody ever runs.
+
+Woodglenn WO-1783955816671-314 is the proof case, measured in production: estimate 50017 carried 162 line items totalling 72.50 hours; the completed work order carried 144 totalling 50.00. **17 items and exactly 22.50 hours of approved, quoted work vanished** — twelve leak repairs, three valves, two wiring issues, one pressure issue, scattered across seven controllers. Nobody scheduled a return visit because nothing told them to.
+
+This ticket turns that diff into a follow-up work order.
+
+## The signal is the estimate diff, not the checklist
+
+An earlier draft of this ticket keyed on `work_order_items.completedAt`, the per-item check-off in the tech's zone checklist. **That was wrong and would have caused an outage.** Measured against production: on **16 of 17** completed work orders, not a single item has ever been checked off. WO-...314 has 144 items and 144 unchecked. Billing only checked-off items would have billed nothing on nearly every job, and a guard refusing completion with nothing checked would have blocked almost every completion your crews attempt.
+
+The checklist is not adopted. Do not build on it, and do not require techs to start using it.
+
+**The signal that already works is the diff**: estimate line items that have no counterpart on the completed work order. It requires no new tech behaviour, and it is producing correct data today — the query that found Woodglenn's 17 items summed to exactly the 22.50-hour gap on the first try.
+
+## Matching key
+
+`estimate_items` has no `finding_id` — that column exists only on `work_order_items`. Match on:
+
+**`part_name` + `controller_letter` + `zone_number` + `issue_type`**
+
+This is the key that produced the clean Woodglenn result. Handle nulls with `IS NOT DISTINCT FROM`, not `=`, so null controller or zone values match each other rather than dropping out.
+
+Where an estimate line matches a work order line with a **smaller quantity**, the shortfall is deferred too — carry the difference, not the whole line.
+
+## Scope — what this does and does not touch
+
+**Applies only to work orders with a non-null `estimate_id`.** A direct work order has no approved scope to diff against, and there is nothing to compute. Fifteen of the seventeen completed work orders in production carry no per-line hours at all — flat mode working as designed — and must be entirely unaffected.
+
+**Nothing about billing changes.** The completed work order already bills only what is on it; that behaviour is correct and stays exactly as it is. This ticket adds a record of what was left, it does not alter a single figure on the original.
+
+## Slice 1 — Schema
+
+`workOrders.parentWorkOrderId: integer`, nullable. **No `.references()` on the same table** — self-referencing FKs cause the TS7022 circular-inference error already documented on `supersededByInvoiceId` and `mergedIntoInvoiceId` in `schema.ts`. Follow that established pattern. Index it.
+
+Comment it: a follow-up carries the **deferred** items from its parent, has a null `estimateId` by design, and is not a duplicate of the parent.
+
+## Slice 2 — The constraint that shapes this
+
+`work_orders_estimate_unique_idx` (#1740) is a partial unique index on `estimate_id WHERE estimate_id IS NOT NULL`. A second work order carrying the same `estimateId` fails on insert with 23505, and `createWorkOrderFromEstimate` has an idempotent catch that returns the existing work order instead of creating one.
+
+That guard is correct and stays. The follow-up therefore has **`estimateId` null** and is linked by `parentWorkOrderId` — it is a continuation of the work order, not a second work order for the estimate.
+
+Items carry their lineage forward: `controllerLetter`, `zoneNumber`, `issueType` from the estimate line, and `findingId` resolved from the original work order item where one existed.
+
+## Slice 3 — Compute the diff at completion
+
+On completion of a work order with an `estimateId`, diff the estimate's line items against the items being persisted. Anything on the estimate with no counterpart — or with a shortfall in quantity — is deferred.
+
+**If the diff is empty, do nothing.** No follow-up, no message, behaviour identical to today. This is the common case for a fully completed job and must not change.
+
+**If the diff is non-empty**, create one follow-up work order carrying those items, with header hours equal to the sum of the deferred line hours.
+
+**Never block a completion.** There is no case where this refuses. A crew that did nothing gets a follow-up carrying everything, which is a true statement about the world. The previous draft's "refuse when nothing is checked off" guard is deleted.
+
+## Slice 4 — Tell the tech, don't ask them
+
+On the completion screen, when the diff is non-empty, one plain sentence before submitting:
+
+> 17 items from the estimate aren't on this work order. They'll move to a follow-up work order and won't be billed here.
+
+Informational, not a warning treatment and not a blocking dialog. Deferring work is routine.
+
+**No override, and no "bill it anyway" escape hatch.** The tech can add items back if they did the work and forgot to include them — that is the existing completion flow, unchanged.
+
+## Slice 5 — The follow-up is visible
+
+- Created unassigned and unscheduled, in the same state a new work order starts in, so it lands in the normal queue.
+- Description names its origin: the parent work order number and that it carries deferred items.
+- Parent links to follow-up, follow-up links back to parent.
+- **No new screen.** It appears in the existing work order list and detail views like any other work order.
+
+## Backfill — Woodglenn's 17 items
+
+The 17 deferred items on WO-1783955816671-314 are real work that was quoted, approved, and never done. Once the diff is implemented, offer it as a one-time registered migration that creates the follow-up work order for that ticket retroactively.
+
+**Preview first, and report what it would create before creating anything.** Randy decides whether that work is still relevant six weeks on — a leak from June may have been fixed on another visit, or may still be running.
+
+Run this **after** `FIX - Correct Two Over-Stated Woodglenn Work Orders`, so the parent carries correct hours before anything is derived from it.
+
+## Multi-tenancy (Rule 1)
+
+The follow-up inherits `companyId`, `customerId`, and branch from its parent. Every read of the parent/child link is company-scoped. A follow-up must never be created for, or linked across, another company.
+
+## Decisions
+
+- **The signal is the estimate diff, not `completedAt`** (decided, measured) — the checklist is unused on 16 of 17 production work orders.
+- **Match on part name + controller + zone + issue type** (decided) — `estimate_items` has no `finding_id`.
+- **Quantity shortfalls defer the difference** (decided).
+- **Only work orders with an `estimateId`** (decided) — a direct work order has no approved scope to diff.
+- **Never block a completion** (decided) — no refusal case exists in this ticket.
+- **Billing is unchanged** (decided) — the original already bills only what is on it.
+- **Follow-up has a null `estimateId`** (decided) — required by `work_orders_estimate_unique_idx`.
+- **No new screens, no notifications, no auto-scheduling** (decided).
+
+## Done looks like
+
+- Completing an inspection work order with items missing from its estimate creates a follow-up carrying exactly those items and their hours.
+- Completing one with nothing missing behaves exactly as it does today.
+- No completion is ever refused by this feature.
+- The follow-up carries controller, zone, and issue type on every item, and links to its parent in both directions.
+- Work orders without an `estimateId` are untouched.
+- Woodglenn's 22.50 hours of deferred work exists as a schedulable work order instead of a difference nobody computes.
+
+## Tests
+
+- **The Woodglenn fixture**: estimate with 162 lines totalling 72.50 hours, work order with 144 totalling 50.00 → follow-up with 17 items totalling **exactly 22.50 hours**. Use the real controller/zone distribution (A, C, D, E, F, I, J) and assert controllers B, G, H produce nothing.
+- Empty diff → no follow-up created; completion output byte-identical to today (regression guard).
+- A work order with a null `estimateId` → no diff computed, no follow-up, no behaviour change.
+- Quantity shortfall: estimate line qty 3, work order line qty 1 → follow-up carries qty 2.
+- Null controller or zone values match each other rather than falsely reporting a line as deferred.
+- Re-completing the same work order does not create a second follow-up (idempotency — re-completion is a real path).
+- The follow-up insert does **not** trip `work_orders_estimate_unique_idx`.
+- Parent and follow-up resolve the link in both directions.
+- No completion path can be refused by this feature — assert that explicitly.
+- Company isolation on creation and both link reads.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the schema column, the diff computation, the follow-up creation, and the tech-facing sentence.
+- [ ] Test output for the Woodglenn fixture showing 17 items and 22.50 hours.
+- [ ] Proof the empty-diff path is unchanged from today.
+- [ ] Screenshot: the completion screen showing the deferred-items sentence.
+- [ ] Screenshot: the resulting follow-up work order with its items and parent link.
+- [ ] Idempotency proof for re-completion.
+- [ ] Proof no completion can be refused.
+- [ ] Backfill preview for WO-1783955816671-314, reviewed before running.
+- [ ] Deployed; commit message matches the diff.
+
+## Out of scope
+
+- Correcting the two over-stated Woodglenn work orders — `FIX - Correct Two Over-Stated Woodglenn Work Orders`, which runs first.
+- The server per_part labor formula — `FIX - Server Labor Formula Still Contains the Doubling Rule`, which should land first so this adopts its shared hours function rather than writing a third implementation.
+- Anything built on `work_order_items.completedAt`. The checklist stays exactly as it is; this ticket neither uses it nor changes it.
+- Making the checklist adopted. If that is wanted it is a separate conversation about why techs aren't using it.
+- Auto-scheduling or assigning the follow-up. It enters the queue; dispatch is a person's job.
+- Notifying anyone that a follow-up was created.
+- Any change to billing figures on the original work order.
+
+## Relevant files
+
+- `lib/db/src/schema/schema.ts` (`workOrders` — new `parentWorkOrderId`; `supersededByInvoiceId` as the self-reference pattern; `estimateItems` — note the absent `finding_id`)
+- `artifacts/api-server/src/routes/routes.ts:9536` (completion route — where the diff is computed)
+- `artifacts/api-server/src/storage.ts` (`createWorkOrderFromEstimate` — the `estimateId` uniqueness path)
+- `artifacts/irrigopro/src/components/work-orders/work-order-completion.tsx` (the pre-submit sentence)
+- `artifacts/api-server/src/routes/inspection-zone-lineage.test.ts` (lineage tests to extend)
+- `artifacts/api-server/src/lib/migrations/registry.ts` (the Woodglenn backfill)
