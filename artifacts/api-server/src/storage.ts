@@ -172,6 +172,7 @@ import {
   deriveLifecycleForWrite,
   ESTIMATE_EXPIRATION_DAYS,
   type LifecycleStatus,
+  sumCompletionLaborHours,
 } from "@workspace/shared";
 import { computeEstimateSummary } from "./estimate-summary";
 import type { EstimateSummary, WetCheckBillingListItem } from "@workspace/db";
@@ -5099,10 +5100,56 @@ export class DatabaseStorage implements IStorage {
       if (wo.status === "billed" || wo.invoiceId != null) {
         throw Object.assign(new Error(`Work order ${id} is locked`), { code: "WO_LOCKED" });
       }
+      // Task #1933 — Read existing items BEFORE deletion so we can retain
+      // inspection lineage (issueType / findingId) for the per_part labor
+      // re-sum.  The PATCH /api/work-orders/:id/items endpoint rebuilds items
+      // from the manager's form without propagating these fields; reading the
+      // prior rows lets us classify each replaced row correctly (line total vs
+      // per-unit) without misidentifying genuinely field-added rows.
+      const existingItemsForLineage = await tx
+        .select()
+        .from(workOrderItems)
+        .where(eq(workOrderItems.workOrderId, id));
+      // Build a partId-keyed stack so that multiple rows sharing a partId each
+      // get their own prior rather than collapsing to the first one.
+      const priorStackByPartId = new Map<number | null, typeof existingItemsForLineage>();
+      for (const it of existingItemsForLineage) {
+        const list = priorStackByPartId.get(it.partId) ?? [];
+        list.push(it);
+        priorStackByPartId.set(it.partId, list);
+      }
+
       await tx.delete(workOrderItems).where(eq(workOrderItems.workOrderId, id));
       let inserted: WorkOrderItem[] = [];
       if (items.length > 0) {
-        const values = items.map((item) => ({
+        // Enrich each item with inspection lineage (issueType / findingId) from
+        // the matching prior row BEFORE insertion so the discriminator is
+        // persisted in the database row.  Without this, a second PATCH edit
+        // would find no issueType on the rows and misclassify them as
+        // field-added — reintroducing the labor doubling bug (Task #1933).
+        //
+        // The completion route already passes issueType / findingId on its
+        // finalItems, so enrichment is a no-op for that path.  The PATCH
+        // /api/work-orders/:id/items route does NOT pass them, so they are
+        // resolved here by matching each incoming item to a prior row by partId.
+        const enrichedItems = items.map((item) => {
+          const issueType: string | null = (item as any).issueType ?? null;
+          const findingId: number | null = (item as any).findingId ?? null;
+          if (issueType == null && findingId == null && item.partId != null) {
+            const list = priorStackByPartId.get(item.partId);
+            const prior = list?.shift(); // consume one per matched row
+            if (prior) {
+              return {
+                ...item,
+                issueType: (prior as any).issueType ?? null,
+                findingId: (prior as any).findingId ?? null,
+              };
+            }
+          }
+          return item;
+        });
+
+        const values = enrichedItems.map((item) => ({
           ...item,
           workOrderId: id,
           totalPrice: (money(item.quantity) * money(item.partPrice)).toFixed(2),
@@ -5114,7 +5161,17 @@ export class DatabaseStorage implements IStorage {
       let laborSubtotal: number;
       let newTotalHours: number | undefined;
       if (wo.laborMode === "per_part") {
-        newTotalHours = inserted.reduce((s, r) => s + parseFloat(String(r.laborHours || 0)), 0);
+        // Inserted rows now carry issueType / findingId (either from the caller
+        // or from the pre-insertion enrichment above), so sumCompletionLaborHours
+        // can correctly classify each row without further lookup.
+        newTotalHours = sumCompletionLaborHours(
+          inserted.map(r => ({
+            laborHours: r.laborHours,
+            quantity: r.quantity,
+            issueType: (r as any).issueType ?? null,
+            findingId: (r as any).findingId ?? null,
+          })),
+        );
         laborSubtotal = newTotalHours * laborRate;
       } else {
         const totalHours = parseFloat(String(wo.totalHours ?? "0")) || 0;

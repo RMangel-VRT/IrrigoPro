@@ -96,6 +96,10 @@ args = "nav-config-bookkeeper"
 task = "workflow.run"
 args = "invoice-draft-editor-line-items"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "work-order-labor-hours"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -312,6 +316,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/irrigopro exec vitest run src/pages/invoices-draft-editor-line-items.test.tsx"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "work-order-labor-hours"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/shared exec node --import tsx --test --test-reporter=spec src/work-order-labor-hours.test.ts"
 
 [workflows.workflow.metadata]
 isValidation = true

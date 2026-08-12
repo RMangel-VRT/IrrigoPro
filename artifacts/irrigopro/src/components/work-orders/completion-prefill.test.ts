@@ -39,12 +39,35 @@ describe("computeCompletionPrefillHours", () => {
   });
 
   describe("per_part mode", () => {
-    it("mirrors the server formula: Σ laborHours × quantity", () => {
+    it("mirrors the server formula: Σ laborHours × quantity for field-added rows", () => {
       const workOrder = { laborMode: "per_part", totalHours: "99.00" };
       const items = [
-        { laborHours: "0.50", quantity: 4 }, // per-unit hours in per_part mode
+        { laborHours: "0.50", quantity: 4 }, // per-unit hours — no issueType, treated field-added
         { laborHours: "1.00", quantity: 2 },
       ];
+      expect(computeCompletionPrefillHours(workOrder, items)).toBe(4);
+    });
+
+    it("treats inspection-derived items (issueType non-null) as line totals, not per-unit", () => {
+      // Inspection-derived rows have issueType set from the wet-check finding.
+      // laborHours is a line total accumulated during the merge in
+      // inspection-estimate-items.ts; multiplying by quantity would double-count.
+      const workOrder = { laborMode: "per_part", totalHours: "99.00" };
+      const items = [
+        { laborHours: "0.25", quantity: 4, issueType: "head_adjustment" },
+        { laborHours: "0.50", quantity: 5, issueType: "broken_head" },
+      ];
+      // 0.25 + 0.50 = 0.75 — NOT 0.25×4 + 0.50×5 = 3.50
+      expect(computeCompletionPrefillHours(workOrder, items)).toBe(0.75);
+    });
+
+    it("handles mixed: inspection rows (issueType set) sum as line totals, field-added multiply", () => {
+      const workOrder = { laborMode: "per_part" };
+      const items = [
+        { laborHours: "2.00", quantity: 3, issueType: "pipe_leak" }, // line total: 2.00
+        { laborHours: "1.00", quantity: 2 },                          // field-added: 2.00
+      ];
+      // 2.00 + 2.00 = 4.00
       expect(computeCompletionPrefillHours(workOrder, items)).toBe(4);
     });
   });

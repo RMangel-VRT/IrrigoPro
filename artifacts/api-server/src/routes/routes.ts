@@ -25,6 +25,7 @@ import {
   CAN_EDIT_INVOICES,
   CAN_SEND_INVOICE_EMAIL,
   CAN_MANAGE_QUICKBOOKS,
+  sumCompletionLaborHours,
 } from "@workspace/shared";
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
@@ -9600,10 +9601,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Task #396 — authoritative labor calculation by mode.
       //   flat     → use the client-supplied totalHours.
-      //   per_part → recompute Σ(laborHours × quantity) across the work
-      //              order's persisted items so the saved labor snapshot
-      //              never drifts from the per-line breakdown carried on
-      //              the WO (e.g. inherited from the originating estimate).
+      //   per_part → recompute via sumCompletionLaborHours which is
+      //              finding-aware: inspection-derived rows (findingId
+      //              non-null) carry a line total and must not be ×quantity;
+      //              field-added rows (findingId null) store per-unit hours
+      //              and are multiplied by quantity. See Task #1933.
       const priorLaborModeForCalc: 'flat' | 'per_part' =
         existingWorkOrder?.laborMode === 'per_part' ? 'per_part' : 'flat';
       const completionLaborModeForCalc: 'flat' | 'per_part' =
@@ -9613,23 +9615,73 @@ export async function registerRoutes(app: Express): Promise<Server> {
       let laborHours: number;
       if (completionLaborModeForCalc === 'per_part') {
         const persistedItems = await storage.getWorkOrderItems(workOrderId);
-        const sumFromPersisted = persistedItems.reduce(
-          (s, it) =>
-            s +
-            (parseFloat(String(it.laborHours ?? '0')) || 0) *
-              (parseFloat(String(it.quantity ?? '0')) || 0),
-          0,
+
+        // Persisted-items path: items carry issueType (reliable inspection
+        // discriminator) and findingId (when propagated) from the DB.
+        const sumFromPersisted = sumCompletionLaborHours(
+          persistedItems.map(it => ({
+            laborHours: it.laborHours,
+            quantity: it.quantity,
+            issueType: (it as any).issueType ?? null,
+            findingId: (it as any).findingId ?? null,
+          })),
         );
-        const sumFromIncoming = Array.isArray(usedParts)
-          ? usedParts.reduce(
-              (s: number, p: { laborHours?: string | number; quantity?: string | number }) =>
-                s +
-                (parseFloat(String(p.laborHours ?? '0')) || 0) *
-                  (parseFloat(String(p.quantity ?? '0')) || 0),
-              0,
-            )
-          : 0;
+
+        // Incoming path: raw usedParts carry sourceItemId, not issueType or
+        // findingId. Resolve via the persisted-item lookup maps so the shared
+        // function treats inspection rows correctly.
+        let sumFromIncoming = 0;
+        if (Array.isArray(usedParts) && usedParts.length > 0) {
+          const persistedById = new Map<number, (typeof persistedItems)[number]>();
+          const persistedByPartId = new Map<number | null, (typeof persistedItems)[number][]>();
+          for (const it of persistedItems) {
+            persistedById.set(it.id, it);
+            const list = persistedByPartId.get(it.partId) ?? [];
+            list.push(it);
+            persistedByPartId.set(it.partId, list);
+          }
+          const resolvedItems = (usedParts as any[]).map((p) => {
+            let prior: (typeof persistedItems)[number] | undefined;
+            const sid = p.sourceItemId != null ? Number(p.sourceItemId) : NaN;
+            if (Number.isFinite(sid)) prior = persistedById.get(sid);
+            if (!prior && p.partId != null) prior = persistedByPartId.get(p.partId)?.[0];
+            return {
+              laborHours: p.laborHours,
+              quantity: p.quantity,
+              issueType: prior != null ? ((prior as any).issueType ?? null) : null,
+              findingId: prior != null ? ((prior as any).findingId ?? null) : null,
+            };
+          });
+          sumFromIncoming = sumCompletionLaborHours(resolvedItems);
+        }
+
         laborHours = sumFromPersisted > 0 ? sumFromPersisted : sumFromIncoming;
+
+        // Tripwire: if any persisted item is inspection-derived, log a warning
+        // when the old broken formula (Σ hours × qty) would have produced a
+        // different result. Silent on field-added-only work orders.
+        const hasInspectionRows = persistedItems.some(
+          it => (it as any).issueType != null || (it as any).findingId != null,
+        );
+        if (hasInspectionRows) {
+          const oldFormulaResult = persistedItems.reduce(
+            (s, it) =>
+              s +
+              (parseFloat(String(it.laborHours ?? '0')) || 0) *
+                (parseFloat(String(it.quantity ?? '0')) || 0),
+            0,
+          );
+          if (Math.abs(oldFormulaResult - laborHours) > 0.001) {
+            logger.warn(
+              {
+                workOrderId,
+                computedHours: laborHours,
+                oldFormulaHours: oldFormulaResult,
+              },
+              'per_part inspection work order: sumCompletionLaborHours produced a different result than the old Σ(hours×qty) formula — inspection-derived rows treated as line totals',
+            );
+          }
+        }
       } else {
         laborHours = money(totalHours);
       }

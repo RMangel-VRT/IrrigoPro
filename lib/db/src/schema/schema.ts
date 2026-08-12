@@ -801,6 +801,12 @@ export const workOrderItems = pgTable("work_order_items", {
   quantity: integer("quantity").notNull(),
   // Task #396 — per-line labor hours are 0 in flat mode. Default 0 so
   // flat-mode payloads can omit them.
+  // IMPORTANT: on inspection-derived rows (findingId non-null) this column is a
+  // LINE TOTAL accumulated by the merge in inspection-estimate-items.ts
+  // (findings for the same part/zone are collapsed into one row and their hours
+  // are summed). Do NOT multiply laborHours × quantity on these rows — doing so
+  // double-counts.  Field-added rows (findingId null) store per-unit hours and
+  // MUST be multiplied by quantity when computing a per_part labor sum.
   laborHours: decimal("labor_hours", { precision: 5, scale: 2 }).notNull().default("0.00"),
   totalPrice: decimal("total_price", { precision: 10, scale: 2 }).notNull(),
   actualQuantityUsed: integer("actual_quantity_used"),

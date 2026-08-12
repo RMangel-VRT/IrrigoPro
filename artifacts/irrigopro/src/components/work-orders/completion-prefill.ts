@@ -15,10 +15,13 @@
  *    carried over from the approved estimate's flat total — is the source of
  *    truth. Fall back to a plain sum of line laborHours (no × quantity) only
  *    when the header is missing/zero.
- *  - per_part mode: mirror the server's completion formula
- *    (Σ laborHours × quantity, see routes.ts POST /api/work-orders/complete),
- *    where per-line laborHours is per-unit by definition.
+ *  - per_part mode: delegate to the shared sumCompletionLaborHours function
+ *    which correctly handles inspection-derived rows (findingId non-null →
+ *    line total, no × quantity) and field-added rows (findingId null →
+ *    per-unit × quantity).
  */
+
+import { sumCompletionLaborHours } from "@workspace/shared";
 
 export interface PrefillWorkOrder {
   laborMode?: string | null;
@@ -28,6 +31,10 @@ export interface PrefillWorkOrder {
 export interface PrefillItem {
   laborHours?: string | number | null;
   quantity?: string | number | null;
+  /** Wet-check issue type — non-null on inspection-derived rows. Primary discriminator. */
+  issueType?: string | null;
+  /** Slice 3 lineage FK — non-null when findingId has been propagated. Secondary discriminator. */
+  findingId?: number | null;
 }
 
 const num = (v: unknown): number => {
@@ -40,7 +47,7 @@ export function computeCompletionPrefillHours(
   items: PrefillItem[],
 ): number {
   if (workOrder.laborMode === "per_part") {
-    return items.reduce((t, it) => t + num(it.laborHours) * num(it.quantity), 0);
+    return sumCompletionLaborHours(items);
   }
   const headerHours = num(workOrder.totalHours);
   if (headerHours > 0) return headerHours;
