@@ -627,6 +627,25 @@ export interface IStorage {
   getWorkOrder(id: number, companyId: number | null): Promise<WorkOrder | undefined>;
   createWorkOrder(workOrder: InsertWorkOrder, estimateItems?: EstimateItem[]): Promise<WorkOrder>;
   createWorkOrderFromEstimate(estimateId: number, companyId?: number | null): Promise<WorkOrder>;
+  // Task #1935 — create a follow-up WO carrying deferred items from its parent.
+  // The follow-up has estimateId: null by design (not a duplicate).
+  // priorWoItems are the WO items before completion, used to resolve findingId.
+  createFollowUpWorkOrder(
+    parent: WorkOrder,
+    deferredItems: Array<{
+      partId: number | null;
+      partName: string;
+      partPrice: string;
+      laborHours: string;
+      quantity: number;
+      controllerLetter: string | null;
+      zoneNumber: number | null;
+      issueType: string | null;
+    }>,
+    priorWoItems: WorkOrderItem[],
+  ): Promise<WorkOrder>;
+  // Task #1935 — find the follow-up work order whose parent is the given WO.
+  getFollowUpWorkOrder(parentWorkOrderId: number, companyId: number | null): Promise<WorkOrder | undefined>;
   // Task #611 — atomic "approve estimate" lifecycle action. Flips the
   // estimate to `approved`, auto-creates the work order (with items),
   // auto-assigns to the company's irrigation manager, and writes the
@@ -4007,6 +4026,113 @@ export class DatabaseStorage implements IStorage {
       }
       throw err;
     }
+  }
+
+  // Task #1935 — create a follow-up work order carrying deferred estimate items.
+  //
+  // The follow-up has estimateId=null by design (not a duplicate of the parent;
+  // the partial unique index on parent_work_order_id enforces one follow-up per
+  // parent at the DB level, matching the work_orders_estimate_unique_idx pattern).
+  //
+  // priorWoItems are the work-order items that existed BEFORE the completion
+  // write; used here to resolve findingId for each deferred item.
+  async createFollowUpWorkOrder(
+    parent: WorkOrder,
+    deferredItems: Array<{
+      partId: number | null;
+      partName: string;
+      partPrice: string;
+      laborHours: string;
+      quantity: number;
+      controllerLetter: string | null;
+      zoneNumber: number | null;
+      issueType: string | null;
+    }>,
+    priorWoItems: WorkOrderItem[],
+  ): Promise<WorkOrder> {
+    // Build findingId lookup from prior WO items keyed by the same identity
+    // fields used by computeDeferredItems, so deferred items inherit any
+    // existing finding link.
+    const findingByKey = new Map<string, number | null>();
+    for (const item of priorWoItems) {
+      const key = [
+        item.partName,
+        (item as any).controllerLetter ?? '',
+        (item as any).zoneNumber ?? '',
+        (item as any).issueType ?? '',
+      ].join('\x01');
+      if (!findingByKey.has(key)) {
+        findingByKey.set(key, (item as any).findingId ?? null);
+      }
+    }
+
+    const totalHours = deferredItems.reduce((s, i) => s + money(i.laborHours), 0);
+    const workOrderNumber = `WO-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+    // Wrap header + item inserts in a single transaction so a failed item write
+    // rolls back the header rather than leaving an orphan that would permanently
+    // block future 23505 idempotency retries.
+    return db.transaction(async (tx) => {
+      const [followUp] = await tx.insert(workOrders).values({
+        workOrderNumber,
+        estimateId: null,
+        parentWorkOrderId: (parent as any).id,
+        customerId: (parent as any).customerId,
+        companyId: (parent as any).companyId,
+        customerName: (parent as any).customerName,
+        customerEmail: (parent as any).customerEmail ?? null,
+        customerPhone: (parent as any).customerPhone ?? null,
+        projectName: (parent as any).projectName ?? null,
+        projectAddress: (parent as any).projectAddress ?? null,
+        workType: (parent as any).workType ?? 'estimate_based',
+        status: 'pending',
+        priority: 'medium',
+        description: `Follow-up for ${(parent as any).workOrderNumber}: carries deferred items from the original inspection work order.`,
+        branchName: (parent as any).branchName ?? null,
+        originWetCheckId: (parent as any).originWetCheckId ?? null,
+        totalHours: totalHours.toFixed(2),
+        laborMode: 'per_part',
+        totalAmount: '0.00',
+        laborSubtotal: '0.00',
+        partsSubtotal: '0.00',
+      } as typeof workOrders.$inferInsert).returning();
+
+      for (const item of deferredItems) {
+        const key = [
+          item.partName,
+          item.controllerLetter ?? '',
+          item.zoneNumber ?? '',
+          item.issueType ?? '',
+        ].join('\x01');
+        const findingId = findingByKey.get(key) ?? null;
+        const qty = item.quantity;
+        const unitPrice = money(item.partPrice);
+        await tx.insert(workOrderItems).values({
+          workOrderId: (followUp as any).id,
+          partId: item.partId ?? null,
+          partName: item.partName,
+          partPrice: item.partPrice,
+          quantity: qty,
+          laborHours: item.laborHours,
+          totalPrice: (qty * unitPrice).toFixed(2),
+          controllerLetter: item.controllerLetter,
+          zoneNumber: item.zoneNumber,
+          issueType: item.issueType,
+          findingId,
+        } as typeof workOrderItems.$inferInsert);
+      }
+
+      return followUp as unknown as WorkOrder;
+    });
+  }
+
+  // Task #1935 — look up the follow-up work order whose parent is the given WO.
+  async getFollowUpWorkOrder(parentWorkOrderId: number, companyId: number | null): Promise<WorkOrder | undefined> {
+    const scope = this._companyScope(companyId);
+    const parentCond = eq((workOrders as any).parentWorkOrderId, parentWorkOrderId);
+    const cond = scope ? and(parentCond, scope) : parentCond;
+    const [followUp] = await db.select().from(workOrders).where(cond).limit(1);
+    return (followUp || undefined) as WorkOrder | undefined;
   }
 
   // Task #611 — atomic estimate-approval lifecycle. Wraps the four

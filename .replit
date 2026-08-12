@@ -100,6 +100,10 @@ args = "invoice-draft-editor-line-items"
 task = "workflow.run"
 args = "work-order-labor-hours"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "work-order-deferred-items"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -327,6 +331,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/shared exec node --import tsx --test --test-reporter=spec src/work-order-labor-hours.test.ts"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "work-order-deferred-items"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/lib/work-order-deferred-items.test.ts"
 
 [workflows.workflow.metadata]
 isValidation = true

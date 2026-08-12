@@ -768,6 +768,13 @@ export const workOrders = pgTable("work_orders", {
   // the WO was created from an estimate that itself has originWetCheckId.
   // No backfill on existing rows.
   originWetCheckId: integer("origin_wet_check_id").references(() => wetChecks.id),
+  // Task #1935 — follow-up work order link. A follow-up work order carries
+  // deferred items from its parent and has estimateId: null by design (it is
+  // NOT a duplicate; the partial unique index below enforces one follow-up
+  // per parent). No .references() on the same table to avoid TS7022
+  // circular-inference errors (same pattern as supersededByInvoiceId and
+  // mergedIntoInvoiceId on invoices).
+  parentWorkOrderId: integer("parent_work_order_id"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
@@ -789,6 +796,12 @@ export const workOrders = pgTable("work_orders", {
     .on(table.estimateId)
     .where(sql`estimate_id IS NOT NULL`),
   statusScheduledIdx: index("work_orders_status_scheduled_idx").on(table.status, table.scheduledDate),
+  // Task #1935 — enforces one follow-up per parent work order. Partial
+  // (WHERE parent_work_order_id IS NOT NULL) so direct WOs with no parent
+  // remain unrestricted. Mirrors the work_orders_estimate_unique_idx pattern.
+  followUpUniqueIdx: uniqueIndex("work_orders_follow_up_unique_idx")
+    .on(table.parentWorkOrderId)
+    .where(sql`parent_work_order_id IS NOT NULL`),
 }));
 
 // Work Order Items - copied from estimate items

@@ -26,3 +26,4 @@
 - [Merge gate vs publish path](merge-and-publish-type-gates.md) — post-merge is the only typecheck; publish builds each artifact's own script and never runs the root build.
 - [Validation-run EAGAIN flakes](validation-eagain-flake.md) — parallel completion validation can die with EAGAIN/worker-thread crashes; if the suite passes locally, just retry markTaskComplete.
 - [Dev DB lags merged schema](dev-db-schema-drift.md) — 42P01 for a just-merged feature's table is environment drift, not your bug; don't adopt it into your diff.
+- [Follow-up WO idempotency pattern](follow-up-wo-idempotency.md) — partial unique index on parent_work_order_id (WHERE NOT NULL) + 23505 catch at the route is the correct pattern; app-level pre-check alone is not sufficient under concurrency.

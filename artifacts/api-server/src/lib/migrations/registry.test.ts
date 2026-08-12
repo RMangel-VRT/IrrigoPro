@@ -61,6 +61,14 @@ describe("migration registry — static shape", () => {
     );
   });
 
+  it("contains woodglenn-followup-v1", () => {
+    const ids = listMigrations().map((m) => m.id);
+    assert.ok(
+      ids.includes("woodglenn-followup-v1"),
+      "missing woodglenn-followup-v1",
+    );
+  });
+
   it("repair-qb-void-mispaid-v1 has the required MigrationDefinition shape", () => {
     const m = getMigration("repair-qb-void-mispaid-v1");
     assert.ok(m, "getMigration should return a definition");

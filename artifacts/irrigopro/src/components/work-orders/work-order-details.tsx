@@ -626,6 +626,27 @@ export function WorkOrderDetails({ workOrder, onClose, onUpdate, showAddDetailsB
                     From Wet Check #{(workOrder as any).originWetCheckId}
                   </a>
                 )}
+                {/* Task #1935 — follow-up WO lineage links */}
+                {(workOrder as any).parentWorkOrderLink != null && (
+                  <a
+                    href={`/work-orders/${(workOrder as any).parentWorkOrderLink.id}`}
+                    className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-200 hover:bg-amber-200 transition-colors"
+                    data-testid="wo-parent-wo-banner"
+                  >
+                    <LinkIcon className="w-3 h-3" />
+                    Follow-up for {(workOrder as any).parentWorkOrderLink.workOrderNumber}
+                  </a>
+                )}
+                {(workOrder as any).followUpWorkOrderLink != null && (
+                  <a
+                    href={`/work-orders/${(workOrder as any).followUpWorkOrderLink.id}`}
+                    className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-200 hover:bg-amber-200 transition-colors"
+                    data-testid="wo-follow-up-wo-banner"
+                  >
+                    <LinkIcon className="w-3 h-3" />
+                    Has follow-up: {(workOrder as any).followUpWorkOrderLink.workOrderNumber}
+                  </a>
+                )}
                 {workOrder.noPhotosNeeded && (
                   <div className="flex items-center gap-2" data-testid="no-photos-needed-banner">
                     <Badge className="bg-gray-200 text-gray-800 border-gray-300">

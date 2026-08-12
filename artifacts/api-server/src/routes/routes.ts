@@ -69,6 +69,7 @@ import {
 } from "../qb-token-utils";
 import { isUnroutedFinding, wcbIsEligible } from "../lib/finding-predicates";
 import { computeBillingSheetTotal } from "../billing-sheet-total";
+import { computeDeferredItems } from "../lib/work-order-deferred-items";
 import type {
   QbTokenResponse,
   QbTokenResponseValidated,
@@ -9898,6 +9899,90 @@ export async function registerRoutes(app: Express): Promise<Server> {
         );
       }
 
+      // Task #1935 — create a follow-up work order for any estimate items not
+      // covered by the just-completed items. This never blocks completion:
+      // 23505 uniqueness violations are handled idempotently (follow-up already
+      // exists), all other errors are logged at error level but swallowed.
+      let followUpWorkOrderId: number | null = null;
+      if (existingWorkOrder?.estimateId) {
+        try {
+          const estimateItemsForDiff = await storage.getEstimateItems(Number(existingWorkOrder.estimateId));
+          // If skipReplace was true the items were not replaced; use the prior
+          // snapshot. Otherwise reload from DB to get the just-persisted items.
+          const completedWoItemsForDiff = skipReplace
+            ? priorItemsForGuard
+            : await storage.getWorkOrderItems(workOrderId);
+          const deferredItems = computeDeferredItems(
+            estimateItemsForDiff.map((i) => ({
+              partId: (i as any).partId ?? null,
+              partName: i.partName,
+              partPrice: i.partPrice,
+              quantity: i.quantity,
+              laborHours: i.laborHours,
+              controllerLetter: (i as any).controllerLetter ?? null,
+              zoneNumber: (i as any).zoneNumber ?? null,
+              issueType: (i as any).issueType ?? null,
+            })),
+            completedWoItemsForDiff.map((i) => ({
+              partName: i.partName,
+              quantity: i.quantity,
+              controllerLetter: (i as any).controllerLetter ?? null,
+              zoneNumber: (i as any).zoneNumber ?? null,
+              issueType: (i as any).issueType ?? null,
+            })),
+          );
+          if (deferredItems.length > 0) {
+            try {
+              const followUp = await storage.createFollowUpWorkOrder(
+                existingWorkOrder as any,
+                deferredItems,
+                priorItemsForGuard,
+              );
+              followUpWorkOrderId = (followUp as any).id;
+              logger.info(
+                {
+                  parentWorkOrderId: workOrderId,
+                  followUpWorkOrderId,
+                  deferredCount: deferredItems.length,
+                },
+                'follow-up work order created for deferred estimate items',
+              );
+            } catch (followUpErr: unknown) {
+              const pgCode = (followUpErr as { code?: string }).code;
+              if (pgCode === '23505') {
+                // Concurrent completion or re-submit: follow-up already exists.
+                const existing = await storage.getFollowUpWorkOrder(workOrderId, callerCompanyIdComplete0);
+                followUpWorkOrderId = (existing as any)?.id ?? null;
+                logger.info(
+                  {
+                    parentWorkOrderId: workOrderId,
+                    followUpWorkOrderId,
+                    deferredCount: deferredItems.length,
+                  },
+                  'follow-up already exists (23505 unique violation) — skipping creation',
+                );
+              } else {
+                // Non-23505 error: log but completion still succeeds.
+                logger.error(
+                  {
+                    parentWorkOrderId: workOrderId,
+                    workOrderNumber: (existingWorkOrder as any)?.workOrderNumber,
+                    deferredCount: deferredItems.length,
+                    err: followUpErr,
+                  },
+                  'follow-up work order creation failed — completion still succeeds',
+                );
+              }
+            }
+          }
+        } catch (diffErr: unknown) {
+          logger.error(
+            { parentWorkOrderId: workOrderId, err: diffErr },
+            'failed to compute deferred items for follow-up — completion still succeeds',
+          );
+        }
+      }
+
       // Log AI generation data if provided
       if (reqAiInputs) {
         try {
@@ -9938,7 +10023,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         summary: `Work order ${workOrder.workOrderNumber} completed`,
       });
 
-      res.json({ message: "Work order completed successfully", workOrder });
+      res.json({ message: "Work order completed successfully", workOrder, followUpWorkOrderId });
     } catch (error) {
       const { status, message } = classifyAndLog(req, error, {
         op: "completeWorkOrder",
@@ -12624,8 +12709,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Non-fatal — WO detail still works without the signature fields.
         }
       }
+      // Task #1935 — include parent WO info (for a follow-up WO) and the
+      // follow-up WO info (for a WO that has a follow-up).
+      let parentWorkOrderLink: { id: number; workOrderNumber: string } | null = null;
+      if ((workOrder as any).parentWorkOrderId) {
+        try {
+          const parentWo = await storage.getWorkOrder(Number((workOrder as any).parentWorkOrderId), callerCompanyIdWoGet);
+          if (parentWo) parentWorkOrderLink = { id: (parentWo as any).id, workOrderNumber: (parentWo as any).workOrderNumber };
+        } catch { /* non-fatal */ }
+      }
+      let followUpWorkOrderLink: { id: number; workOrderNumber: string } | null = null;
+      try {
+        const followUpWo = await storage.getFollowUpWorkOrder(id, callerCompanyIdWoGet);
+        if (followUpWo) followUpWorkOrderLink = { id: (followUpWo as any).id, workOrderNumber: (followUpWo as any).workOrderNumber };
+      } catch { /* non-fatal */ }
+
       // Strip pricing fields for field technicians
-      res.json(applyPricingVisibility(req, { ...workOrder, customer: customerRatesWo, items: woItems, ...estimateSignatureFields }));
+      res.json(applyPricingVisibility(req, { ...workOrder, customer: customerRatesWo, items: woItems, ...estimateSignatureFields, parentWorkOrderLink, followUpWorkOrderLink }));
     } catch (error) {
       req.log ? req.log.error(error) : console.error(error);
       res.status(500).json({ message: "Failed to fetch work order" });

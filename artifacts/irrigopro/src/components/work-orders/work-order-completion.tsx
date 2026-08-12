@@ -1,5 +1,5 @@
 import { safeGet } from "@/utils/safeStorage";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { AiExpandButton, AiSuggestionCard } from "@/components/ui/ai-expand-button";
@@ -288,6 +288,20 @@ export function WorkOrderCompletion({
   const { data: workOrderItems } = useQuery({
     queryKey: ["/api/work-orders", workOrder.id, "items"],
   });
+
+  // Task #1935 — count estimate items not covered by the current usedParts
+  // selection. Used to show an informational sentence in the summary view.
+  const deferredItemCount = useMemo(() => {
+    if (!workOrder.estimateId || !Array.isArray(workOrderItems) || workOrderItems.length === 0) return 0;
+    const usedSourceIds = new Set(
+      usedParts
+        .filter((p) => p.sourceItemId != null)
+        .map((p) => p.sourceItemId!),
+    );
+    return (workOrderItems as Array<{ id?: number }>).filter(
+      (item) => item.id != null && !usedSourceIds.has(item.id as number),
+    ).length;
+  }, [workOrder.estimateId, workOrderItems, usedParts]);
 
   const form = useForm<WorkOrderCompletionData>({
     resolver: zodResolver(workOrderCompletionSchema),
@@ -670,6 +684,15 @@ export function WorkOrderCompletion({
             )}
 
             <Separator />
+
+            {/* Task #1935 — deferred items informational notice */}
+            {deferredItemCount > 0 && workOrder.estimateId && (
+              <div className="rounded-md bg-blue-50 border border-blue-200 px-4 py-3 text-sm text-blue-800">
+                {deferredItemCount} {deferredItemCount === 1 ? "item" : "items"} from the estimate{" "}
+                {deferredItemCount === 1 ? "isn't" : "aren't"} on this work order. {deferredItemCount === 1 ? "It" : "They"}&apos;ll move
+                to a follow-up work order and won&apos;t be billed here.
+              </div>
+            )}
 
             {/* Action Buttons for Summary */}
             <div className="flex flex-col sm:flex-row justify-end gap-3">
