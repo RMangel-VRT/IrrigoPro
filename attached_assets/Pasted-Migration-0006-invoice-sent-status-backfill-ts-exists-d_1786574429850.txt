@@ -1,0 +1,18 @@
+Migration 0006-invoice-sent-status-backfill.ts exists, does exactly this work, and is invoked by nothing. Not registered, not called at startup, not referenced outside its own file. That's why 33 rows are stuck — #1847 shipped the code and wrote the migration, but nobody ever ran it.
+
+It also already does step 3's work: its step 2 is the invoice_pdfs → sent_at recovery. And it has a DRY_RUN mode.
+
+Paste on #1942:
+
+Amendment — do not write a new migration. Migration 0006 already exists and was never run.
+
+artifacts/api-server/src/migrations/0006-invoice-sent-status-backfill.ts is #1847's backfill. It performs all three steps this ticket describes: fill sent_at from updated_at on status='sent' rows, recover sent_at from matching invoice_pdfs rows, then move status to 'generated'. It supports DRY_RUN. A repo-wide grep finds no caller — it is not in the migration registry, not invoked at startup, and referenced nowhere outside itself. That is why 33 invoices are still at status = 'sent' and 51 paid invoices have no sent_at.
+
+Replace steps 2 and 3 with:
+
+Run 0006 in DRY_RUN mode and report all three step counts. That answers step 3's question — how many paid invoices have a recoverable invoice_pdfs timestamp — using the code that already exists, and writes nothing.
+Randy reviews the dry-run output and decides, particularly on the invoice_pdfs recovery affecting up to 51 paid invoices.
+Then run it live.
+Register 0006 in the migration registry (artifacts/api-server/src/lib/migrations/registry.ts) so it appears at /admin/migrations with preview and acknowledge, rather than remaining a standalone script nobody invokes. Add the membership check to registry.test.ts. The registry exists precisely so a written-but-unrun migration is visible — 0006 sitting unwired for weeks is the failure it prevents.
+
+Verified separately: no code path still writes invoices.status = 'sent'. The only remaining matches are 0006 itself and an unrelated notification-channel type in routes.ts ({ channel: 'email' | 'sms'; status: 'sent' }). So the count can only shrink, and the ≤ 33 assertion is safe.
