@@ -817,6 +817,97 @@ export function registerInvoiceReminderRoutes(
     },
   );
 
+  // ── Bulk send-ability, read-only ──────────────────────────────────────────
+  //
+  // Task #1942 — the A/R list renders one named primary action per row ("Send",
+  // "Remind", "In 3 days"), and that label MUST come from the refusal matrix
+  // above rather than being re-derived client-side; a second copy of these
+  // rules in the browser is exactly how a dead button that says the wrong
+  // thing gets shipped.
+  //
+  // The single GET answers for one invoice, which would be 50 requests on a
+  // page load. The batch *preview* endpoint answers for many, but it mints the
+  // #1888 confirmation token as it goes, and a token minted by simply painting
+  // a table would hollow out the "a human read this list" interlock.
+  //
+  // So: a third door that is a pure read. Same core, same `resolveContext`,
+  // same `throttleFor` — no second matrix — and no token, no mailer, no writes.
+  // Gated as a read, like the history GET.
+  //
+  // It resolves one context per id (an N+1 against the invoice and PDF tables).
+  // That is acceptable at a 100-id cap and one call per rendered page; if the
+  // page size ever grows, bulk-load the contexts rather than raising the cap.
+  const MAX_ELIGIBILITY_IDS = 100;
+
+  app.get(
+    "/api/invoices/reminder-eligibility",
+    deps.requireAuthentication,
+    deps.requireReminderHistoryRead ?? deps.requireInvoiceSend,
+    async (req: any, res) => {
+      try {
+        const raw = req.query?.ids;
+        const text = Array.isArray(raw) ? raw.join(",") : typeof raw === "string" ? raw : "";
+        const ids = [
+          ...new Set(
+            text
+              .split(",")
+              .map((part: string) => parseInt(part.trim(), 10))
+              .filter((n: number) => Number.isFinite(n) && n > 0),
+          ),
+        ];
+
+        if (ids.length === 0) {
+          res.json({ rows: [], notFound: [] });
+          return;
+        }
+        if (ids.length > MAX_ELIGIBILITY_IDS) {
+          res.status(400).json({
+            message: `Too many invoices requested at once (max ${MAX_ELIGIBILITY_IDS}).`,
+          });
+          return;
+        }
+
+        const rows: any[] = [];
+        const notFound: number[] = [];
+        for (const id of ids) {
+          const ctx = await core.resolveContext(req, id);
+          // Invisible to this caller: reported as not-found and nothing else.
+          // No customer, no balance, no refusal message echoed back.
+          if (!ctx) {
+            notFound.push(id);
+            continue;
+          }
+          const throttle = await core.throttleFor(
+            id,
+            ctx.invoice.companyId ?? null,
+            ctx.now,
+          );
+          rows.push({
+            invoiceId: id,
+            canSend: !ctx.refusal && !throttle.throttled,
+            refusal: ctx.refusal ?? null,
+            throttle: {
+              windowDays: throttle.windowDays,
+              lastSentAt: throttle.lastSentAt ? throttle.lastSentAt.toISOString() : null,
+              nextAllowedAt: throttle.nextAllowedAt
+                ? throttle.nextAllowedAt.toISOString()
+                : null,
+              throttled: throttle.throttled,
+              message: throttle.throttled
+                ? throttleMessage(ctx.invoice.invoiceNumber, throttle)
+                : null,
+            },
+          });
+        }
+
+        res.json({ rows, notFound });
+      } catch (error) {
+        console.error("Error evaluating reminder eligibility:", error);
+        res.status(500).json({ message: "Failed to evaluate reminder eligibility" });
+      }
+    },
+  );
+
   // ── Send ──────────────────────────────────────────────────────────────────
 
   app.post(

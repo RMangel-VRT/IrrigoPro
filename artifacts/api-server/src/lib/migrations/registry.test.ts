@@ -7,6 +7,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { listMigrations, getMigration } from "./registry";
+import { resolveCheckState } from "./invoice-sent-status-backfill";
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
 
@@ -67,6 +68,65 @@ describe("migration registry — static shape", () => {
       ids.includes("woodglenn-followup-v1"),
       "missing woodglenn-followup-v1",
     );
+  });
+
+  // Task #1942 — 0006 was written for #1847 and never wired to anything. The
+  // registry is what makes a written-but-unrun migration visible, so
+  // membership here is the guard against it going invisible again.
+  it("contains invoice-sent-status-backfill-v1", () => {
+    const ids = listMigrations().map((m) => m.id);
+    assert.ok(
+      ids.includes("invoice-sent-status-backfill-v1"),
+      "missing invoice-sent-status-backfill-v1",
+    );
+  });
+
+  it("invoice-sent-status-backfill-v1 has the required MigrationDefinition shape", () => {
+    const m = getMigration("invoice-sent-status-backfill-v1");
+    assert.ok(m, "getMigration should return a definition");
+    assert.equal(m.id, "invoice-sent-status-backfill-v1");
+    assert.ok(m.title.length > 0, "title should be non-empty");
+    assert.ok(m.description.length > 0, "description should be non-empty");
+    assert.ok(m.appSettingsKey.length > 0, "appSettingsKey should be non-empty");
+    assert.equal(typeof m.check, "function");
+    assert.equal(typeof m.preview, "function");
+    assert.equal(typeof m.run, "function");
+    assert.ok(!m.deprecated, "ported migration must NOT be deprecated");
+  });
+
+  // Task #1942 — completion is inferred from the data, and BOTH halves of the
+  // work count. Zero rows at status='sent' only proves step 3 ran; a database
+  // whose statuses were cleaned by hand still owes the sent_at recovery, and
+  // reporting that as completed retires the migration from /admin/migrations
+  // with delivery timestamps still missing.
+  describe("invoice-sent-status-backfill — inferred completion", () => {
+    it("is not complete while sent_at is still recoverable, even with no sent-status rows", () => {
+      const state = resolveCheckState(0, 51, null);
+      assert.notEqual(state.state, "completed");
+      assert.equal(state.state, "partially_applied");
+      assert.match(String(state.details), /recoverable from invoice_pdfs/);
+    });
+
+    it("is not complete while rows remain at status='sent'", () => {
+      assert.equal(resolveCheckState(33, 0, null).state, "partially_applied");
+    });
+
+    it("has not started when neither half has been done", () => {
+      assert.equal(resolveCheckState(33, 51, null).state, "not_started");
+    });
+
+    it("is partially applied, not complete, when a marker exists but work remains", () => {
+      const state = resolveCheckState(33, 51, { completedAt: "2026-08-01T00:00:00.000Z" });
+      assert.equal(state.state, "partially_applied");
+    });
+
+    it("is complete only when both counts are zero, and reports the marker's date", () => {
+      assert.deepEqual(resolveCheckState(0, 0, null), { state: "completed", completedAt: "" });
+      assert.deepEqual(resolveCheckState(0, 0, { completedAt: "2026-08-01T00:00:00.000Z" }), {
+        state: "completed",
+        completedAt: "2026-08-01T00:00:00.000Z",
+      });
+    });
   });
 
   it("repair-qb-void-mispaid-v1 has the required MigrationDefinition shape", () => {

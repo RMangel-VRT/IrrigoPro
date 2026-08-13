@@ -15,7 +15,7 @@ import express, { type Express, type RequestHandler } from "express";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { hasCapability, CAN_EDIT_INVOICES } from "@workspace/shared";
+import { hasCapability, CAN_MANAGE_QUICKBOOKS } from "@workspace/shared";
 import {
   registerInvoiceSyncQuickbooksRoutes,
   InvoiceSyncError,
@@ -44,8 +44,11 @@ function makeAuth(role: string, companyId: number | null = 1): RequestHandler {
 // Task #1886 — guards are backed by the real capability sets from the role
 // registry rather than a hand-copied mirror of the middleware, so a change to
 // membership shows up here instead of silently drifting.
-const requireInvoiceWrite: RequestHandler = (req: any, res, next) => {
-  if (!hasCapability(req.authenticatedUserRole, CAN_EDIT_INVOICES)) {
+// Task #1942 — the push into QuickBooks answers to CAN_MANAGE_QUICKBOOKS, the
+// capability that owns the rest of the QuickBooks surface, rather than to an
+// invoice write it does not perform.
+const requireQuickBooksAccess: RequestHandler = (req: any, res, next) => {
+  if (!hasCapability(req.authenticatedUserRole, CAN_MANAGE_QUICKBOOKS)) {
     res.status(403).json({ message: "Access denied." });
     return;
   }
@@ -61,7 +64,7 @@ function buildApp(
   app.use(express.json());
   registerInvoiceSyncQuickbooksRoutes(app, {
     requireAuthentication: makeAuth(role, companyId),
-    requireInvoiceWrite,
+    requireQuickBooksAccess,
     createQuickBooksInvoice,
   });
   return app;

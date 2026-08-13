@@ -87,16 +87,69 @@ proto.scrollIntoView ??= () => {};
 
 let requestedUrls: string[] = [];
 let rowsForResponse: Row[] = [];
+/**
+ * Task #1942 — the aging aggregate behind the strip and the header total.
+ * Server-shaped: four buckets plus an overall total, all computed there.
+ */
+let agingSummaryForResponse: Record<string, unknown> = emptyAgingSummary();
+/** Task #1942 — the server's refusal payload per invoice. */
+let eligibilityForResponse: Record<string, unknown>[] = [];
+
+/**
+ * A server eligibility row saying a reminder may go out. The button's state is
+ * the server's answer, so a test that wants an enabled button fixtures one.
+ */
+function eligible(invoiceId: number): Record<string, unknown> {
+  return {
+    invoiceId,
+    canSend: true,
+    refusal: null,
+    throttle: {
+      windowDays: 7,
+      lastSentAt: null,
+      nextAllowedAt: null,
+      throttled: false,
+      message: null,
+    },
+  };
+}
+
+function emptyAgingSummary(): Record<string, unknown> {
+  return {
+    buckets: [
+      { key: "current", label: "Not yet due", filterValue: "current", balanceDue: "0.00", count: 0 },
+      { key: "days30", label: "1–29 days overdue", filterValue: "days30", balanceDue: "0.00", count: 0 },
+      { key: "days60", label: "30–59 days overdue", filterValue: "days60", balanceDue: "0.00", count: 0 },
+      { key: "days90", label: "60+ days overdue", filterValue: "days90Plus", balanceDue: "0.00", count: 0 },
+    ],
+    overall: { balanceDue: "0.00", count: 0 },
+  };
+}
 
 beforeEach(() => {
   requestedUrls = [];
   rowsForResponse = [cleanInvoice()];
+  agingSummaryForResponse = emptyAgingSummary();
+  eligibilityForResponse = [];
   roleRef.current = "billing_manager";
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       requestedUrls.push(url);
+      // Both of these contain "/api/invoices", so they are matched first.
+      if (url.includes("/api/invoices/aging-summary")) {
+        return new Response(JSON.stringify(agingSummaryForResponse), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/api/invoices/reminder-eligibility")) {
+        return new Response(JSON.stringify({ rows: eligibilityForResponse, notFound: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       if (url.includes("/api/invoices")) {
         return new Response(JSON.stringify(rowsForResponse), {
           status: 200,
@@ -159,6 +212,15 @@ async function waitForInvoiceFetch() {
   await waitFor(() => expect(requestedUrls.some(isListRequest)).toBe(true));
 }
 
+/**
+ * Task #1942 — the filter controls live inside a popover now. Same testids,
+ * same parameters, one click further in.
+ */
+async function openFiltersPopover() {
+  fireEvent.click(firstByTestId("invoice-filters-button"));
+  await waitFor(() => expect(screen.getByTestId("ar-filter-payment-status")).toBeTruthy());
+}
+
 /** Radix opens its dropdown on pointerdown, which jsdom does not synthesise. */
 async function openActionsMenu(invoiceId: number) {
   const trigger = firstByTestId(`button-invoice-actions-${invoiceId}`);
@@ -178,7 +240,7 @@ describe("collections landing default", () => {
       const q = new URLSearchParams(nav.history[nav.history.length - 1].split("?")[1] ?? "");
       expect(q.get("aging")).toBe("overdue");
       expect(q.get("paymentStatus")).toBe("unpaid");
-      expect(q.get("sort")).toBe("agingBucket");
+      expect(q.get("sort")).toBe("balanceDue");
       expect(q.get("dir")).toBe("desc");
     });
 
@@ -186,7 +248,7 @@ describe("collections landing default", () => {
     await waitFor(() => {
       const q = lastInvoiceQuery();
       expect(q.get("aging")).toBe("overdue");
-      expect(q.get("sort")).toBe("agingBucket");
+      expect(q.get("sort")).toBe("balanceDue");
     });
   });
 
@@ -244,6 +306,7 @@ describe("A/R filters and the URL", () => {
     const { nav } = renderInvoices("/invoices?aging=days60&flagged=1");
     await waitForInvoiceFetch();
 
+    await openFiltersPopover();
     fireEvent.click(screen.getByTestId("ar-filter-flagged"));
 
     await waitFor(() => {
@@ -296,7 +359,18 @@ describe("existing ?aging= deep links", () => {
     renderInvoices("/invoices?aging=days90Plus");
     await waitForInvoiceFetch();
     // One `aging` parameter, shared by the widget's links and the new view.
-    expect(screen.getByTestId("invoices-aging-filter")).toHaveTextContent("60+ days overdue");
+    // Task #1942 — the aging strip is now where the current bucket is stated,
+    // and the same parameter still drives it.
+    await waitFor(() =>
+      expect(screen.getByTestId("ar-aging-card-days90Plus")).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      ),
+    );
+    // …and there is no second, differently shaped control for the same
+    // parameter hiding in the Filters popover: the cards are the aging control.
+    await openFiltersPopover();
+    expect(screen.queryByTestId("invoices-aging-filter")).toBeNull();
   });
 });
 
@@ -424,7 +498,8 @@ describe("A/R columns", () => {
     rowsForResponse = [cleanInvoice()];
     renderInvoices();
     await waitFor(() => expect(screen.getByTestId("ar-bucket-1")).toHaveTextContent("Current"));
-    expect(screen.getByTestId("ar-days-overdue-1")).toHaveTextContent("—");
+    // Task #1942 — the balance cell says so in words rather than with a dash.
+    expect(screen.getByTestId("ar-days-overdue-1")).toHaveTextContent("Not yet due");
   });
 
   // Task #1887 — the two columns and the filter above them used to render
@@ -436,25 +511,35 @@ describe("A/R columns", () => {
         reminderCount: 2,
       }),
     ];
+    eligibilityForResponse = [eligible(1)];
     renderInvoices();
+    // Task #1942 — the reminder history moved into the status cell's second
+    // line; the action it used to sit beside is now the row's named primary
+    // action, and its state comes from the server.
     await waitFor(() =>
-      expect(firstByTestId("ar-reminder-action-1")).toHaveTextContent("2 sent"),
+      expect(firstByTestId("ar-last-reminder-1")).toHaveTextContent("Reminded"),
     );
-    expect(firstByTestId("ar-last-reminder-1")).not.toHaveTextContent("—");
-    expect(firstByTestId("ar-reminder-action-1")).not.toBeDisabled();
+    expect(firstByTestId("ar-last-reminder-1")).toHaveTextContent("2×");
+    await waitFor(() => expect(firstByTestId("invoice-primary-action-1")).not.toBeDisabled());
   });
 
-  it("says 'Never' and offers the send action when no reminder has gone out", async () => {
+  it("says so and offers the send action when no reminder has gone out", async () => {
     rowsForResponse = [cleanInvoice({ lastReminderAt: null, reminderCount: 0 })];
+    eligibilityForResponse = [eligible(1)];
     renderInvoices();
-    await waitFor(() => expect(firstByTestId("ar-last-reminder-1")).toHaveTextContent("Never"));
-    expect(firstByTestId("ar-reminder-action-1")).toHaveTextContent("Send reminder");
+    await waitFor(() =>
+      expect(firstByTestId("ar-last-reminder-1")).toHaveTextContent("No reminders"),
+    );
+    await waitFor(() =>
+      expect(firstByTestId("invoice-primary-action-1")).toHaveTextContent("Remind"),
+    );
   });
 
   it("sends the reminder filter to the server rather than filtering the loaded page", async () => {
     const { nav } = renderInvoices();
     await waitForInvoiceFetch();
 
+    await openFiltersPopover();
     const select = firstByTestId("ar-filter-reminders");
     expect(select).not.toBeDisabled();
     fireEvent.pointerDown(select, { button: 0, ctrlKey: false, pointerType: "mouse" });

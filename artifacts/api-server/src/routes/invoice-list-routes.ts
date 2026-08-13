@@ -27,6 +27,8 @@ import { paginate } from "./pagination";
 import { arNotePreview } from "./invoice-ar-note-routes";
 import {
   agingBucketRank,
+  AGING_BUCKET_KEYS,
+  AGING_BUCKET_LABELS,
   classifyAgingBucket,
   computeArFlags,
   computeEffectiveDueDate,
@@ -129,6 +131,17 @@ const SORT_KEYS: readonly ArSortKey[] = [
 
 export interface ArListQuery {
   customerId: number | null;
+  /**
+   * Task #1942 — free text over invoice number and customer name. It used to
+   * be applied in the browser over the loaded page only, which made the
+   * header total, the aging strip and a select-all over a multi-page result
+   * disagree with what the table showed. Every narrowing the user can see has
+   * to be applied here, or the aggregate and the selection describe a
+   * different set than the rows.
+   */
+  search: string | null;
+  /** Task #1942 — billing month as `YYYY-MM`, same reason as `search`. */
+  month: string | null;
   aging: AgingFilterValue;
   paymentStatus: PaymentStatusFilter;
   sent: SentFilter;
@@ -145,6 +158,8 @@ export interface ArListQuery {
 /** The query a caller that passes nothing gets: no filters, no sort. */
 export const DEFAULT_AR_LIST_QUERY: ArListQuery = {
   customerId: null,
+  search: null,
+  month: null,
   aging: "all",
   paymentStatus: "all",
   sent: "all",
@@ -164,6 +179,71 @@ function str(v: unknown): string | null {
   return null;
 }
 
+/**
+ * The company's last QuickBooks payment sync: the newest `paymentSyncedAt`
+ * across every invoice given, or null if none has ever been synced.
+ *
+ * A maximum, not a per-row read — the sync stamps the company in one pass, so
+ * a single never-synced invoice does not make the connection stale.
+ */
+/**
+ * The one company-scoping contract for the invoice page (Task #1942).
+ *
+ * The list and the aggregate above it must describe the same population, so
+ * they resolve their scope the same way rather than each inventing one. A
+ * scoped caller is pinned to her own company and cannot ask for another's; a
+ * super_admin may name a company with `?companyId=`, and gets the same
+ * cross-company view the list has always given when she names none. What is
+ * not allowed is the pair disagreeing: a per-company total printed over a
+ * cross-company list is a number the reader cannot act on and cannot detect.
+ */
+export type InvoiceScope =
+  | { ok: true; companyId: number | null }
+  | { ok: false; status: number; message: string };
+
+export function resolveInvoiceScope(req: any): InvoiceScope {
+  const callerRole = req?.authenticatedUserRole as string | undefined;
+  if (callerRole === "super_admin") {
+    const raw = req?.query?.companyId;
+    const requested = num(raw);
+    const given = str(raw);
+    if (given != null && given.trim() !== "") {
+      if (requested == null || !Number.isInteger(requested) || requested <= 0) {
+        return {
+          ok: false,
+          status: 400,
+          message: "Invalid companyId: expected a positive integer.",
+        };
+      }
+      return { ok: true, companyId: requested };
+    }
+    // No company named — every company, exactly as the list has always done.
+    return { ok: true, companyId: null };
+  }
+  if (!req?.authenticatedUserCompanyId) {
+    return {
+      ok: false,
+      status: 403,
+      message: "Forbidden: user has no company association",
+    };
+  }
+  // A scoped caller's own company wins; a `?companyId=` she sends is ignored,
+  // never honoured, so the parameter can never be used to widen her view.
+  return { ok: true, companyId: req.authenticatedUserCompanyId };
+}
+
+export function latestPaymentSyncAt(rows: InvoiceRowLike[]): string | null {
+  let latest: number | null = null;
+  for (const row of rows) {
+    const at = row.paymentSyncedAt;
+    if (!at) continue;
+    const t = new Date(at as any).getTime();
+    if (Number.isNaN(t)) continue;
+    if (latest == null || t > latest) latest = t;
+  }
+  return latest == null ? null : new Date(latest).toISOString();
+}
+
 function num(v: unknown): number | null {
   const s = str(v);
   if (s == null || s.trim() === "") return null;
@@ -179,6 +259,9 @@ function boolish(v: unknown): boolean {
 
 /** `YYYY-MM-DD` with no time component means "the whole of that day". */
 const BARE_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Billing month, as the invoice's own `invoiceYear`/`invoiceMonth` columns. */
+const BILLING_MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
 
 function parseDate(v: unknown, endOfDay: boolean): Date | null {
   const s = str(v);
@@ -227,9 +310,19 @@ export function parseArListQuery(query: Record<string, unknown>): ArListQuery {
 
   const customerIdRaw = num(query.customerId);
 
+  const searchRaw = str(query.search)?.trim() ?? "";
+  // A search box is free text from the browser: cap it rather than matching an
+  // unbounded string against every row.
+  const search = searchRaw === "" ? null : searchRaw.slice(0, 100);
+
+  const monthRaw = str(query.month)?.trim() ?? "";
+  const month = BILLING_MONTH.test(monthRaw) ? monthRaw : null;
+
   return {
     customerId:
       customerIdRaw != null && Number.isInteger(customerIdRaw) ? customerIdRaw : null,
+    search,
+    month,
     aging,
     paymentStatus,
     sent,
@@ -247,6 +340,8 @@ export function parseArListQuery(query: Record<string, unknown>): ArListQuery {
 /** True when nothing narrows or reorders the list — the legacy call shape. */
 export function isUnfilteredArListQuery(q: ArListQuery): boolean {
   return (
+    q.search == null &&
+    q.month == null &&
     q.aging === "all" &&
     q.paymentStatus === "all" &&
     q.sent === "all" &&
@@ -272,6 +367,9 @@ export interface InvoiceRowLike {
   status: string;
   totalAmount: string;
   createdAt: Date | string;
+  /** Billing month the invoice belongs to — its own columns, not createdAt. */
+  invoiceYear?: number | null;
+  invoiceMonth?: number | null;
   periodStart?: Date | string | null;
   dueDate?: Date | string | null;
   sentAt?: Date | string | null;
@@ -402,6 +500,23 @@ export function isOpenAr(inv: InvoiceRowLike): boolean {
   return (inv.paymentStatus ?? "unpaid") !== "paid";
 }
 
+/** Invoice number or customer name, case-insensitive substring. */
+function matchesSearch(row: AnnotatedInvoice, search: string | null): boolean {
+  if (search == null) return true;
+  const needle = search.toLowerCase();
+  return (
+    row.invoiceNumber.toLowerCase().includes(needle) ||
+    row.customerName.toLowerCase().includes(needle)
+  );
+}
+
+/** The invoice's own billing month, not its creation date. */
+function matchesBillingMonth(row: AnnotatedInvoice, month: string | null): boolean {
+  if (month == null) return true;
+  const [year, mon] = month.split("-").map(Number);
+  return row.invoiceYear === year && row.invoiceMonth === mon;
+}
+
 function matchesAging(row: AnnotatedInvoice, aging: AgingFilterValue): boolean {
   if (aging === "all") return true;
   if (!isOpenAr(row)) return false;
@@ -416,6 +531,8 @@ export function matchesArFilters(
   now: Date = new Date(),
 ): boolean {
   if (q.customerId != null && row.customerId !== q.customerId) return false;
+  if (!matchesSearch(row, q.search)) return false;
+  if (!matchesBillingMonth(row, q.month)) return false;
   if (!matchesAging(row, q.aging)) return false;
   if (q.paymentStatus !== "all" && (row.paymentStatus ?? "unpaid") !== q.paymentStatus) {
     return false;
@@ -526,6 +643,85 @@ export function sortAnnotatedInvoices(
   return sorted;
 }
 
+// ── Aging aggregate ─────────────────────────────────────────────────────────
+//
+// Task #1942 — the aging strip and the page header both need a total for the
+// WHOLE filtered set, not for the page the client happens to have loaded. The
+// list is paginated at 50, so a client-side sum reports the first page's
+// balance and calls it the outstanding balance. That is the same error class
+// #1890 fixed by moving filtering and sorting server-side, so the totals are
+// computed here, over the same annotated rows, with the same filter matcher.
+
+/** Bucket key → the `?aging=` wire value that selects exactly that bucket. */
+const BUCKET_TO_AGING_VALUE: Record<AgingBucketKey, AgingFilterValue> = {
+  current: "current",
+  days30: "days30",
+  days60: "days60",
+  days90: "days90Plus",
+};
+
+export interface AgingBucketTotal {
+  key: AgingBucketKey;
+  /** From the shared aging module. The client never writes its own label. */
+  label: string;
+  /** What clicking this card should set `?aging=` to. */
+  filterValue: AgingFilterValue;
+  balanceDue: string;
+  count: number;
+}
+
+export interface AgingSummary {
+  buckets: AgingBucketTotal[];
+  /** Across all four buckets — the header's outstanding balance and count. */
+  overall: { balanceDue: string; count: number };
+}
+
+/**
+ * Sums open A/R by bucket.
+ *
+ * Only open A/R rows are counted, which is the same precondition `matchesAging`
+ * itself applies before comparing buckets. Without it a paid invoice would
+ * carry a bucket it can never be filtered into, and the strip would report a
+ * total the table could not reproduce.
+ *
+ * Boundaries are never recomputed here: `agingBucket` was assigned by
+ * `classifyAgingBucket` during annotation, and the labels come from
+ * `AGING_BUCKET_LABELS`.
+ */
+export function summarizeAging(rows: AnnotatedInvoice[]): AgingSummary {
+  const totals = new Map<AgingBucketKey, { balance: number; count: number }>(
+    AGING_BUCKET_KEYS.map((k) => [k, { balance: 0, count: 0 }]),
+  );
+
+  for (const row of rows) {
+    if (!isOpenAr(row)) continue;
+    const slot = totals.get(row.agingBucket);
+    if (!slot) continue;
+    slot.balance += parseFloat(row.balanceDue) || 0;
+    slot.count += 1;
+  }
+
+  let overallBalance = 0;
+  let overallCount = 0;
+  const buckets = AGING_BUCKET_KEYS.map((key) => {
+    const slot = totals.get(key)!;
+    overallBalance += slot.balance;
+    overallCount += slot.count;
+    return {
+      key,
+      label: AGING_BUCKET_LABELS[key],
+      filterValue: BUCKET_TO_AGING_VALUE[key],
+      balanceDue: slot.balance.toFixed(2),
+      count: slot.count,
+    };
+  });
+
+  return {
+    buckets,
+    overall: { balanceDue: overallBalance.toFixed(2), count: overallCount },
+  };
+}
+
 // ── Route registration ──────────────────────────────────────────────────────
 
 export interface RegisterInvoiceListRoutesDeps {
@@ -581,12 +777,12 @@ export function registerInvoiceListRoutes(
     async (req: any, res) => {
       try {
         const callerRole = req.authenticatedUserRole as string | undefined;
-        if (callerRole !== "super_admin" && !req.authenticatedUserCompanyId) {
-          res.status(403).json({ message: "Forbidden: user has no company association" });
+        const scope = resolveInvoiceScope(req);
+        if (!scope.ok) {
+          res.status(scope.status).json({ message: scope.message });
           return;
         }
-        const callerCompanyId =
-          callerRole === "super_admin" ? null : (req.authenticatedUserCompanyId ?? null);
+        const callerCompanyId = scope.companyId;
 
         const q = parseArListQuery(req.query ?? {});
         const all = (await storage.getInvoices(callerCompanyId)) as InvoiceRowLike[];
@@ -640,6 +836,65 @@ export function registerInvoiceListRoutes(
       } catch (error) {
         console.error("Error fetching invoices:", error);
         res.status(500).json({ message: "Failed to fetch invoices" });
+      }
+    },
+  );
+
+  // Task #1942 — aging aggregate for the strip and the page header.
+  //
+  // Registered after /api/invoices and before any `/api/invoices/:id` route,
+  // so the literal path wins. It respects every active filter EXCEPT `?aging=`
+  // itself: the strip has to show what each bucket would select, and a strip
+  // that re-filtered itself by the bucket already selected would report one
+  // populated card and three zeroes.
+  app.get(
+    "/api/invoices/aging-summary",
+    deps.requireAuthentication,
+    deps.requireInvoiceRead,
+    async (req: any, res) => {
+      try {
+        // Same contract as the list above, from the same helper: the totals in
+        // the header and the strip describe exactly the rows the table shows.
+        // A super_admin who names a company gets that company here and in the
+        // list; one who names none gets the cross-company view in both.
+        const scope = resolveInvoiceScope(req);
+        if (!scope.ok) {
+          res.status(scope.status).json({ message: scope.message });
+          return;
+        }
+        const scopeCompanyId = scope.companyId;
+
+        // `aging: "all"` is forced, not read: see the note above.
+        const q: ArListQuery = { ...parseArListQuery(req.query ?? {}), aging: "all" };
+
+        const all = (await storage.getInvoices(scopeCompanyId)) as InvoiceRowLike[];
+        const uniqueCustomerIds = [...new Set(all.map((inv) => inv.customerId))];
+        const termsMap = await loadPaymentTerms(uniqueCustomerIds);
+        const reminderMap: Map<number, ReminderSummary> =
+          (await storage.getInvoiceReminderSummaries?.(scopeCompanyId)) ?? new Map();
+
+        const now = nowFn();
+        // Notes are never loaded here — an aggregate has no note fields, so
+        // there is nothing for a caller without CAN_READ_AR_NOTES to leak.
+        const annotated = all.map((inv) =>
+          annotateInvoiceForAr(inv, termsMap.get(inv.customerId), now, reminderMap.get(inv.id)),
+        );
+        const filtered = annotated.filter((row) => matchesArFilters(row, q, now));
+
+        // The QuickBooks freshness pill reads `lastPaymentSyncAt` from here.
+        // It is deliberately computed over `all` — every invoice in the
+        // company, before any filter — because the pill is a statement about
+        // the connection, not about the rows on screen. Derived from the
+        // filtered set, a search or a month filter that happened to exclude
+        // the most recently synced invoice would report a healthy connection
+        // as stale.
+        res.json({
+          ...deps.applyPricingVisibility(req, summarizeAging(filtered)),
+          lastPaymentSyncAt: latestPaymentSyncAt(all),
+        });
+      } catch (error) {
+        console.error("Error summarizing invoice aging:", error);
+        res.status(500).json({ message: "Failed to summarize invoice aging" });
       }
     },
   );

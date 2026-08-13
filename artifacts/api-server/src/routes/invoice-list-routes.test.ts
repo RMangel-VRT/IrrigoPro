@@ -43,6 +43,8 @@ import {
   CAN_EDIT_INVOICES,
   COLLECTIONS_LANDING_DEFAULT,
   OVERDUE_AGING_FILTER,
+  AGING_BUCKET_KEYS,
+  AGING_BUCKET_LABELS,
   classifyAgingBucket,
   computeEffectiveDueDate,
   isInvoiceOverdue,
@@ -307,6 +309,33 @@ describe("A/R filters", () => {
     const { app } = buildApp([clean, flagged]);
     const res = await get(app, "/api/invoices?flagged=1");
     assert.deepEqual(ids(res.body), [11]);
+  });
+
+  it("filters by search over invoice number and customer name", async () => {
+    const named = [
+      inv({ id: 1, invoiceNumber: "INV-7001", customerName: "Woodglenn HOA" }),
+      inv({ id: 2, invoiceNumber: "INV-7002", customerName: "Cedar Ridge" }),
+      inv({ id: 3, invoiceNumber: "INV-8003", customerName: "Ridgeview Park" }),
+    ];
+    const { app } = buildApp(named);
+    // invoice number, case-insensitively
+    assert.deepEqual(ids((await get(app, "/api/invoices?search=inv-70")).body).sort(), [1, 2]);
+    // customer name, matching mid-string
+    assert.deepEqual(ids((await get(app, "/api/invoices?search=ridge")).body).sort(), [2, 3]);
+    // and a search nobody matches empties the list rather than ignoring itself
+    assert.deepEqual(ids((await get(app, "/api/invoices?search=nobody")).body), []);
+  });
+
+  it("filters by billing month, on the invoice's own month, not its created date", async () => {
+    const monthly = [
+      inv({ id: 1, invoiceYear: 2026, invoiceMonth: 6, createdAt: new Date("2026-07-02T00:00:00.000Z") }),
+      inv({ id: 2, invoiceYear: 2026, invoiceMonth: 7, createdAt: new Date("2026-07-02T00:00:00.000Z") }),
+    ];
+    const { app } = buildApp(monthly);
+    assert.deepEqual(ids((await get(app, "/api/invoices?month=2026-06")).body), [1]);
+    assert.deepEqual(ids((await get(app, "/api/invoices?month=2026-07")).body), [2]);
+    // a malformed month is ignored rather than emptying the list
+    assert.deepEqual(ids((await get(app, "/api/invoices?month=2026-13")).body).sort(), [1, 2]);
   });
 
   it("composes filters as an intersection, not a union", async () => {
@@ -910,5 +939,275 @@ describe("GET /api/invoices — the count the overdue nav badge reads", () => {
     const res = await get(app, BADGE_QUERY);
     assert.equal(res.status, 403);
     assert.equal(res.total, null);
+  });
+});
+
+// ── Task #1942 — GET /api/invoices/aging-summary ─────────────────────────────
+//
+// The aging strip and the page header both read this. Two properties matter
+// more than any other and are asserted first: the totals cover the WHOLE
+// filtered set rather than a page, and they agree with what the table would
+// show for the same filters — which is why the endpoint forces `aging: all`
+// and applies `isOpenAr`, exactly as the list's own aging matcher does.
+
+const SUMMARY = "/api/invoices/aging-summary";
+
+/** Bucket key → the card's totals, for readable assertions. */
+function bucketMap(body: any): Record<string, { balanceDue: string; count: number }> {
+  const out: Record<string, { balanceDue: string; count: number }> = {};
+  for (const b of body.buckets) out[b.key] = { balanceDue: b.balanceDue, count: b.count };
+  return out;
+}
+
+describe("aging summary — shape", () => {
+  it("reports the company's last payment sync, unmoved by the filters on the table", async () => {
+    // The pill above the table describes the QuickBooks connection. If this
+    // came from the filtered set, a search or a month filter that excluded
+    // the most recently synced invoice would report a healthy connection as
+    // stale — so it is computed over every invoice in the company.
+    const recent = new Date(NOW.getTime() - 60_000);
+    const older = new Date(NOW.getTime() - 5 * DAY);
+    const rows = [
+      overdueBy(1, 40, { invoiceNumber: "INV-CEDAR", paymentSyncedAt: older }),
+      overdueBy(2, 40, { invoiceNumber: "INV-WOODGLENN", paymentSyncedAt: recent }),
+    ];
+    const { app } = buildApp(rows);
+
+    const all = await get(app, SUMMARY);
+    assert.equal(new Date(all.body.lastPaymentSyncAt).getTime(), recent.getTime());
+
+    // Filter the recently-synced invoice out of the aggregate entirely.
+    const filtered = await get(app, `${SUMMARY}?search=cedar`);
+    assert.equal(filtered.body.overall.count, 1, "the filter really did narrow the aggregate");
+    assert.equal(
+      new Date(filtered.body.lastPaymentSyncAt).getTime(),
+      recent.getTime(),
+      "sync freshness is a company fact, not a property of the filtered rows",
+    );
+  });
+
+  it("reports no sync at all when the company has never synced", async () => {
+    const { app } = buildApp([overdueBy(1, 10, { paymentSyncedAt: null })]);
+    const res = await get(app, SUMMARY);
+    assert.equal(res.body.lastPaymentSyncAt, null);
+  });
+
+  it("returns the four shared buckets, in order, with the shared labels", async () => {
+    const { app } = buildApp([]);
+    const res = await get(app, SUMMARY);
+    assert.equal(res.status, 200);
+    assert.deepEqual(
+      res.body.buckets.map((b: any) => b.key),
+      [...AGING_BUCKET_KEYS],
+    );
+    for (const b of res.body.buckets) {
+      assert.equal(
+        b.label,
+        AGING_BUCKET_LABELS[b.key as keyof typeof AGING_BUCKET_LABELS],
+        "labels come from the shared aging module, never from this endpoint",
+      );
+    }
+  });
+
+  it("names the ?aging= value each card selects, including days90 → days90Plus", async () => {
+    const { app } = buildApp([]);
+    const res = await get(app, SUMMARY);
+    assert.deepEqual(
+      Object.fromEntries(res.body.buckets.map((b: any) => [b.key, b.filterValue])),
+      { current: "current", days30: "days30", days60: "days60", days90: "days90Plus" },
+    );
+  });
+
+  it("sums balanceDue and counts per bucket, and totals across all four", async () => {
+    const rows = [
+      overdueBy(1, 90, { totalAmount: "500.00", balance: "500.00" }),
+      overdueBy(2, 45, { totalAmount: "300.00", balance: "300.00" }),
+      overdueBy(3, 10, { totalAmount: "200.00", balance: "200.00" }),
+      overdueBy(4, 10, { totalAmount: "100.00", balance: "100.00" }),
+      inv({ id: 5, dueDate: new Date(NOW.getTime() + 10 * DAY), totalAmount: "50.00", balance: "50.00" }),
+    ];
+    const { app } = buildApp(rows);
+    const res = await get(app, SUMMARY);
+    const buckets = bucketMap(res.body);
+    assert.deepEqual(buckets.current, { balanceDue: "50.00", count: 1 });
+    assert.deepEqual(buckets.days30, { balanceDue: "300.00", count: 2 });
+    assert.deepEqual(buckets.days60, { balanceDue: "300.00", count: 1 });
+    assert.deepEqual(buckets.days90, { balanceDue: "500.00", count: 1 });
+    assert.deepEqual(res.body.overall, { balanceDue: "1150.00", count: 5 });
+  });
+
+  it("counts only open A/R, so the strip and the table cannot disagree", async () => {
+    const rows = [
+      overdueBy(1, 40, { totalAmount: "100.00", balance: "100.00" }),
+      overdueBy(2, 40, { status: "draft" }),
+      overdueBy(3, 40, { status: "paid", paymentStatus: "paid" }),
+      overdueBy(4, 40, { paidAt: NOW }),
+      overdueBy(5, 40, { status: "cancelled" }),
+    ];
+    const { app } = buildApp(rows);
+    const res = await get(app, SUMMARY);
+    assert.deepEqual(res.body.overall, { balanceDue: "100.00", count: 1 });
+  });
+});
+
+describe("aging summary — the whole filtered set, not a page", () => {
+  it("totals every matching invoice even when the list would paginate", async () => {
+    // 60 > the list's 50-row page. A header that summed the loaded rows would
+    // report 50 here; the aggregate reports all 60. This is the assertion the
+    // header's dollar total exists to satisfy.
+    const rows = Array.from({ length: 60 }, (_, i) =>
+      overdueBy(i + 1, 40, { totalAmount: "10.00", balance: "10.00" }),
+    );
+    const { app } = buildApp(rows);
+    const list = await get(app, "/api/invoices?offset=0");
+    assert.equal(list.body.length, 50, "the list itself still pages at 50");
+    assert.equal(list.total, "60");
+
+    const res = await get(app, SUMMARY);
+    assert.deepEqual(res.body.overall, { balanceDue: "600.00", count: 60 });
+  });
+});
+
+describe("aging summary — filters", () => {
+  const mixed = () => [
+    overdueBy(1, 40, { customerId: 100, totalAmount: "100.00", balance: "100.00" }),
+    overdueBy(2, 40, { customerId: 200, totalAmount: "700.00", balance: "700.00" }),
+    overdueBy(3, 5, { customerId: 100, totalAmount: "20.00", balance: "20.00" }),
+  ];
+
+  it("ignores ?aging= so every card keeps its own total", async () => {
+    const { app } = buildApp(mixed());
+    const unfiltered = await get(app, SUMMARY);
+    for (const aging of ["current", "days30", "days60", "days90Plus", OVERDUE_AGING_FILTER]) {
+      const res = await get(app, `${SUMMARY}?aging=${aging}`);
+      assert.deepEqual(
+        res.body,
+        unfiltered.body,
+        `?aging=${aging} must not narrow the strip's own totals`,
+      );
+    }
+  });
+
+  it("respects every other filter, so the strip tracks the table", async () => {
+    const { app } = buildApp(mixed());
+    const res = await get(app, `${SUMMARY}?customerId=100`);
+    assert.deepEqual(res.body.overall, { balanceDue: "120.00", count: 2 });
+    const buckets = bucketMap(res.body);
+    assert.deepEqual(buckets.days30, { balanceDue: "20.00", count: 1 });
+    assert.deepEqual(buckets.days60, { balanceDue: "100.00", count: 1 });
+  });
+
+  it("respects search and billing month, so the strip cannot outgrow the table", async () => {
+    const rows = [
+      overdueBy(1, 40, { invoiceNumber: "INV-9001", customerName: "Woodglenn HOA", invoiceYear: 2026, invoiceMonth: 6, totalAmount: "100.00", balance: "100.00" }),
+      overdueBy(2, 40, { invoiceNumber: "INV-9002", customerName: "Cedar Ridge", invoiceYear: 2026, invoiceMonth: 6, totalAmount: "700.00", balance: "700.00" }),
+      overdueBy(3, 40, { invoiceNumber: "INV-9003", customerName: "Woodglenn HOA", invoiceYear: 2026, invoiceMonth: 7, totalAmount: "40.00", balance: "40.00" }),
+    ];
+    const { app } = buildApp(rows);
+    const searched = await get(app, `${SUMMARY}?search=woodglenn`);
+    assert.deepEqual(searched.body.overall, { balanceDue: "140.00", count: 2 });
+    const monthed = await get(app, `${SUMMARY}?month=2026-06`);
+    assert.deepEqual(monthed.body.overall, { balanceDue: "800.00", count: 2 });
+    const both = await get(app, `${SUMMARY}?search=woodglenn&month=2026-06`);
+    assert.deepEqual(both.body.overall, { balanceDue: "100.00", count: 1 });
+  });
+
+  it("respects the amount filter too", async () => {
+    const { app } = buildApp(mixed());
+    const res = await get(app, `${SUMMARY}?amountMin=50`);
+    assert.deepEqual(res.body.overall, { balanceDue: "800.00", count: 2 });
+  });
+});
+
+describe("aging summary — scoping", () => {
+  it("only ever sums the caller's own company", async () => {
+    const rowsByCompany = new Map<number | null, InvoiceRowLike[]>([
+      [1, [overdueBy(1, 40, { totalAmount: "100.00", balance: "100.00" })]],
+      [
+        2,
+        [
+          overdueBy(2, 40, { totalAmount: "900.00", balance: "900.00" }),
+          overdueBy(3, 40, { totalAmount: "900.00", balance: "900.00" }),
+        ],
+      ],
+    ]);
+    const { app, calls } = buildApp([], { companyId: 2, rowsByCompany });
+    const res = await get(app, SUMMARY);
+    assert.deepEqual(res.body.overall, { balanceDue: "1800.00", count: 2 });
+    assert.deepEqual(calls.getInvoices, [2], "the fetch itself is scoped, not the sum");
+  });
+
+  // Task #1942 — the aggregate and the list answer to ONE scoping contract.
+  // The first cut refused an unscoped super_admin here while the list happily
+  // returned every company's rows, so the page showed a per-company total (or
+  // an error strip) over a cross-company table. Whatever the population is, it
+  // is the same population in both.
+  it("gives an unscoped super_admin the same global set the list gives", async () => {
+    const rowsByCompany = new Map<number | null, InvoiceRowLike[]>([
+      [null, [overdueBy(1, 40, { totalAmount: "100.00", balance: "100.00" })]],
+      [2, [overdueBy(2, 40, { totalAmount: "900.00", balance: "900.00" })]],
+    ]);
+    const { app, calls } = buildApp([], { role: "super_admin", companyId: null, rowsByCompany });
+    const res = await get(app, SUMMARY);
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.overall, { balanceDue: "100.00", count: 1 });
+    assert.deepEqual(calls.getInvoices, [null], "global, exactly as GET /api/invoices reads");
+  });
+
+  it("rejects a malformed companyId rather than silently going global", async () => {
+    const { app, calls } = buildApp([overdueBy(1, 40)], { role: "super_admin", companyId: null });
+    const res = await get(app, `${SUMMARY}?companyId=abc`);
+    assert.equal(res.status, 400);
+    assert.deepEqual(calls.getInvoices, [], "nothing is read on a bad scope");
+  });
+
+  it("list and aggregate read the same company for the same request", async () => {
+    const rowsByCompany = new Map<number | null, InvoiceRowLike[]>([
+      [null, [overdueBy(1, 40, { totalAmount: "100.00", balance: "100.00" })]],
+      [2, [overdueBy(2, 40, { totalAmount: "900.00", balance: "900.00" })]],
+    ]);
+    for (const suffix of ["", "?companyId=2"]) {
+      const { app, calls } = buildApp([], { role: "super_admin", companyId: null, rowsByCompany });
+      await get(app, `/api/invoices${suffix}`);
+      await get(app, `${SUMMARY}${suffix ? suffix : ""}`);
+      assert.equal(calls.getInvoices.length, 2, `two reads for ${suffix || "(unscoped)"}`);
+      assert.equal(
+        calls.getInvoices[0],
+        calls.getInvoices[1],
+        `list and aggregate disagree on scope for ${suffix || "(unscoped)"}`,
+      );
+    }
+  });
+
+  it("ignores a companyId a scoped caller sends for someone else's company", async () => {
+    const rowsByCompany = new Map<number | null, InvoiceRowLike[]>([
+      [1, [overdueBy(1, 40, { totalAmount: "100.00", balance: "100.00" })]],
+      [2, [overdueBy(2, 40, { totalAmount: "900.00", balance: "900.00" })]],
+    ]);
+    const { app, calls } = buildApp([], { role: "bookkeeper", companyId: 2, rowsByCompany });
+    const res = await get(app, `${SUMMARY}?companyId=1`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.overall, { balanceDue: "900.00", count: 1 });
+    assert.deepEqual(calls.getInvoices, [2], "her own company, never the one she asked for");
+  });
+
+  it("scopes a super_admin request to the company it names", async () => {
+    const rowsByCompany = new Map<number | null, InvoiceRowLike[]>([
+      [1, [overdueBy(1, 40, { totalAmount: "100.00", balance: "100.00" })]],
+      [2, [overdueBy(2, 40, { totalAmount: "900.00", balance: "900.00" })]],
+    ]);
+    const { app, calls } = buildApp([], { role: "super_admin", companyId: null, rowsByCompany });
+    const res = await get(app, `${SUMMARY}?companyId=2`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.overall, { balanceDue: "900.00", count: 1 });
+    assert.deepEqual(calls.getInvoices, [2]);
+  });
+
+  it("a role without invoice-read cannot reach the aggregate", async () => {
+    assert.equal(hasCapability("field_tech", CAN_READ_INVOICES), false);
+    const { app, calls } = buildApp([overdueBy(1, 40)], { role: "field_tech" });
+    const res = await get(app, SUMMARY);
+    assert.equal(res.status, 403);
+    assert.deepEqual(calls.getInvoices, []);
   });
 });

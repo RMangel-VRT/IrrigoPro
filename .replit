@@ -104,6 +104,18 @@ args = "work-order-labor-hours"
 task = "workflow.run"
 args = "work-order-deferred-items"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "invoice-ar-first-ui"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "invoice-aging-summary"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "migration-registry"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -342,6 +354,39 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/lib/work-order-deferred-items.test.ts"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "invoice-ar-first-ui"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/irrigopro exec vitest run src/pages/invoices-ar-first-layout.test.tsx src/pages/invoices-ar-collections.test.tsx"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "invoice-aging-summary"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/routes/invoice-list-routes.test.ts"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "migration-registry"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/lib/migrations/registry.test.ts"
 
 [workflows.workflow.metadata]
 isValidation = true

@@ -27,3 +27,8 @@
 - [Validation-run EAGAIN flakes](validation-eagain-flake.md) — parallel completion validation can die with EAGAIN/worker-thread crashes; if the suite passes locally, just retry markTaskComplete.
 - [Dev DB lags merged schema](dev-db-schema-drift.md) — 42P01 for a just-merged feature's table is environment drift, not your bug; don't adopt it into your diff.
 - [Follow-up WO idempotency pattern](follow-up-wo-idempotency.md) — partial unique index on parent_work_order_id (WHERE NOT NULL) + 23505 catch at the route is the correct pattern; app-level pre-check alone is not sufficient under concurrency.
+- [Control gate = endpoint guard](control-gate-matches-endpoint-guard.md) — gate a control on the route's own capability set; split pill/button rather than widening.
+- [Standalone migration scripts never run](standalone-migration-scripts-are-invisible.md) — write backfills as registry MigrationDefinitions; port SQL verbatim and diff it mechanically.
+- [Visible filters must be server filters](visible-filters-must-be-server-filters.md) — a browser-only filter beside server aggregates and select-all acts on rows nobody saw.
+- [Aggregate widgets above a list](list-aggregate-widgets.md) — key the summary under the list's key, price and count one population, and never derive sync health from loaded rows.
+- [One scoping contract](one-scope-contract.md) — a new aggregate must resolve tenant scope through the list's own helper; a stricter rule disagrees exactly where the list is unusual.

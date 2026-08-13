@@ -425,11 +425,17 @@ export {
 
 export interface RegisterQbPaymentSyncRoutesDeps {
   requireAuthentication: RequestHandler;
-  /** Task #1886: this endpoint stamps payment_status / balance / paid_at on
-   *  invoice rows, so it is an invoice write → CAN_EDIT_INVOICES. The
-   *  bookkeeper is deliberately excluded: payment state is QBO-owned and she
-   *  never writes it from IrrigoPro. */
-  requireInvoiceWrite: RequestHandler;
+  /**
+   * Task #1942: re-gated from CAN_EDIT_INVOICES to CAN_MANAGE_QUICKBOOKS.
+   *
+   * The write this endpoint performs is not authoring an invoice — it copies
+   * QuickBooks' own payment state back onto rows it owns. Whoever owns the
+   * QuickBooks connection is exactly who should be able to refresh it, and
+   * that includes the bookkeeper, whose page this is. Membership only widens:
+   * CAN_EDIT_INVOICES is a strict subset of CAN_MANAGE_QUICKBOOKS, so no
+   * caller who could sync before loses the ability.
+   */
+  requireQuickBooksAccess: RequestHandler;
   makeRequest: QbMakeRequestFn;
   getQbIntegration: (companyId: string) => Promise<{
     realmId: string;
@@ -443,7 +449,7 @@ export function registerQbPaymentSyncRoutes(
   app: Express,
   deps: RegisterQbPaymentSyncRoutesDeps,
 ): void {
-  const { requireAuthentication, requireInvoiceWrite, makeRequest, getQbIntegration, apiBase } = deps;
+  const { requireAuthentication, requireQuickBooksAccess, makeRequest, getQbIntegration, apiBase } = deps;
 
   // Hydrate the in-memory throttle map from app_settings on startup so that
   // a server restart doesn't let every company trigger a full QBO batch query
@@ -457,7 +463,7 @@ export function registerQbPaymentSyncRoutes(
   app.post(
     "/api/invoices/sync-payment-status",
     requireAuthentication,
-    requireInvoiceWrite,
+    requireQuickBooksAccess,
     async (req: any, res) => {
       try {
         const role: string | undefined = req.authenticatedUserRole;

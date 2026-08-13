@@ -7390,7 +7390,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Task #1443 — per-invoice QuickBooks sync/resync (post-merge).
   registerInvoiceSyncQuickbooksRoutes(app, {
     requireAuthentication,
-    requireInvoiceWrite,
+    requireQuickBooksAccess,
     createQuickBooksInvoice: createQuickBooksInvoiceForInvoice,
   });
   // Task #1438 — mark an invoice sent / unsent (records delivery, no email).
@@ -7442,7 +7442,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Reads Balance from QBO for active QBO-linked invoices; stamps payment_status / balance.
   registerQbPaymentSyncRoutes(app, {
     requireAuthentication,
-    requireInvoiceWrite,
+    requireQuickBooksAccess,
     makeRequest: makeQuickBooksRequest,
     apiBase:
       process.env.NODE_ENV === "production"

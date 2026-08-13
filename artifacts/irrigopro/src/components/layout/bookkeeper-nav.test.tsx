@@ -244,8 +244,11 @@ describe("customer-profile Billing Details tab visibility", () => {
   };
 
   it.each([
-    ["button-sync-quickbooks-invoice", "canBillingEdit"],
-    ["button-resync-quickbooks-invoice", "canBillingEdit"],
+    // Task #1942 — the QuickBooks push answers to CAN_MANAGE_QUICKBOOKS along
+    // with the rest of the QuickBooks surface; nothing about the IrrigoPro
+    // invoice changes when it runs.
+    ["button-sync-quickbooks-invoice", "canManageQuickBooks"],
+    ["button-resync-quickbooks-invoice", "canManageQuickBooks"],
     ["button-void-invoice", "canBillingEdit"],
     ["button-finalize-invoice", "canBillingEdit"],
     ["button-return-to-draft-invoice", "canBillingEdit"],

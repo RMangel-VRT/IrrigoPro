@@ -1,10 +1,11 @@
 import { Fragment, useState, useMemo, useEffect, useRef } from "react";
-import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
-import { Link, useLocation, useSearch } from "wouter";
+import { useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { useLocation, useSearch } from "wouter";
 import {
   hasCapability,
   usesUiDefault,
   CAN_EDIT_INVOICES,
+  CAN_MANAGE_QUICKBOOKS,
   CAN_READ_AR_NOTES,
   CAN_SEND_INVOICE_EMAIL,
   CAN_VIEW_REMINDER_HISTORY,
@@ -51,16 +52,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-  Search,
   Calendar,
   FileText,
   CheckCircle2,
   RefreshCw,
   Loader2,
   AlertCircle,
-  ChevronLeft,
   ChevronDown,
-  DollarSign,
   ClipboardList,
   Download,
   GitMerge,
@@ -99,6 +97,37 @@ import {
 } from "@/components/billing/invoice-line-items";
 import { BatchReminderDialog } from "@/components/billing/batch-reminder-dialog";
 import { FinancialPulseWidget } from "@/components/financial-pulse/financial-pulse-widget";
+// Task #1942 — the AR-first layout. Each of these owns one band of the page:
+// the header's totals, the aging strip, the collapsed filter bar, and the one
+// named action on a row.
+import { InvoicePageHeader } from "@/components/billing/invoice-page-header";
+import {
+  InvoiceAgingStrip,
+  agingTotalsForView,
+  type AgingSummary,
+} from "@/components/billing/invoice-aging-strip";
+import { InvoiceFilterBar } from "@/components/billing/invoice-filter-bar";
+import {
+  InvoicePrimaryAction,
+  type ReminderEligibility,
+  type ReminderEligibilityResponse,
+} from "@/components/billing/invoice-primary-action";
+import { formatCurrency } from "@/lib/format-currency";
+// Task #1942 — the A/R query model moved out of this file so the filter bar,
+// the strip and the header can share it without importing the page.
+import {
+  AR_SORT_LABELS,
+  BUCKET_TO_AGING_VALUE,
+  COLLECTIONS_DEFAULT_QUERY,
+  EMPTY_AR_QUERY,
+  agingSummaryParams,
+  arQueryToParams,
+  isEmptyArQuery,
+  readArQuery,
+  type AgingFilter,
+  type ArQuery,
+  type ArSortKey,
+} from "@/lib/invoice-ar-query";
 import { exportSingleInvoiceCsv } from "@/lib/invoice-csv";
 import { safeGet } from "@/utils/safeStorage";
 
@@ -115,18 +144,33 @@ function parseApiErrorCode(err: Error): string | null {
   }
 }
 
-// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability). Inventory: docs/roles-migration-inventory.md
-const CSV_EXPORT_ROLES = new Set([
-  "company_admin",
-  "billing_manager",
-]);
-
 function getCurrentUserRole(): string | null {
   try {
     const raw = safeGet("user");
     if (!raw) return null;
     const u = JSON.parse(raw);
     return typeof u?.role === "string" ? u.role : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Task #1942 — the company the aging aggregate should be summed over.
+ *
+ * Sent whenever the session carries one, for every role. The server scopes
+ * ordinary callers from their own session and ignores the parameter; only
+ * `super_admin`, who has no implicit company, actually needs it (the endpoint
+ * returns 400 rather than summing across every company). Deciding that here
+ * would mean a role comparison in this page, and the page holds none: the
+ * scoping rule is the server's to enforce, not the client's to predict.
+ */
+function getCurrentUserCompanyId(): number | null {
+  try {
+    const raw = safeGet("user");
+    if (!raw) return null;
+    const u = JSON.parse(raw);
+    return typeof u?.companyId === "number" ? u.companyId : null;
   } catch {
     return null;
   }
@@ -212,11 +256,6 @@ function generateMonthOptions() {
     months.push({ value, label });
   }
   return months;
-}
-
-function formatCurrency(amount: string | number) {
-  const num = typeof amount === "string" ? parseFloat(amount) : amount;
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(num);
 }
 
 function formatDate(date: string) {
@@ -309,7 +348,22 @@ function getStatusBadge(status: string) {
     case "cancelled":
       return <Badge className="bg-gray-100 text-gray-500">Cancelled</Badge>;
     default:
-      return <Badge className="bg-gray-100 text-gray-800">{status}</Badge>;
+      // Task #1942 — never print the raw column value.
+      //
+      // The old default rendered `status` verbatim, which is how a database
+      // string ("sent") ended up on screen beside the Sent badge that replaced
+      // it, reading as two different facts about the same invoice. A status
+      // this badge does not know about is a data problem, and it says so
+      // rather than dressing the raw string up as a label.
+      return (
+        <Badge
+          className="border border-amber-300 bg-amber-50 text-amber-800"
+          title={`This invoice carries a status this screen does not recognise. Report it — the raw value is "${status}".`}
+          data-testid="status-badge-unknown"
+        >
+          Unknown status
+        </Badge>
+      );
   }
 }
 
@@ -402,49 +456,6 @@ function SortableHeader({
       </button>
     </TableHead>
   );
-}
-
-// Task #708 — A/R aging filter values mirror the
-// `/api/financial-pulse/ar-aging` bucket keys (with `days90Plus`
-// matching the inclusive 60+ bucket). The mapping lives here so the
-// widget can deep-link via `?aging=`.
-// Task #1833 — labels updated to "days past due" framing to match
-// the updated computeArAging bucket labels.
-// Task #1890 — labels now come from AGING_BUCKET_LABELS so this control, the
-// Financial Pulse widget and the server all name a bucket identically, and a
-// new `overdue` value covers "anything at or past due". `overdue` is an
-// addition to this same parameter, NOT a second one: the collections landing
-// default and the widget's deep links share one `?aging=`.
-type AgingFilter = "all" | "current" | "days30" | "days60" | "days90Plus" | "overdue";
-const AGING_OPTIONS: { value: AgingFilter; label: string }[] = [
-  { value: "all", label: "All ages" },
-  { value: "overdue", label: "Any overdue" },
-  { value: "current", label: "Not yet due" },
-  { value: "days30", label: AGING_BUCKET_LABELS.days30 },
-  { value: "days60", label: AGING_BUCKET_LABELS.days60 },
-  { value: "days90Plus", label: AGING_BUCKET_LABELS.days90 },
-];
-
-/** Bucket key (as the server reports it) → the wire value of this filter. */
-const BUCKET_TO_AGING_VALUE: Record<AgingBucketKey, AgingFilter> = {
-  current: "current",
-  days30: "days30",
-  days60: "days60",
-  days90: "days90Plus",
-};
-
-function parseAging(search: string): AgingFilter {
-  const v = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search).get("aging");
-  if (
-    v === "current" ||
-    v === "days30" ||
-    v === "days60" ||
-    v === "days90Plus" ||
-    v === "overdue"
-  ) {
-    return v;
-  }
-  return "all";
 }
 
 // Same exclusion set as `computeOutstandingAr` — paid / draft /
@@ -613,146 +624,6 @@ function ArNoteIndicator({
     </span>
   );
 }
-type ArSortKey =
-  | "balanceDue"
-  | "effectiveDueDate"
-  | "daysOverdue"
-  | "agingBucket"
-  | "paymentStatus"
-  | "sent";
-
-const AR_SORT_KEYS: readonly ArSortKey[] = [
-  "balanceDue",
-  "effectiveDueDate",
-  "daysOverdue",
-  "agingBucket",
-  "paymentStatus",
-  "sent",
-];
-
-type PaymentStatusFilter = "all" | "unpaid" | "partially_paid" | "paid";
-type SentFilter = "all" | "sent" | "unsent";
-/** Task #1887 — filters on the server, over every invoice, not the loaded page. */
-type ReminderFilter = "all" | "never" | "last7" | "last30" | "last60" | "thrice";
-
-const REMINDER_FILTER_LABELS: Record<ReminderFilter, string> = {
-  all: "Any",
-  never: "Never reminded",
-  last7: "Reminded in last 7 days",
-  last30: "Reminded in last 30 days",
-  last60: "Reminded in last 60 days",
-  thrice: "Reminded 3+ times",
-};
-
-interface ArQuery {
-  aging: AgingFilter;
-  paymentStatus: PaymentStatusFilter;
-  sent: SentFilter;
-  reminders: ReminderFilter;
-  customerId: string;
-  dateFrom: string;
-  dateTo: string;
-  amountMin: string;
-  amountMax: string;
-  flagged: boolean;
-  sort: ArSortKey | null;
-  dir: SortDir;
-}
-
-const EMPTY_AR_QUERY: ArQuery = {
-  aging: "all",
-  paymentStatus: "all",
-  sent: "all",
-  reminders: "all",
-  customerId: "",
-  dateFrom: "",
-  dateTo: "",
-  amountMin: "",
-  amountMax: "",
-  flagged: false,
-  sort: null,
-  dir: "desc",
-};
-
-/**
- * The collections landing view: unpaid and overdue, oldest bucket first with
- * the biggest balance first inside it. Expressed as a URL rather than a
- * separate route, so there is still exactly one canonical invoice list.
- */
-const COLLECTIONS_DEFAULT_QUERY: ArQuery = {
-  ...EMPTY_AR_QUERY,
-  aging: "overdue",
-  paymentStatus: "unpaid",
-  sort: "agingBucket",
-  dir: "desc",
-};
-
-function readArQuery(search: string): ArQuery {
-  const p = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
-  const ps = p.get("paymentStatus");
-  const sent = p.get("sent");
-  const sort = p.get("sort");
-  const rem = p.get("reminders");
-  return {
-    aging: parseAging(search),
-    paymentStatus:
-      ps === "unpaid" || ps === "partially_paid" || ps === "paid" ? ps : "all",
-    sent: sent === "sent" || sent === "unsent" ? sent : "all",
-    reminders:
-      rem === "never" || rem === "last7" || rem === "last30" || rem === "last60" || rem === "thrice"
-        ? rem
-        : "all",
-    customerId: p.get("customerId") ?? "",
-    dateFrom: p.get("dateFrom") ?? "",
-    dateTo: p.get("dateTo") ?? "",
-    amountMin: p.get("amountMin") ?? "",
-    amountMax: p.get("amountMax") ?? "",
-    flagged: p.get("flagged") === "1",
-    sort: AR_SORT_KEYS.includes(sort as ArSortKey) ? (sort as ArSortKey) : null,
-    dir: p.get("dir") === "asc" ? "asc" : "desc",
-  };
-}
-
-/** Only non-default values are written, so a clean view has a clean URL. */
-function arQueryToParams(q: ArQuery): URLSearchParams {
-  const p = new URLSearchParams();
-  if (q.aging !== "all") p.set("aging", q.aging);
-  if (q.paymentStatus !== "all") p.set("paymentStatus", q.paymentStatus);
-  if (q.sent !== "all") p.set("sent", q.sent);
-  if (q.reminders !== "all") p.set("reminders", q.reminders);
-  if (q.customerId) p.set("customerId", q.customerId);
-  if (q.dateFrom) p.set("dateFrom", q.dateFrom);
-  if (q.dateTo) p.set("dateTo", q.dateTo);
-  if (q.amountMin) p.set("amountMin", q.amountMin);
-  if (q.amountMax) p.set("amountMax", q.amountMax);
-  if (q.flagged) p.set("flagged", "1");
-  if (q.sort) {
-    p.set("sort", q.sort);
-    p.set("dir", q.dir);
-  }
-  return p;
-}
-
-/** True when nothing is narrowing or reordering the list. */
-function isEmptyArQuery(q: ArQuery): boolean {
-  return arQueryToParams(q).toString() === "";
-}
-
-/**
- * Balance, due, days overdue, aging, payment, sent, flags, and the two
- * reminder columns. Used to span them in the version-history rows.
- */
-const AR_COLUMN_COUNT = 9;
-
-const AR_SORT_LABELS: Record<ArSortKey, string> = {
-  balanceDue: "Balance due",
-  effectiveDueDate: "Due",
-  daysOverdue: "Days overdue",
-  agingBucket: "Aging",
-  paymentStatus: "Payment",
-  sent: "Sent",
-};
-
 /**
  * A column header that drives the SERVER-side sort via the URL, as opposed to
  * `SortableHeader`, which sorts the loaded rows inside their month group.
@@ -800,8 +671,6 @@ function ArSortableHeader({
 
 export default function InvoicesPage() {
   const { toast } = useToast();
-  const [searchTerm, setSearchTerm] = useState("");
-  const [monthFilter, setMonthFilter] = useState("all");
   // Task #708 — deep-linked A/R aging filter, driven by `?aging=` in
   // the URL when arriving from the FP A/R Aging widget. The
   // `useSearch()` hook from wouter is reactive to query-string
@@ -822,7 +691,41 @@ export default function InvoicesPage() {
     const qs = arQueryToParams(next).toString();
     setLocation(qs ? `/invoices?${qs}` : "/invoices");
   };
-  const patchArQuery = (patch: Partial<ArQuery>) => setArQuery({ ...arQuery, ...patch });
+  // Patches merge against the URL as it is when the patch runs, not as it was
+  // when the callback was created. The debounced search below writes up to
+  // 250 ms after the keystroke, and in that window the reader may have picked
+  // an aging card or a month; a render-time closure would carry the older
+  // query and quietly drop that filter, leaving the rows, the aggregate and
+  // select-all describing a set nobody asked for.
+  const arQueryRef = useRef(arQuery);
+  arQueryRef.current = arQuery;
+  const patchArQuery = (patch: Partial<ArQuery>) =>
+    setArQuery({ ...arQueryRef.current, ...patch });
+
+  // Task #1942 — the search box echoes locally so typing stays responsive,
+  // but the value that filters anything lives in the URL and is applied by
+  // the server. See the note on `ArQuery.search`: a browser-only narrowing
+  // makes the header total, the aging strip and a multi-page select-all each
+  // describe a wider set than the table shows. The debounce below only
+  // decides how often we ask the server, never which rows a user is looking
+  // at when they act on a selection.
+  const [searchInput, setSearchInput] = useState(() => arQuery.search);
+  const pushedSearchRef = useRef(arQuery.search);
+  useEffect(() => {
+    // A change we did not make — a chip removal, a deep link, Clear all.
+    if (arQuery.search === pushedSearchRef.current) return;
+    pushedSearchRef.current = arQuery.search;
+    setSearchInput(arQuery.search);
+  }, [arQuery.search]);
+  useEffect(() => {
+    const next = searchInput.trim();
+    if (next === arQuery.search) return;
+    const t = setTimeout(() => {
+      pushedSearchRef.current = next;
+      patchArQuery({ search: next });
+    }, 250);
+    return () => clearTimeout(t);
+  }, [searchInput, arQuery.search]);
 
   const [sort, setSort] = useState<SortState | null>(null);
   const [cancelledExpanded, setCancelledExpanded] = useState(false);
@@ -854,7 +757,12 @@ export default function InvoicesPage() {
   const [auditInvoice, setAuditInvoice] = useState<{ id: number; label: string; total: string } | null>(null);
   const [exportingInvoiceId, setExportingInvoiceId] = useState<number | null>(null);
   const userRole = getCurrentUserRole();
-  const canExportSingleCsv = !!userRole && CSV_EXPORT_ROLES.has(userRole);
+  // Task #1942 — the last role-string comparison on this page is gone. The
+  // single-invoice CSV carries the invoice's cost and margin breakdown and is
+  // built from `/api/invoices/:id/audit`, so it is gated on the capability
+  // that already governs cost visibility rather than on a hand-written role
+  // list that no server guard corresponds to.
+  const canExportSingleCsv = hasCapability(userRole, CAN_VIEW_COSTS);
   // Task #1886 — these were one shared MERGE_ROLES set; they are now two
   // distinct capabilities, because the bookkeeper may send an invoice but may
   // not change one. Mirrors requireInvoiceSend / requireInvoiceWrite server-side.
@@ -879,6 +787,14 @@ export default function InvoicesPage() {
   // gaining the power to send one — the POST stays behind the send capability.
   const canReadReminderHistory = hasCapability(userRole, CAN_VIEW_REMINDER_HISTORY);
   const canReadArNotes = hasCapability(userRole, CAN_READ_AR_NOTES);
+  // Task #1942 — who is answerable for the QuickBooks connection: shown its
+  // freshness, and allowed to refresh it. The sync endpoint was re-gated to
+  // match (`requireQuickBooksAccess`), so the pill and the button now sit on
+  // one capability and neither can 403. Copying QuickBooks' own payment state
+  // back is not authoring an invoice, and the bookkeeper — whose page this is
+  // — is the person who does it. See
+  // docs/audits/invoice-page-capability-audit-2026-08.md.
+  const canManageQuickBooks = hasCapability(userRole, CAN_MANAGE_QUICKBOOKS);
 
   // Task #1890 — the collections landing default.
   //
@@ -1057,7 +973,19 @@ export default function InvoicesPage() {
   // across every invoice before slicing a page. The query string is part of
   // the cache key so changing a filter refetches from offset 0 rather than
   // re-filtering whatever happened to be loaded.
-  const arParams = useMemo(() => arQueryToParams(arQuery).toString(), [arQuery]);
+  // Task #1942 — the company scope travels with EVERY request this page makes,
+  // list and aggregate alike, so the two always describe the same population.
+  // The server ignores it for a scoped role and honours it for a super_admin;
+  // sending it to only one of the two endpoints is what produced a
+  // single-company total printed over a cross-company list.
+  const companyScopeParam = useMemo(() => {
+    const companyId = getCurrentUserCompanyId();
+    return companyId != null ? `companyId=${encodeURIComponent(String(companyId))}` : "";
+  }, []);
+  const arParams = useMemo(() => {
+    const base = arQueryToParams(arQuery).toString();
+    return [base, companyScopeParam].filter(Boolean).join("&");
+  }, [arQuery, companyScopeParam]);
   const {
     data: invoicePages,
     isLoading,
@@ -1083,6 +1011,59 @@ export default function InvoicesPage() {
   const invoices = useMemo<Invoice[]>(
     () => invoicePages?.pages.flatMap((p) => p.rows) ?? [],
     [invoicePages],
+  );
+  /**
+   * The POST-filter total the server reports, NOT `invoices.length`.
+   *
+   * With 50-row pages the loaded array is the first page until the reader asks
+   * for more, so counting it would report "50 invoices" for a filter matching
+   * three hundred.
+   */
+  const filteredInvoiceTotal = invoicePages?.pages[0]?.total ?? null;
+
+  // Task #1942 — the aging aggregate behind the strip and the header total.
+  //
+  // Server-computed over the whole filtered set. The header used to sum the
+  // loaded rows, which is the same error class #1890 fixed by moving filtering
+  // and sorting server-side: with more than one page of results a client sum
+  // reports the first page's balance and calls it the outstanding balance.
+  //
+  // `?aging=` is deliberately dropped from the request (see
+  // `agingSummaryParams`) — a strip re-filtered by the bucket already selected
+  // would show one populated card and three zeroes.
+  const agingParams = useMemo(() => {
+    const p = new URLSearchParams(agingSummaryParams(arQuery));
+    for (const [k, v] of new URLSearchParams(companyScopeParam)) p.set(k, v);
+    return p.toString();
+  }, [arQuery, companyScopeParam]);
+  const {
+    data: agingSummary,
+    isLoading: agingSummaryLoading,
+    error: agingSummaryError,
+  } = useQuery<AgingSummary>({
+    // Keyed UNDER the list's own key on purpose. Every mutation on this page
+    // already invalidates ["/api/invoices"], and TanStack Query matches keys
+    // by prefix, so the aggregate refetches with the rows. A sibling key would
+    // leave the header and the strip quoting pre-sync totals over refreshed
+    // rows until something unrelated happened to refetch them.
+    queryKey: ["/api/invoices", "aging-summary", agingParams],
+    queryFn: async () => {
+      const res = await fetch(
+        `/api/invoices/aging-summary${agingParams ? `?${agingParams}` : ""}`,
+      );
+      if (!res.ok) throw new Error("Failed to load aging summary");
+      return (await res.json()) as AgingSummary;
+    },
+  });
+
+  // The header's balance and count, both drawn from the aggregate so they
+  // describe one population — see `agingTotalsForView`. The list's own total
+  // (`filteredInvoiceTotal`) counts every row the table shows, paid and voided
+  // included, and is used where that is the right question: the select-all
+  // banner, which is about rows.
+  const agingTotals = useMemo(
+    () => agingTotalsForView(agingSummary, arQuery.aging),
+    [agingSummary, arQuery.aging],
   );
 
   // Task #1443 — sync/re-sync a single invoice to QuickBooks. A re-sync
@@ -1367,21 +1348,9 @@ export default function InvoicesPage() {
   const filteredInvoices = useMemo(() => {
     let result = [...invoices];
 
-    if (searchTerm.trim()) {
-      const q = searchTerm.toLowerCase();
-      result = result.filter(
-        (inv) =>
-          inv.customerName.toLowerCase().includes(q) ||
-          inv.invoiceNumber.toLowerCase().includes(q)
-      );
-    }
-
-    if (monthFilter !== "all") {
-      const [filterYear, filterMonth] = monthFilter.split("-").map(Number);
-      result = result.filter(
-        (inv) => inv.invoiceYear === filterYear && inv.invoiceMonth === filterMonth
-      );
-    }
+    // Task #1942 — search and billing month are applied by the server now, so
+    // they are absent here on purpose: the rows, the header total, the aging
+    // strip and a select-all across pages all answer the same question.
 
     if (agingFilter !== "all") {
       const now = new Date();
@@ -1389,7 +1358,7 @@ export default function InvoicesPage() {
     }
 
     return result;
-  }, [invoices, searchTerm, monthFilter, agingFilter]);
+  }, [invoices, agingFilter]);
 
   // Split into active (non-cancelled) and cancelled for separate display.
   // Cancelled invoices are excluded from all totals and the main table;
@@ -1430,6 +1399,45 @@ export default function InvoicesPage() {
   // millisecond apart and disagree about the same boundary.
   const nowForAr = useMemo(() => new Date(), [invoices]);
 
+  // Task #1942 — what each row's primary action is allowed to be.
+  //
+  // The label and the disabled state are the server's answer, read from the
+  // same refusal payload the send route itself would produce. Re-deriving
+  // "can this be reminded?" in the client is how a button comes to promise
+  // something the endpoint then refuses: the throttle window, the missing PDF
+  // and the missing customer email all live server-side, and only one of the
+  // three is even visible on the row.
+  //
+  // The endpoint caps a request at 100 ids, so the loaded rows are asked for
+  // in chunks rather than one request per row.
+  const ELIGIBILITY_CHUNK = 100;
+  const eligibilityChunks = useMemo(() => {
+    if (!canMarkSent) return [] as number[][];
+    const ids = activeFilteredInvoices.map((inv) => inv.id);
+    const chunks: number[][] = [];
+    for (let i = 0; i < ids.length; i += ELIGIBILITY_CHUNK) {
+      chunks.push(ids.slice(i, i + ELIGIBILITY_CHUNK));
+    }
+    return chunks;
+  }, [activeFilteredInvoices, canMarkSent]);
+  const eligibilityQueries = useQueries({
+    queries: eligibilityChunks.map((ids) => ({
+      queryKey: ["/api/invoices/reminder-eligibility", ids.join(",")],
+      queryFn: async (): Promise<ReminderEligibilityResponse> => {
+        const res = await fetch(`/api/invoices/reminder-eligibility?ids=${ids.join(",")}`);
+        if (!res.ok) throw new Error("Failed to load reminder eligibility");
+        return (await res.json()) as ReminderEligibilityResponse;
+      },
+    })),
+  });
+  const eligibilityById = new Map<number, ReminderEligibility>();
+  for (const q of eligibilityQueries) {
+    for (const row of q.data?.rows ?? []) eligibilityById.set(row.invoiceId, row);
+  }
+  /** Undefined until the answer arrives — the button stays inert until then. */
+  const eligibilityFor = (invoiceId: number): ReminderEligibility | undefined =>
+    eligibilityById.get(invoiceId);
+
   // Customer options for the A/R filter, accumulated from every invoice seen
   // so far. Deliberately not a separate /api/customers fetch: the bookkeeper's
   // landing page should not fire a request she may not be allowed to make, and
@@ -1443,103 +1451,267 @@ export default function InvoicesPage() {
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
   }, [invoices]);
 
+  // ── Task #1942 — the five-column row ──────────────────────────────────────
+  //
+  // The old row was fifteen columns wide and scrolled sideways: balance, due,
+  // days overdue, bucket, payment status, sent, flags and two reminder columns
+  // each had their own header, and every action lived in a kebab. Nine columns
+  // of A/R are now three cells — who owes it, how much and how late, and where
+  // it stands — with one named action at the end. Nothing was dropped; each
+  // fact moved into the cell it belongs to, and its test id moved with it.
+
   /**
-   * The A/R block of a desktop row: balance, due date, days overdue, bucket,
-   * payment status, sent, flags, and the two inert reminder columns.
-   * Kept as one function so the column count here and `AR_COLUMN_COUNT` in the
-   * history rows cannot drift.
+   * Who owes it, which invoice, when it was due. Also carries the version
+   * history toggle and the note indicator, which are both statements about
+   * this invoice's identity rather than its money.
    */
-  const renderArCells = (invoice: Invoice) => {
+  const renderInvoiceCell = (invoice: Invoice, history: Invoice[], isExpanded: boolean) => {
+    const mergedCount = history.filter((p) => p.status === "merged").length;
+    return (
+      <TableCell className="max-w-[300px]">
+        <div className="flex items-center gap-1.5">
+          <span className="truncate font-medium text-gray-900">{invoice.customerName}</span>
+          {/* Task #1889 — a conversation is already in flight on this invoice.
+              Absent entirely for a role the server strips the data for. */}
+          <ArNoteIndicator invoice={invoice} />
+        </div>
+        <div className="mt-0.5 flex flex-wrap items-center gap-1 text-xs text-gray-500">
+          <span className="whitespace-nowrap">#{invoice.invoiceNumber}</span>
+          {(invoice.revision ?? 1) > 1 && (
+            <span className="rounded bg-amber-100 px-1 py-0.5 font-medium text-amber-700">
+              Rev {invoice.revision}
+            </span>
+          )}
+          {mergedCount > 0 && (
+            <span className="rounded bg-purple-100 px-1 py-0.5 font-medium text-purple-700">
+              Merged from {mergedCount}
+            </span>
+          )}
+          <span aria-hidden="true" className="text-gray-300">
+            ·
+          </span>
+          <span className="whitespace-nowrap" data-testid={`ar-due-${invoice.id}`}>
+            {invoice.effectiveDueDate ? `Due ${formatDate(invoice.effectiveDueDate)}` : "No due date"}
+          </span>
+          {history.length > 0 && (
+            <button
+              type="button"
+              onClick={() => toggleHistory(invoice.id)}
+              className="ml-1 flex items-center gap-0.5 text-gray-400 hover:text-gray-600"
+              title={isExpanded ? "Hide version history" : "Show version history"}
+              aria-label={
+                isExpanded
+                  ? "Hide version history"
+                  : `Show ${history.length} prior version${history.length !== 1 ? "s" : ""}`
+              }
+            >
+              <ChevronDown
+                className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+              />
+              {history.length}
+            </button>
+          )}
+        </div>
+      </TableCell>
+    );
+  };
+
+  /**
+   * What is owed and how late it is. The balance is the figure a bookkeeper
+   * chases, so it leads; days overdue sits under it in a danger treatment
+   * because "how late" is the second question, never the first.
+   */
+  const renderBalanceCell = (invoice: Invoice) => {
     const bucket = agingBucketOf(invoice, nowForAr);
     const dpd = daysPastDue(invoice, nowForAr);
     const fallback = balanceIsFallbackOf(invoice);
-    const paymentStatus = invoice.paymentStatus ?? "unpaid";
     return (
-      <>
-        <TableCell className="text-right whitespace-nowrap">
-          <span
-            className={fallback ? "text-gray-500" : "font-semibold text-gray-900"}
-            title={
-              fallback
-                ? "No payment balance has been synced from QuickBooks for this invoice, so the invoice total is shown instead. It may not reflect payments already received."
-                : `Balance last synced from QuickBooks${invoice.paymentSyncedAt ? ` on ${formatDate(invoice.paymentSyncedAt)}` : ""}.`
-            }
-            data-testid={`ar-balance-${invoice.id}`}
-          >
-            {formatCurrency(balanceDueOf(invoice))}
-          </span>
-        </TableCell>
-        <TableCell
-          className="text-xs text-gray-600 whitespace-nowrap"
-          data-testid={`ar-due-${invoice.id}`}
+      <TableCell className="text-right whitespace-nowrap align-top">
+        <div
+          className={fallback ? "text-gray-500" : "font-semibold text-gray-900"}
+          title={
+            fallback
+              ? "No payment balance has been synced from QuickBooks for this invoice, so the invoice total is shown instead. It may not reflect payments already received."
+              : `Balance last synced from QuickBooks${invoice.paymentSyncedAt ? ` on ${formatDate(invoice.paymentSyncedAt)}` : ""}.`
+          }
+          data-testid={`ar-balance-${invoice.id}`}
         >
-          {invoice.effectiveDueDate ? formatDate(invoice.effectiveDueDate) : "—"}
-        </TableCell>
-        <TableCell
-          className="text-right text-xs whitespace-nowrap"
-          data-testid={`ar-days-overdue-${invoice.id}`}
-        >
+          {formatCurrency(balanceDueOf(invoice))}
+          {fallback && (
+            <span
+              className="ml-1 text-xs font-normal text-amber-700"
+              title="No payment sync has run for this invoice."
+            >
+              (unsynced)
+            </span>
+          )}
+        </div>
+        <div className="mt-0.5 text-xs" data-testid={`ar-days-overdue-${invoice.id}`}>
           {bucket === "current" ? (
-            <span className="text-gray-300">—</span>
+            <span className="text-gray-400">Not yet due</span>
           ) : (
-            <span className="font-medium text-red-700">{Math.max(0, Math.floor(dpd))}</span>
+            <span className="font-medium text-red-700">
+              {Math.max(0, Math.floor(dpd))} days overdue
+            </span>
           )}
-        </TableCell>
-        <TableCell className="text-xs whitespace-nowrap" data-testid={`ar-bucket-${invoice.id}`}>
+        </div>
+        <div className="sr-only" data-testid={`ar-bucket-${invoice.id}`}>
           {AGING_BUCKET_LABELS[bucket]}
-        </TableCell>
-        <TableCell
-          className="text-xs whitespace-nowrap"
-          data-testid={`ar-payment-status-${invoice.id}`}
-        >
-          {PAYMENT_STATUS_LABELS[paymentStatus] ?? paymentStatus}
-        </TableCell>
-        <TableCell className="text-xs whitespace-nowrap" data-testid={`ar-sent-${invoice.id}`}>
-          {invoice.sentAt ? formatDate(invoice.sentAt) : <span className="text-gray-400">Not sent</span>}
-        </TableCell>
-        <TableCell className="max-w-[220px]">
-          <ArFlagBadges invoice={invoice} now={nowForAr} />
-        </TableCell>
-        {/* Task #1887 — real reminder data. Delivered reminders only. */}
-        <TableCell
-          className="text-xs whitespace-nowrap"
-          data-testid={`ar-last-reminder-${invoice.id}`}
-        >
-          {invoice.lastReminderAt ? (
-            formatDate(invoice.lastReminderAt)
-          ) : (
-            <span className="text-gray-400">Never</span>
+        </div>
+      </TableCell>
+    );
+  };
+
+  /**
+   * Two lines: where the money stands, then what has already been done about
+   * it. Every badge and flag the old row spread across four columns lands
+   * here, which is what makes one glance enough to decide whether this row
+   * needs chasing.
+   */
+  const renderStatusCell = (invoice: Invoice) => {
+    const paymentStatus = invoice.paymentStatus ?? "unpaid";
+    const reminderCount = invoice.reminderCount ?? 0;
+    return (
+      <TableCell className="max-w-[300px] align-top">
+        {/* Line 1 — the money state. */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {getStatusBadge(invoice.status)}
+          {invoice.isOverdue && (
+            <Badge className="bg-red-100 text-red-800 text-xs" data-testid={`overdue-badge-${invoice.id}`}>
+              Overdue
+            </Badge>
           )}
-        </TableCell>
-        <TableCell className="text-xs whitespace-nowrap">
-          <button
-            type="button"
-            className="text-blue-600 hover:underline"
-            title="Open the invoice to send a payment reminder and see its history."
-            onClick={() =>
+          {invoice.paymentStatus === "partially_paid" && (
+            <Badge className="bg-amber-100 text-amber-800 text-xs" data-testid={`partial-badge-${invoice.id}`}>
+              Partial
+            </Badge>
+          )}
+          {invoice.paymentSyncedAt && invoice.paymentStatus === "unpaid" && !invoice.qbVoidDetectedAt && (
+            <Badge className="bg-gray-100 text-gray-700 text-xs" data-testid={`unpaid-badge-${invoice.id}`}>
+              Unpaid
+            </Badge>
+          )}
+          {invoice.qbVoidDetectedAt && (
+            <Badge
+              className="bg-orange-100 text-orange-800 border border-orange-300 text-xs cursor-help"
+              title="This invoice was voided in QuickBooks but is still open in IrrigoPro. Void it here or restore it in QuickBooks."
+              data-testid={`qb-voided-badge-${invoice.id}`}
+            >
+              <AlertCircle className="w-3 h-3 mr-1" />
+              Voided in QB
+            </Badge>
+          )}
+          {renderQbIcon(invoice)}
+          <span className="sr-only" data-testid={`ar-payment-status-${invoice.id}`}>
+            {PAYMENT_STATUS_LABELS[paymentStatus] ?? paymentStatus}
+          </span>
+        </div>
+        {/* Line 2 — the action history: what has already been done. */}
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
+          <span data-testid={`ar-sent-${invoice.id}`}>
+            {invoice.sentAt ? `Sent ${formatDate(invoice.sentAt)}` : "Not sent"}
+          </span>
+          <span aria-hidden="true" className="text-gray-300">
+            ·
+          </span>
+          {/* Task #1887 — real reminder data. Delivered reminders only. */}
+          <span data-testid={`ar-last-reminder-${invoice.id}`}>
+            {invoice.lastReminderAt
+              ? `Reminded ${formatDate(invoice.lastReminderAt)}${reminderCount > 1 ? ` (${reminderCount}×)` : ""}`
+              : "No reminders"}
+          </span>
+          <ArFlagBadges invoice={invoice} now={nowForAr} />
+        </div>
+      </TableCell>
+    );
+  };
+
+  /**
+   * One named action, then the two one-click reads, then everything else.
+   *
+   * The primary button's label and enabled state are the server's answer, not
+   * a guess assembled here — see `InvoicePrimaryAction`. PDF and QuickBooks
+   * re-sync are inline because they are the two things done most often and
+   * neither needs a confirmation; everything destructive or state-changing
+   * stays in the kebab behind the confirmation it already had.
+   */
+  const renderActionCell = (invoice: Invoice) => (
+    <TableCell className="text-right align-top">
+      <div className="flex items-center justify-end gap-1">
+        {canMarkSent && (
+          <InvoicePrimaryAction
+            invoiceId={invoice.id}
+            eligibility={eligibilityFor(invoice.id)}
+            now={nowForAr}
+            onSendInvoice={() =>
               setPdfModal({
                 id: invoice.id,
                 number: invoice.invoiceNumber,
                 email: invoice.customerEmail,
               })
             }
-            data-testid={`ar-reminder-action-${invoice.id}`}
+            onRemind={() => {
+              // Reuses the #1888 confirmation flow with a single invoice in it
+              // rather than opening a second, one-off send path.
+              setSelectedIds(new Set([invoice.id]));
+              setBatchReminderOpen(true);
+            }}
+          />
+        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 text-gray-500 hover:text-gray-900"
+          title={`View PDF for invoice ${invoice.invoiceNumber}`}
+          aria-label={`View PDF for invoice ${invoice.invoiceNumber}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            window.open(`/api/invoices/${invoice.id}/pdf`, "_blank");
+          }}
+          data-testid={`button-view-pdf-inline-${invoice.id}`}
+        >
+          <FileText className="w-4 h-4" />
+        </Button>
+        {canManageQuickBooks && invoice.status !== "draft" && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-gray-500 hover:text-gray-900"
+            title={
+              invoice.quickbooksInvoiceId
+                ? `Re-sync invoice ${invoice.invoiceNumber} to QuickBooks`
+                : `Sync invoice ${invoice.invoiceNumber} to QuickBooks`
+            }
+            aria-label={
+              invoice.quickbooksInvoiceId
+                ? `Re-sync invoice ${invoice.invoiceNumber} to QuickBooks`
+                : `Sync invoice ${invoice.invoiceNumber} to QuickBooks`
+            }
+            disabled={syncMutation.isPending}
+            onClick={(e) => {
+              e.stopPropagation();
+              // A re-sync replaces a QuickBooks invoice that already exists, so
+              // it keeps its confirmation; a first sync creates one and does not.
+              if (invoice.quickbooksInvoiceId) setResyncInvoice(invoice);
+              else syncMutation.mutate({ id: invoice.id });
+            }}
+            data-testid={`button-sync-qb-inline-${invoice.id}`}
           >
-            {(invoice.reminderCount ?? 0) === 0
-              ? "Send reminder"
-              : `${invoice.reminderCount} sent`}
-          </button>
-        </TableCell>
-      </>
-    );
-  };
+            <RefreshCw className="w-4 h-4" />
+          </Button>
+        )}
+        {renderActionsMenu(invoice)}
+      </div>
+    </TableCell>
+  );
 
-  // Superseded invoices are kept in activeFilteredInvoices so they can be shown as
-  // version history beneath their replacement; exclude them from every total.
-  // Cancelled invoices are already excluded by activeFilteredInvoices.
-  const totalBilled = activeFilteredInvoices
-    .filter((inv) => inv.status !== "superseded")
-    .reduce((sum, inv) => sum + parseFloat(inv.totalAmount), 0);
+  // Task #1942 — when payment data was last pulled from QuickBooks.
+  //
+  // Company-level, from the aggregate: the pill is a statement about the
+  // connection, so it must not move when the reader filters the table. Taken
+  // from the loaded rows it would call a healthy connection stale the moment
+  // a search or a month filter excluded the most recently synced invoice.
+  const lastPaymentSyncAt = agingSummary?.lastPaymentSyncAt ?? null;
 
   const monthOptions = generateMonthOptions();
 
@@ -1554,11 +1726,13 @@ export default function InvoicesPage() {
   const canSelectRows = canMerge || canBatchRemind;
 
   // Task #1918 — how wide the expanded region has to span on the desktop
-  // table: customer, invoice #, status, amount, the A/R block, period, and the
-  // actions cell, plus the select column when it is present. Derived from
-  // `AR_COLUMN_COUNT` for the same reason the history rows are — so the two
-  // cannot drift when a column is added.
-  const desktopColumnCount = (canSelectRows ? 1 : 0) + 4 + AR_COLUMN_COUNT + 2;
+  // table.
+  //
+  // Task #1942 — four columns now (invoice, balance, status, action) plus the
+  // select column when it is present. The history rows above render the same
+  // four cells rather than spanning a constant, so there is no second number
+  // here to drift out of step with this one.
+  const desktopColumnCount = (canSelectRows ? 1 : 0) + 4;
 
   const selectedInvoices = useMemo(
     () => activeFilteredInvoices.filter((inv) => selectedIds.has(inv.id)),
@@ -1586,10 +1760,20 @@ export default function InvoicesPage() {
     return { ok: true as const, reason: "" };
   }, [selectedInvoices]);
 
-  const selectedTotal = selectedInvoices.reduce(
-    (sum, inv) => sum + (parseFloat(inv.totalAmount) || 0),
-    0,
+  // Task #1942 — totals for invoices selected by "select all" that are not on
+  // a loaded page. Without these the selection bar would say "312 selected"
+  // over the value of the first fifty.
+  const [offPageSelectionTotals, setOffPageSelectionTotals] = useState<Map<number, string>>(
+    new Map(),
   );
+  const loadedTotalsById = useMemo(
+    () => new Map(invoices.map((inv) => [inv.id, inv.totalAmount])),
+    [invoices],
+  );
+  const selectedTotal = Array.from(selectedIds).reduce((sum, id) => {
+    const amount = loadedTotalsById.get(id) ?? offPageSelectionTotals.get(id);
+    return sum + (amount ? parseFloat(amount) || 0 : 0);
+  }, 0);
 
   const toggleSelected = (id: number) => {
     setSelectedIds((prev) => {
@@ -1600,7 +1784,10 @@ export default function InvoicesPage() {
     });
   };
 
-  const clearSelection = () => setSelectedIds(new Set());
+  const clearSelection = () => {
+    setSelectedIds(new Set());
+    setOffPageSelectionTotals(new Map());
+  };
 
   // Task #1888 — "select what I am looking at". The visible set is whatever
   // the active server-side filters left on screen, so this can never tick a
@@ -1612,16 +1799,56 @@ export default function InvoicesPage() {
   const allVisibleSelected =
     selectableVisibleIds.length > 0 &&
     selectableVisibleIds.every((id) => selectedIds.has(id));
+  const [selectAllPending, setSelectAllPending] = useState(false);
 
-  const toggleSelectAllVisible = () => {
-    setSelectedIds(allVisibleSelected ? new Set() : new Set(selectableVisibleIds));
+  /**
+   * Task #1942 — select-all covers the filtered set, not the loaded page.
+   *
+   * The list is paginated at 50, so ticking only what is mounted quietly
+   * redefines "all" as "the first page" — a bookkeeper who filters to 312
+   * overdue invoices, hits select-all and sends reminders would reach fifty
+   * customers and believe she had reached all of them. When the server says
+   * the filter matches more than is loaded, the ids are fetched for the same
+   * filter before selecting.
+   *
+   * The fetch is capped at the endpoint's own 500-row maximum. Beyond that
+   * the loaded set is selected instead, which under-selects rather than
+   * over-promising.
+   */
+  const toggleSelectAllVisible = async () => {
+    if (allVisibleSelected) {
+      clearSelection();
+      return;
+    }
+    const total = filteredInvoiceTotal;
+    if (total != null && total > invoices.length) {
+      setSelectAllPending(true);
+      try {
+        const suffix = arParams ? `&${arParams}` : "";
+        const res = await fetch(`/api/invoices?limit=500&offset=0${suffix}`);
+        if (res.ok) {
+          const rows = (await res.json()) as Invoice[];
+          const selectable = rows.filter(isMergeable);
+          setOffPageSelectionTotals(new Map(selectable.map((r) => [r.id, r.totalAmount])));
+          setSelectedIds(new Set(selectable.map((r) => r.id)));
+          return;
+        }
+      } catch {
+        // Fall through: selecting what is loaded is still a correct, smaller
+        // answer, and the count in the bar says exactly what it selected.
+      } finally {
+        setSelectAllPending(false);
+      }
+    }
+    setSelectedIds(new Set(selectableVisibleIds));
   };
 
   // Changing the filters changes what "selected" means, and a selection that
   // outlives its filter is a selection nobody has actually looked at. Drop it.
   useEffect(() => {
     setSelectedIds(new Set());
-  }, [arParams, monthFilter]);
+    setOffPageSelectionTotals(new Map());
+  }, [arParams]);
 
   const openMergeConfirm = () => {
     if (!mergeValidation.ok) return;
@@ -1648,8 +1875,8 @@ export default function InvoicesPage() {
       const csv = buildInvoicesCsv(activeFilteredInvoices);
       const today = new Date().toISOString().slice(0, 10);
       const filename =
-        monthFilter !== "all"
-          ? `monthly-invoices-${monthFilter}.csv`
+        arQuery.month
+          ? `monthly-invoices-${arQuery.month}.csv`
           : `monthly-invoices-${today}.csv`;
       const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
@@ -1781,11 +2008,13 @@ export default function InvoicesPage() {
             Export CSV
           </DropdownMenuItem>
         )}
-        {/* Task #1886 — /api/invoices/:id/sync-quickbooks is WRITE-guarded
-            (requireInvoiceWrite), so both branches are gated on
-            CAN_EDIT_INVOICES. Managing the QuickBooks *integration* is a
-            bookkeeper capability; pushing invoice content into it is not. */}
-        {canBillingEdit &&
+        {/* Task #1942 — /api/invoices/:id/sync-quickbooks now answers to
+            requireQuickBooksAccess, so both branches are gated on
+            CAN_MANAGE_QUICKBOOKS: the whole QuickBooks surface (connection,
+            payment-status sync, freshness pill, per-invoice push) sits behind
+            one capability instead of splitting the integration from the push
+            it exists to perform. Nothing about the IrrigoPro invoice changes. */}
+        {canManageQuickBooks &&
           (!invoice.quickbooksInvoiceId ? (
             <DropdownMenuItem
               disabled={syncMutation.isPending}
@@ -1938,63 +2167,32 @@ export default function InvoicesPage() {
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-6xl mx-auto p-4 lg:p-6">
-        {/* Header */}
-        <div className="mb-6">
-          <div className="flex items-center gap-3 mb-1">
-            <Link href="/">
-              <Button variant="ghost" size="sm" className="text-gray-500 hover:text-gray-700 p-1 h-auto">
-                <ChevronLeft className="w-4 h-4 mr-1" />
-                Dashboard
-              </Button>
-            </Link>
-          </div>
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div>
-              <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-                <FileText className="w-6 h-6 text-blue-600" />
-                Monthly Invoices
-              </h1>
-              <p className="text-sm text-gray-500 mt-0.5">All invoices sent across all customers</p>
-            </div>
-            <div className="flex items-center gap-3">
-              {/* Task #1886 — write-classified: this stamps payment state. */}
-              {canBillingEdit && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => paymentSyncMutation.mutate()}
-                  disabled={paymentSyncMutation.isPending}
-                  data-testid="button-refresh-payment-status"
-                  title="Refresh payment status from QuickBooks"
-                >
-                  {paymentSyncMutation.isPending ? (
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  ) : (
-                    <RefreshCw className="w-4 h-4 mr-2" />
-                  )}
-                  Refresh QB Payments
-                </Button>
-              )}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleExportCsv}
-                disabled={activeFilteredInvoices.length === 0}
-                data-testid="button-export-csv"
-              >
-                <Download className="w-4 h-4 mr-2" />
-                Export CSV
-              </Button>
-              {activeFilteredInvoices.length > 0 && (
-                <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 text-right">
-                  <div className="text-xs text-blue-600 font-medium">Total Billed</div>
-                  <div className="text-lg font-bold text-blue-800">{formatCurrency(totalBilled)}</div>
-                  <div className="text-xs text-blue-500">{activeFilteredInvoices.length} invoice{activeFilteredInvoices.length !== 1 ? "s" : ""}</div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+        {/* Task #1942 — the header states the two numbers this page exists to
+            answer: how much is outstanding under the current filter, and how
+            many invoices that is. Both are server-computed. */}
+        <InvoicePageHeader
+          outstandingBalance={agingTotals?.balanceDue ?? null}
+          invoiceCount={agingTotals?.count ?? null}
+          summaryLoading={agingSummaryLoading}
+          canSeeQuickBooksStatus={canManageQuickBooks}
+          canRunPaymentSync={canManageQuickBooks}
+          lastPaymentSyncAt={lastPaymentSyncAt}
+          onRunPaymentSync={() => paymentSyncMutation.mutate()}
+          isSyncing={paymentSyncMutation.isPending}
+          now={nowForAr}
+          actions={
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleExportCsv}
+              disabled={activeFilteredInvoices.length === 0}
+              data-testid="button-export-csv"
+            >
+              <Download className="w-4 h-4 mr-2" />
+              Export CSV
+            </Button>
+          }
+        />
 
         {/* Task #708 — A/R Aging widget. Bucket clicks deep-link
             back to this page with `?aging=<key>`, which hydrates the
@@ -2005,214 +2203,38 @@ export default function InvoicesPage() {
           </div>
         )}
 
-        {/* Filters */}
-        <div className="flex flex-col sm:flex-row gap-3 mb-6">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-            <Input
-              placeholder="Search by customer name or invoice number..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="pl-9"
-            />
-          </div>
-          <Select value={monthFilter} onValueChange={setMonthFilter}>
-            <SelectTrigger className="w-full sm:w-52">
-              <Calendar className="w-4 h-4 mr-2 text-gray-400" />
-              <SelectValue placeholder="All months" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Months</SelectItem>
-              {monthOptions.map((m) => (
-                <SelectItem key={m.value} value={m.value}>
-                  {m.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Select
-            value={agingFilter}
-            onValueChange={(v) => patchArQuery({ aging: v as AgingFilter })}
-          >
-            <SelectTrigger
-              className="w-full sm:w-52"
-              data-testid="invoices-aging-filter"
-            >
-              <AlertCircle className="w-4 h-4 mr-2 text-gray-400" />
-              <SelectValue placeholder="All ages" />
-            </SelectTrigger>
-            <SelectContent>
-              {AGING_OPTIONS.map((o) => (
-                <SelectItem key={o.value} value={o.value}>
-                  {o.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+        {/* Task #1942 — the aging strip. Server-computed totals per bucket;
+            clicking a card writes the same `?aging=` the Financial Pulse
+            widget deep-links with, so the two agree by construction. */}
+        <InvoiceAgingStrip
+          summary={agingSummary}
+          isLoading={agingSummaryLoading}
+          isError={!!agingSummaryError}
+          active={arQuery.aging}
+          onSelect={(value) => patchArQuery({ aging: value })}
+        />
 
-        {/* Task #1890 — A/R filters. Every one of these is in the query
-            string, so this whole view is a link: it survives a reload and can
-            be handed to someone else. They combine with AND, and they are
-            applied by the server across the entire invoice set. */}
-        <div className="flex flex-wrap items-end gap-3 mb-6" data-testid="ar-filters">
-          <div className="flex flex-col gap-1">
-            <Label className="text-xs text-gray-500">Payment</Label>
-            <Select
-              value={arQuery.paymentStatus}
-              onValueChange={(v) => patchArQuery({ paymentStatus: v as PaymentStatusFilter })}
-            >
-              <SelectTrigger className="w-40" data-testid="ar-filter-payment-status">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Any payment</SelectItem>
-                <SelectItem value="unpaid">Unpaid</SelectItem>
-                <SelectItem value="partially_paid">Partially paid</SelectItem>
-                <SelectItem value="paid">Paid</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <Label className="text-xs text-gray-500">Sent</Label>
-            <Select
-              value={arQuery.sent}
-              onValueChange={(v) => patchArQuery({ sent: v as SentFilter })}
-            >
-              <SelectTrigger className="w-36" data-testid="ar-filter-sent">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Sent or not</SelectItem>
-                <SelectItem value="sent">Sent</SelectItem>
-                <SelectItem value="unsent">Never sent</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <Label className="text-xs text-gray-500">Customer</Label>
-            <Select
-              value={arQuery.customerId === "" ? "all" : arQuery.customerId}
-              onValueChange={(v) => patchArQuery({ customerId: v === "all" ? "" : v })}
-            >
-              <SelectTrigger className="w-52" data-testid="ar-filter-customer">
-                <SelectValue placeholder="All customers" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All customers</SelectItem>
-                {customerOptions.map((c) => (
-                  <SelectItem key={c.id} value={String(c.id)}>
-                    {c.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <Label className="text-xs text-gray-500" htmlFor="ar-date-from">
-              Created from
-            </Label>
-            <Input
-              id="ar-date-from"
-              type="date"
-              className="w-40"
-              value={arQuery.dateFrom}
-              onChange={(e) => patchArQuery({ dateFrom: e.target.value })}
-              data-testid="ar-filter-date-from"
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <Label className="text-xs text-gray-500" htmlFor="ar-date-to">
-              to
-            </Label>
-            <Input
-              id="ar-date-to"
-              type="date"
-              className="w-40"
-              value={arQuery.dateTo}
-              onChange={(e) => patchArQuery({ dateTo: e.target.value })}
-              data-testid="ar-filter-date-to"
-            />
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <Label className="text-xs text-gray-500" htmlFor="ar-amount-min">
-              Amount min
-            </Label>
-            <Input
-              id="ar-amount-min"
-              type="number"
-              inputMode="decimal"
-              className="w-28"
-              value={arQuery.amountMin}
-              onChange={(e) => patchArQuery({ amountMin: e.target.value })}
-              data-testid="ar-filter-amount-min"
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <Label className="text-xs text-gray-500" htmlFor="ar-amount-max">
-              Amount max
-            </Label>
-            <Input
-              id="ar-amount-max"
-              type="number"
-              inputMode="decimal"
-              className="w-28"
-              value={arQuery.amountMax}
-              onChange={(e) => patchArQuery({ amountMax: e.target.value })}
-              data-testid="ar-filter-amount-max"
-            />
-          </div>
-
-          <div className="flex items-center gap-2 pb-2">
-            <Checkbox
-              id="ar-flagged-only"
-              checked={arQuery.flagged}
-              onCheckedChange={(v) => patchArQuery({ flagged: v === true })}
-              data-testid="ar-filter-flagged"
-            />
-            <Label htmlFor="ar-flagged-only" className="text-sm text-gray-700">
-              Flagged only
-            </Label>
-          </div>
-
-          {/* Task #1887 — this filter runs on the server, over the whole
-              invoice set, alongside the others. */}
-          <div className="flex flex-col gap-1">
-            <Label className="text-xs text-gray-500">Reminders</Label>
-            <Select
-              value={arQuery.reminders}
-              onValueChange={(v) => patchArQuery({ reminders: v as ReminderFilter })}
-            >
-              <SelectTrigger className="w-48" data-testid="ar-filter-reminders">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {(Object.keys(REMINDER_FILTER_LABELS) as ReminderFilter[]).map((key) => (
-                  <SelectItem key={key} value={key} data-testid={`ar-filter-reminders-${key}`}>
-                    {REMINDER_FILTER_LABELS[key]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {!isEmptyArQuery(arQuery) && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="pb-2"
-              onClick={() => setArQuery(defaultArQuery)}
-              data-testid="ar-filter-clear"
-            >
-              <X className="w-4 h-4 mr-1" />
-              Clear filters
-            </Button>
-          )}
-        </div>
+        {/* Task #1890 — every filter is in the query string, so this whole
+            view is a link: it survives a reload and can be handed to someone
+            else. They combine with AND, and the server applies them across
+            the entire invoice set.
+            Task #1942 — the same filters, collapsed into one popover with a
+            chip for each one that is actually doing something. */}
+        <InvoiceFilterBar
+          searchTerm={searchInput}
+          onSearchChange={setSearchInput}
+          query={arQuery}
+          onPatch={patchArQuery}
+          onClearAll={() => {
+            setSearchInput("");
+            setArQuery(defaultArQuery);
+          }}
+          hasActiveFilters={!isEmptyArQuery(arQuery)}
+          customerOptions={customerOptions}
+          monthFilter={arQuery.month || "all"}
+          monthOptions={monthOptions}
+          onMonthChange={(value) => patchArQuery({ month: value === "all" ? "" : value })}
+        />
 
         {/* Empty state */}
         {flatSections.length === 0 && (
@@ -2221,7 +2243,7 @@ export default function InvoicesPage() {
               <FileText className="w-12 h-12 mx-auto mb-3 text-gray-300" />
               <p className="font-medium text-gray-500">No invoices found</p>
               <p className="text-sm text-gray-400 mt-1">
-                {searchTerm || monthFilter !== "all" || !isEmptyArQuery(arQuery)
+                {!isEmptyArQuery(arQuery)
                   ? "Try adjusting your filters."
                   : "Invoices will appear here once they are generated."}
               </p>
@@ -2284,7 +2306,10 @@ export default function InvoicesPage() {
                     ordering is global and a month heading would imply a
                     grouping that is no longer there. */}
                 {group.label != null && (
-                  <div className="flex items-center justify-between mb-3">
+                  <div
+                    className="flex items-center justify-between mb-3"
+                    data-testid="invoice-group-header"
+                  >
                     <div className="flex items-center gap-2">
                       <Calendar className="w-4 h-4 text-blue-600" />
                       <h2 className="text-base font-semibold text-gray-800">{group.label}</h2>
@@ -2311,29 +2336,23 @@ export default function InvoicesPage() {
                                 showing — "select what I am looking at". */}
                             <Checkbox
                               checked={allVisibleSelected}
-                              onCheckedChange={() => toggleSelectAllVisible()}
-                              aria-label="Select every invoice in this list"
+                              disabled={selectAllPending}
+                              onCheckedChange={() => {
+                                void toggleSelectAllVisible();
+                              }}
+                              aria-label="Select every invoice matching these filters"
                               data-testid="checkbox-select-all-invoices"
                             />
                           </TableHead>
                         )}
-                        <SortableHeader sortKey="customer" label="Customer" sort={sort} onSort={toggleSort} />
-                        <SortableHeader sortKey="invoiceNumber" label="Invoice #" sort={sort} onSort={toggleSort} />
-                        <SortableHeader sortKey="status" label="Status" sort={sort} onSort={toggleSort} />
-                        <SortableHeader sortKey="amount" label="Amount" sort={sort} onSort={toggleSort} align="right" />
-                        {/* Task #1890 — A/R columns. These sort on the server,
-                            over every invoice, not just the loaded rows. */}
+                        {/* Task #1942 — five columns. The customer sort stays on
+                            the Invoice header and the balance sort on the
+                            Balance header; both are the same controls as
+                            before, on the cell that now carries the data. */}
+                        <SortableHeader sortKey="customer" label="Invoice" sort={sort} onSort={toggleSort} />
                         <ArSortableHeader sortKey="balanceDue" align="right" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
-                        <ArSortableHeader sortKey="effectiveDueDate" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
-                        <ArSortableHeader sortKey="daysOverdue" align="right" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
-                        <ArSortableHeader sortKey="agingBucket" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
-                        <ArSortableHeader sortKey="paymentStatus" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
-                        <ArSortableHeader sortKey="sent" sort={arQuery.sort} dir={arQuery.dir} onSort={toggleArSort} />
-                        <TableHead className="whitespace-nowrap">Flags</TableHead>
-                        <TableHead className="whitespace-nowrap">Last reminder</TableHead>
-                        <TableHead className="whitespace-nowrap">Reminders</TableHead>
-                        <SortableHeader sortKey="period" label="Period" sort={sort} onSort={toggleSort} />
-                        <TableHead className="w-10" />
+                        <TableHead className="whitespace-nowrap">Status</TableHead>
+                        <TableHead className="w-10 text-right whitespace-nowrap">Action</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -2367,112 +2386,32 @@ export default function InvoicesPage() {
                               )}
                             </TableCell>
                           )}
-                          <TableCell className="font-medium text-gray-900 whitespace-nowrap max-w-[200px] truncate">
-                            {invoice.customerName}
-                          </TableCell>
-                          <TableCell className="text-gray-600 whitespace-nowrap">
-                            <div className="flex items-center gap-1">
-                            #{invoice.invoiceNumber}
-                            {(invoice.revision ?? 1) > 1 && (
-                              <span className="text-xs font-medium text-amber-700 bg-amber-100 px-1 py-0.5 rounded">
-                                Rev {invoice.revision}
-                              </span>
-                            )}
-                            {(() => {
-                              const mergedCount = history.filter((p) => p.status === "merged").length;
-                              return mergedCount > 0 ? (
-                                <span className="text-xs font-medium text-purple-700 bg-purple-100 px-1 py-0.5 rounded">
-                                  Merged from {mergedCount}
-                                </span>
-                              ) : null;
-                            })()}
-                            {history.length > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => toggleHistory(invoice.id)}
-                                className="ml-1 text-xs text-gray-400 hover:text-gray-600 flex items-center gap-0.5"
-                                title={isExpanded ? "Hide version history" : "Show version history"}
-                                aria-label={isExpanded ? "Hide version history" : `Show ${history.length} prior version${history.length !== 1 ? "s" : ""}`}
-                              >
-                                <ChevronDown className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
-                                {history.length}
-                              </button>
-                            )}
-                            {/* Task #1889 — a conversation is already in
-                                flight on this invoice. Absent entirely for a
-                                role the server strips the data for. */}
-                            <ArNoteIndicator invoice={invoice} />
-                            </div>
-                          </TableCell>
-                          <TableCell className="whitespace-nowrap">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              {getStatusBadge(invoice.status)}
-                              {getSentBadge(invoice.sentAt)}
-                              {invoice.isOverdue && (
-                                <Badge className="bg-red-100 text-red-800 text-xs" data-testid={`overdue-badge-${invoice.id}`}>Overdue</Badge>
-                              )}
-                              {invoice.paymentStatus === "partially_paid" && (
-                                <Badge className="bg-amber-100 text-amber-800 text-xs" data-testid={`partial-badge-${invoice.id}`}>Partial</Badge>
-                              )}
-                              {invoice.paymentSyncedAt && invoice.paymentStatus === "unpaid" && !invoice.qbVoidDetectedAt && (
-                                <Badge className="bg-gray-100 text-gray-700 text-xs" data-testid={`unpaid-badge-${invoice.id}`}>Unpaid</Badge>
-                              )}
-                              {invoice.qbVoidDetectedAt && (
-                                <Badge
-                                  className="bg-orange-100 text-orange-800 border border-orange-300 text-xs cursor-help"
-                                  title="This invoice was voided in QuickBooks but is still open in IrrigoPro. Void it here or restore it in QuickBooks."
-                                  data-testid={`qb-voided-badge-${invoice.id}`}
-                                >
-                                  <AlertCircle className="w-3 h-3 mr-1" />
-                                  Voided in QB
-                                </Badge>
-                              )}
-                              {renderQbIcon(invoice)}
-                            </div>
-                          </TableCell>
-                          <TableCell className="text-right font-bold text-gray-900 whitespace-nowrap">
-                            {invoice.paymentStatus === "partially_paid" && invoice.balance != null ? (
-                              <span title={`Total: ${formatCurrency(invoice.totalAmount)}`}>
-                                <span className="text-amber-700">{formatCurrency(invoice.balance)}</span>
-                                <span className="text-xs text-gray-400 ml-1">due</span>
-                              </span>
-                            ) : formatCurrency(invoice.totalAmount)}
-                          </TableCell>
-                          {renderArCells(invoice)}
-                          <TableCell
-                            className="text-xs text-gray-600 whitespace-nowrap"
-                            title={periodRangeOf(invoice)}
-                          >
-                            {periodLabelOf(invoice)}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            {renderActionsMenu(invoice)}
-                          </TableCell>
+                          {renderInvoiceCell(invoice, history, isExpanded)}
+                          {renderBalanceCell(invoice)}
+                          {renderStatusCell(invoice)}
+                          {renderActionCell(invoice)}
                         </TableRow>
                         {/* Version history rows — shown when the user expands the chain */}
                         {isExpanded && history.map((prev) => (
                           <TableRow key={prev.id} className="bg-amber-50 text-xs text-gray-400 italic">
                             {canSelectRows && <TableCell />}
-                            <TableCell className="whitespace-nowrap max-w-[200px] truncate pl-8">
-                              {prev.customerName}
-                            </TableCell>
-                            <TableCell className="whitespace-nowrap pl-6">
-                              ↳ #{prev.invoiceNumber}
-                              {(prev.revision ?? 1) >= 1 && (
-                                <span className="ml-1 text-xs text-gray-400">Rev {prev.revision ?? 1}</span>
-                              )}
-                            </TableCell>
-                            <TableCell className="whitespace-nowrap">
-                              {getStatusBadge(prev.status)}
+                            <TableCell className="max-w-[300px] pl-8">
+                              <div className="truncate">{prev.customerName}</div>
+                              <div className="mt-0.5">
+                                ↳ #{prev.invoiceNumber}
+                                <span className="ml-1">Rev {prev.revision ?? 1}</span>
+                                <span className="ml-1" title={periodRangeOf(prev)}>
+                                  · {periodLabelOf(prev)}
+                                </span>
+                              </div>
                             </TableCell>
                             <TableCell className="text-right whitespace-nowrap line-through">
                               {formatCurrency(prev.totalAmount)}
                             </TableCell>
                             {/* A superseded/merged predecessor carries no live
                                 A/R position — the survivor holds the money. */}
-                            <TableCell colSpan={AR_COLUMN_COUNT} />
-                            <TableCell className="whitespace-nowrap" title={periodRangeOf(prev)}>
-                              {periodLabelOf(prev)}
+                            <TableCell className="whitespace-nowrap">
+                              {getStatusBadge(prev.status)}
                             </TableCell>
                             <TableCell />
                           </TableRow>
@@ -2614,6 +2553,28 @@ export default function InvoicesPage() {
                         <div className="mt-1">
                           <ArNoteIndicator invoice={invoice} variant="mobile-" />
                         </div>
+                        {/* Task #1942 — the same named action the desktop row
+                            offers, driven by the same server answer. */}
+                        {canMarkSent && (
+                          <div className="mt-2">
+                            <InvoicePrimaryAction
+                              invoiceId={invoice.id}
+                              eligibility={eligibilityFor(invoice.id)}
+                              now={nowForAr}
+                              onSendInvoice={() =>
+                                setPdfModal({
+                                  id: invoice.id,
+                                  number: invoice.invoiceNumber,
+                                  email: invoice.customerEmail,
+                                })
+                              }
+                              onRemind={() => {
+                                setSelectedIds(new Set([invoice.id]));
+                                setBatchReminderOpen(true);
+                              }}
+                            />
+                          </div>
+                        )}
                         <div
                           className="mt-2 text-xs text-gray-500"
                           title={periodRangeOf(invoice)}
@@ -2933,7 +2894,7 @@ export default function InvoicesPage() {
           in-place (DocNumber-first lookup → sparse update). No duplicate is
           created; the old QB invoice is NOT deleted or voided. */}
       <Dialog
-        open={canBillingEdit && resyncInvoice != null}
+        open={canManageQuickBooks && resyncInvoice != null}
         onOpenChange={(open) => {
           if (!open) {
             setResyncInvoice(null);

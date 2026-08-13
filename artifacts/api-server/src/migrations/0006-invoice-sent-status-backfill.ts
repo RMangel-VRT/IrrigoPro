@@ -3,6 +3,13 @@
  *
  * Task #1847 — Decouple invoice sent-ness from lifecycle status.
  *
+ * SUPERSEDED BY THE REGISTRY (Task #1942). This script was never wired to
+ * anything and so never ran. Its three statements now live, verbatim, in
+ * `../lib/migrations/invoice-sent-status-backfill.ts`, registered as
+ * `invoice-sent-status-backfill-v1` and runnable from /admin/migrations with a
+ * preview and an acknowledgement. Run it from there, not from here; this file
+ * is kept only as the reviewable original of the ported SQL.
+ *
  * `invoices.status` previously doubled as both a lifecycle tracker and a
  * delivery flag. This migration promotes `sent_at` to the single source of
  * delivery truth and retires the `status = 'sent'` value.

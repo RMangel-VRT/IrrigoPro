@@ -1,6 +1,6 @@
 // Task #1443 / #1711 — Sync an app invoice to QuickBooks.
 //
-// POST /api/invoices/:id/sync-quickbooks — a billing-capable user pushes a
+// POST /api/invoices/:id/sync-quickbooks — a QuickBooks-capable user pushes a
 // single app invoice's current totals/line items into QuickBooks. Behavior
 // is entirely driven by the injected `syncQuickBooksInvoice` function:
 //   - invoice has no QB id  → CREATE a new QB invoice.
@@ -46,7 +46,12 @@ export interface RegisterInvoiceSyncQuickbooksRoutesDeps {
   requireAuthentication: RequestHandler;
   /** Task #1886: pushing an invoice to QBO writes the invoice's QB linkage
    *  and SyncToken → CAN_EDIT_INVOICES, not CAN_MANAGE_QUICKBOOKS. */
-  requireInvoiceWrite: RequestHandler;
+  // Task #1942 — pushing an invoice into QuickBooks is a QuickBooks operation,
+  // not an edit of the invoice: nothing about the IrrigoPro record changes. It
+  // is gated on CAN_MANAGE_QUICKBOOKS, the same capability that owns the
+  // connection, the payment-status sync and the freshness pill, so the whole
+  // QuickBooks surface answers to one gate instead of two.
+  requireQuickBooksAccess: RequestHandler;
   // Syncs the app invoice to QuickBooks: creates if no QB id exists, updates
   // in-place if it does. Persists the new/updated QB id and SyncToken.
   // Throws InvoiceSyncError on a precondition (customer not synced, no
@@ -61,14 +66,14 @@ export function registerInvoiceSyncQuickbooksRoutes(
   app: Express,
   {
     requireAuthentication,
-    requireInvoiceWrite,
+    requireQuickBooksAccess,
     createQuickBooksInvoice,
   }: RegisterInvoiceSyncQuickbooksRoutesDeps,
 ): void {
   app.post(
     "/api/invoices/:id/sync-quickbooks",
     requireAuthentication,
-    requireInvoiceWrite,
+    requireQuickBooksAccess,
     async (req: any, res) => {
       const id = parseInt(req.params.id, 10);
       if (!Number.isFinite(id) || id <= 0) {

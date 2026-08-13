@@ -578,8 +578,13 @@ describe("routes.ts wiring", () => {
   });
 
   it("the invoice list endpoint is gated on invoice read", () => {
+    // The list moved out of the monolith into its own module when filtering
+    // and sorting went server-side; the guard it must carry did not change.
+    const listSrc = readFileSync(join(import.meta.dirname, "invoice-list-routes.ts"), "utf8");
+    const i = listSrc.indexOf('"/api/invoices",');
+    assert.notEqual(i, -1, "GET /api/invoices must still be registered somewhere");
     assert.match(
-      guardFor('app.get("/api/invoices",'),
+      listSrc.slice(i, i + 200),
       /requireInvoiceRead/,
       "GET /api/invoices must be role-gated — it previously had no gate at all",
     );
@@ -601,6 +606,48 @@ describe("routes.ts wiring", () => {
     ]) {
       assert.match(guardFor(decl), /requireQuickBooksAccess/, decl);
     }
+  });
+
+  it("the payment-status sync is gated on QuickBooks access, so the bookkeeper can run it", () => {
+    // Task #1942 — copying QuickBooks' own payment state back onto the rows it
+    // owns is not authoring an invoice. The page shows the bookkeeper whether
+    // that data is current, so she has to be able to refresh it; gating the
+    // button on QuickBooks access while the route stayed on invoice write
+    // would render a control that 403s.
+    const src = readFileSync(join(import.meta.dirname, "qb-payment-sync.ts"), "utf8");
+    const idx = src.indexOf('"/api/invoices/sync-payment-status"');
+    assert.ok(idx > 0, "expected the sync route to be registered");
+    const decl = src.slice(idx, idx + 200);
+    assert.match(decl, /requireQuickBooksAccess/);
+    assert.doesNotMatch(decl, /requireInvoiceWrite/);
+    // Membership only widened: everyone who could sync before still can.
+    for (const role of ["super_admin", "company_admin", "billing_manager", "bookkeeper"]) {
+      assert.ok(hasCapability(role, CAN_MANAGE_QUICKBOOKS), `${role} must keep sync access`);
+    }
+  });
+
+  it("the per-invoice QuickBooks push is gated on QuickBooks access, matching its control", () => {
+    // Task #1942 — pushing an invoice to QuickBooks changes nothing about the
+    // IrrigoPro record; it is a QuickBooks operation, and the page renders it
+    // beside the freshness pill and the payment sync. Keeping it on invoice
+    // write split one surface across two capabilities and denied the
+    // bookkeeper the resync beside a sync she can run.
+    const src = readFileSync(
+      join(import.meta.dirname, "invoice-sync-quickbooks-route.ts"),
+      "utf8",
+    );
+    const idx = src.indexOf('"/api/invoices/:id/sync-quickbooks"');
+    assert.ok(idx > 0, "expected the per-invoice sync route to be registered");
+    const decl = src.slice(idx, idx + 200);
+    assert.match(decl, /requireQuickBooksAccess/);
+    assert.doesNotMatch(decl, /requireInvoiceWrite/);
+    // Membership only widened: everyone who could push before still can.
+    for (const role of ["super_admin", "company_admin", "billing_manager"]) {
+      assert.ok(hasCapability(role, CAN_EDIT_INVOICES), `${role} could push before`);
+      assert.ok(hasCapability(role, CAN_MANAGE_QUICKBOOKS), `${role} must keep push access`);
+    }
+    // …and a role with neither capability still cannot reach it.
+    assert.equal(hasCapability("irrigation_manager", CAN_MANAGE_QUICKBOOKS), false);
   });
 
   it("no route uses the old requireBillingAccess guard any more", () => {
