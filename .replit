@@ -116,6 +116,10 @@ args = "invoice-aging-summary"
 task = "workflow.run"
 args = "migration-registry"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "username-normalization"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -387,6 +391,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/lib/migrations/registry.test.ts"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "username-normalization"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/lib/normalize-username.test.ts src/lib/migrations/normalize-usernames.test.ts src/lib/username-login-lookup.test.ts"
 
 [workflows.workflow.metadata]
 isValidation = true

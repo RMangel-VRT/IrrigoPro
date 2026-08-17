@@ -8,6 +8,7 @@ import { repairQbVoidMispaidMigration } from './repair-qb-void-mispaid';
 import { repairWoodglennWoHoursMigration } from './repair-woodglenn-wo-hours';
 import { createWoodglennFollowupMigration } from './create-woodglenn-followup';
 import { invoiceSentStatusBackfillMigration } from './invoice-sent-status-backfill';
+import { normalizeUsernamesMigration } from './normalize-usernames';
 
 const REGISTRY = new Map<string, MigrationDefinition>([
   [repairTicketTotalDriftMigration.id, repairTicketTotalDriftMigration],
@@ -19,6 +20,7 @@ const REGISTRY = new Map<string, MigrationDefinition>([
   [repairWoodglennWoHoursMigration.id, repairWoodglennWoHoursMigration],
   [createWoodglennFollowupMigration.id, createWoodglennFollowupMigration],
   [invoiceSentStatusBackfillMigration.id, invoiceSentStatusBackfillMigration],
+  [normalizeUsernamesMigration.id, normalizeUsernamesMigration],
 ]);
 
 export function listMigrations(): MigrationDefinition[] {

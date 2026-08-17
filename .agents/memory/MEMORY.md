@@ -30,4 +30,5 @@
 - [Standalone migration scripts never run](standalone-migration-scripts-are-invisible.md) — write backfills as registry MigrationDefinitions; port SQL verbatim and diff it mechanically.
 - [Visible filters must be server filters](visible-filters-must-be-server-filters.md) — a browser-only filter beside server aggregates and select-all acts on rows nobody saw.
 - [Aggregate widgets above a list](list-aggregate-widgets.md) — key the summary under the list's key, price and count one population, and never derive sync health from loaded rows.
+- [Username lookup precedence](username-normalization-lookup-precedence.md) — normalize the input but try the RAW value first, else lookalike accounts cross-select and the deploy locks out pasted logins.
 - [One scoping contract](one-scope-contract.md) — a new aggregate must resolve tenant scope through the list's own helper; a stricter rule disagrees exactly where the list is unusual.

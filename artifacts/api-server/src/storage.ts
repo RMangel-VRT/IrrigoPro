@@ -196,6 +196,7 @@ import {
   type MergeCandidate,
 } from "./invoice-merge";
 import { recordAuditEvent } from "./routes/audit-log";
+import { normalizeUsername } from "./lib/normalize-username";
 
 
 // Set of issue types that never require a part (labor-only). Built once from
@@ -2077,8 +2078,40 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getUserByUsername(username: string): Promise<User | undefined> {
+    // Normalise BEFORE the lookup. A username that arrives carrying invisible
+    // Unicode (pasted from a phone contact, a spreadsheet or a chat message)
+    // must resolve to the same account as the same username typed by hand —
+    // otherwise login succeeds or fails depending on how the text reached the
+    // form. See lib/normalize-username.ts for the production incident.
+    const normalized = normalizeUsername(username);
+    if (!normalized) return undefined;
+    const raw = typeof username === "string" ? username : "";
+
+    // ORDER MATTERS, and it is the opposite of what it looks like it should be.
+    //
+    // When the submitted value carries characters we strip, the exact value is
+    // tried FIRST, before the cleaned one. The reason is account selection: if
+    // both "bob" and "bob\u200B" exist as separate accounts, cleaning the input
+    // first would resolve a paste of "bob\u200B" to the "bob" row — handing back
+    // somebody else's account. Bcrypt would then reject the password and lock
+    // out a user who can sign in today, while a password reset aimed at that
+    // name would rewrite the wrong person's credentials.
+    //
+    // Trying raw first means this path keeps selecting exactly the row the old
+    // code selected. It can only ever find a row an exact match would have
+    // found, so it cannot widen access on its own.
+    if (raw !== normalized) {
+      const [legacy] = await db.select().from(users).where(
+        sql`lower(${users.username}) = lower(${raw})`
+      );
+      if (legacy) return legacy;
+    }
+
+    // The cleaned lookup is what lets a TYPED username find a row that was
+    // stored with invisible characters once the repair migration has run, and
+    // what makes a paste keep working after the stored value is cleaned.
     const [user] = await db.select().from(users).where(
-      sql`lower(${users.username}) = lower(${username})`
+      sql`lower(${users.username}) = lower(${normalized})`
     );
     return user || undefined;
   }
@@ -2104,6 +2137,14 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createUser(user: InsertUser): Promise<User> {
+    // Reject a username that is nothing but invisible characters. Writing "" is
+    // worse than refusing: it produces an account that no one can sign in to and
+    // that a blank submission could collide with.
+    const normalizedUsername = normalizeUsername(user.username);
+    if (!normalizedUsername) {
+      throw new Error("Username must contain at least one visible character.");
+    }
+
     // Hash the password before storing
     const hashedPassword = await bcrypt.hash(user.password, 10);
     
@@ -2119,6 +2160,10 @@ export class DatabaseStorage implements IStorage {
     
     const [newUser] = await db.insert(users).values({
       ...user,
+      // Strip invisible Unicode at the point of creation. This is where the
+      // production bookkeeper account acquired a trailing U+202D, which made
+      // its username match only when pasted and never when typed.
+      username: normalizedUsername,
       password: hashedPassword,
       emailVerificationToken,
       emailVerificationExpires
@@ -2141,14 +2186,32 @@ export class DatabaseStorage implements IStorage {
 
   async updateUser(id: number, user: Partial<InsertUser>): Promise<User | undefined> {
     const updateData = { ...user, updatedAt: new Date() };
+    // Never let an invisible character reach the username column: a corrupted
+    // username is unreadable in every admin screen and silently breaks login
+    // for anyone who types it rather than pasting it.
+    if (typeof updateData.username === "string") {
+      const normalizedUsername = normalizeUsername(updateData.username);
+      if (!normalizedUsername) {
+        throw new Error("Username must contain at least one visible character.");
+      }
+      updateData.username = normalizedUsername;
+    }
     const [updatedUser] = await db.update(users).set(updateData).where(eq(users.id, id)).returning();
     return updatedUser || undefined;
   }
 
   async updateUserPassword(username: string, hashedPassword: string): Promise<User | undefined> {
+    // Resolve to exactly one account first, then write by id. A predicate-based
+    // update on a case-insensitive username could rewrite EVERY matching row
+    // while returning only the first — silently changing the password on an
+    // account nobody asked about. Going through getUserByUsername also means a
+    // password reset uses the very same lookup login uses, so a reset can never
+    // succeed against a row that login would not have found.
+    const target = await this.getUserByUsername(username);
+    if (!target) return undefined;
     const [updatedUser] = await db.update(users)
       .set({ password: hashedPassword, updatedAt: new Date() })
-      .where(eq(users.username, username))
+      .where(eq(users.id, target.id))
       .returning();
     return updatedUser || undefined;
   }
