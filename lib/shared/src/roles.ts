@@ -228,13 +228,14 @@ export interface UiDefaultRoles {
  * biggest balance first within the oldest bucket first — instead of the
  * newest-first billing view.
  *
- * This grants nothing. A bookkeeper can already read invoices because she is
- * in `CAN_READ_INVOICES`; this only decides what she sees before she touches a
- * control. Every other role keeps the newest-first landing.
+ * This grants nothing. Membership here only decides what a role sees before
+ * she touches a control. All roles that can read invoices land on the same
+ * AR-first view so the page is consistent regardless of who is looking.
+ * Every role listed here is also in `CAN_READ_INVOICES`.
  */
 export const COLLECTIONS_LANDING_DEFAULT: UiDefaultRoles = {
   kind: "ui-default",
-  roles: ["bookkeeper"],
+  roles: ["super_admin", "company_admin", "billing_manager", "irrigation_manager", "bookkeeper"],
 };
 
 /**

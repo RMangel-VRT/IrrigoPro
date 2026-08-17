@@ -277,7 +277,7 @@ describe("header totals", () => {
     totalCountForResponse = 51;
     summaryForResponse = agingSummary({ overall: { balanceDue: "5100.00", count: 51 } });
 
-    renderInvoices();
+    renderInvoices("/invoices?paymentStatus=unpaid");
 
     // The loaded rows sum to $5,000.00. The filter's balance is $5,100.00.
     await waitFor(() =>
@@ -324,7 +324,7 @@ describe("header totals", () => {
       invoiceRow({ id: 3, invoiceNumber: "INV-3", status: "cancelled", balanceDue: "0.00", balance: "0.00" }),
     ];
     totalCountForResponse = 137;
-    renderInvoices();
+    renderInvoices("/invoices?paymentStatus=unpaid");
 
     await waitFor(() =>
       expect(screen.getByTestId("invoice-header-count")).toHaveTextContent("14"),
@@ -376,7 +376,7 @@ describe("header totals", () => {
     // that prefix precisely so it refetches with the rows instead of quoting
     // pre-sync totals over refreshed invoices.
     appQueryClient.clear();
-    renderInvoices("/invoices", appQueryClient);
+    renderInvoices("/invoices?paymentStatus=unpaid", appQueryClient);
     await waitFor(() => expect(requestedUrls.some(isSummaryRequest)).toBe(true));
     const before = requestedUrls.filter(isSummaryRequest).length;
 
@@ -496,7 +496,7 @@ describe("primary action state comes from the server", () => {
         refusal: { reason: "paid", message: "This invoice is paid in full." },
       }),
     ];
-    renderInvoices();
+    renderInvoices("/invoices?paymentStatus=unpaid");
 
     await waitFor(() => expect(screen.getAllByTestId("invoice-row-1").length).toBeGreaterThan(0));
     await waitFor(() =>
@@ -685,13 +685,18 @@ describe("landing default per role", () => {
     await waitFor(() => expect(screen.queryByTestId("invoice-group-header")).toBeNull());
   });
 
-  it("leaves the billing manager month-grouped and newest first", async () => {
+  it("lands the billing manager flat, biggest balance first too", async () => {
     roleRef.current = "billing_manager";
     const { nav } = renderInvoices();
-    await waitForList();
 
-    expect(nav.history).toEqual(["/invoices"]);
-    await waitFor(() => expect(screen.getAllByTestId("invoice-group-header").length).toBe(1));
+    await waitFor(() => {
+      const q = new URLSearchParams(nav.history[nav.history.length - 1].split("?")[1] ?? "");
+      expect(q.get("sort")).toBe("balanceDue");
+      expect(q.get("dir")).toBe("desc");
+      expect(q.get("aging")).toBe("overdue");
+    });
+    // Flat: AR ordering suppresses month group headings.
+    await waitFor(() => expect(screen.queryByTestId("invoice-group-header")).toBeNull());
   });
 });
 

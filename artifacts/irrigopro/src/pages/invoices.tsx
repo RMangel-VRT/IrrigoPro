@@ -797,14 +797,16 @@ export default function InvoicesPage() {
   const canManageQuickBooks = hasCapability(userRole, CAN_MANAGE_QUICKBOOKS);
 
   // Task #1890 — the collections landing default.
+  // Task #1950 — expanded to every invoice-reading role so the page looks
+  //              the same regardless of who is viewing it.
   //
   // Resolved through `usesUiDefault` against a UI-default membership, never a
   // role-string comparison and never a capability set. The distinction is
   // enforced by the type: `COLLECTIONS_LANDING_DEFAULT` is not a
   // `ReadonlySet<Role>`, so it cannot be handed to `hasCapability` and quietly
-  // turned into an authorization decision. It grants nothing — a bookkeeper
-  // already reads invoices via CAN_READ_INVOICES; this only decides what she
-  // sees first. Every other role keeps the newest-first landing.
+  // turned into an authorization decision. It grants nothing — every role here
+  // already reads invoices via CAN_READ_INVOICES; this only decides what they
+  // see first.
   const usesCollectionsDefault = usesUiDefault(userRole, COLLECTIONS_LANDING_DEFAULT);
   const defaultArQuery = usesCollectionsDefault ? COLLECTIONS_DEFAULT_QUERY : EMPTY_AR_QUERY;
   // Applied once per mount, and only when the caller arrived with no view of

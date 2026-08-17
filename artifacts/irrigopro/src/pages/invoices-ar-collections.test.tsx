@@ -7,8 +7,8 @@
  * spy in `artifacts/api-server/src/routes/invoice-list-routes.test.ts`; what
  * can only be checked here is:
  *
- *  1. the bookkeeper lands on collections work without touching a control,
- *     and an existing billing role's landing is untouched;
+ *  1. every invoice-reading role lands on collections work without touching a
+ *     control (Task #1950 expanded this from bookkeeper-only to all roles);
  *  2. every filter survives a URL round-trip and reaches the server as one
  *     AND-ed query;
  *  3. an existing `?aging=` deep link from the Financial Pulse widget still
@@ -252,16 +252,22 @@ describe("collections landing default", () => {
     });
   });
 
-  it("leaves an existing billing role's landing exactly as it was", async () => {
+  it("also drops billing_manager on unpaid-and-overdue, biggest balance first", async () => {
     roleRef.current = "billing_manager";
     const { nav } = renderInvoices("/invoices");
-    await waitForInvoiceFetch();
 
-    expect(nav.history).toEqual(["/invoices"]);
-    const q = lastInvoiceQuery();
-    expect(q.get("aging")).toBeNull();
-    expect(q.get("paymentStatus")).toBeNull();
-    expect(q.get("sort")).toBeNull();
+    await waitFor(() => {
+      const q = new URLSearchParams(nav.history[nav.history.length - 1].split("?")[1] ?? "");
+      expect(q.get("aging")).toBe("overdue");
+      expect(q.get("paymentStatus")).toBe("unpaid");
+      expect(q.get("sort")).toBe("balanceDue");
+      expect(q.get("dir")).toBe("desc");
+    });
+    await waitFor(() => {
+      const q = lastInvoiceQuery();
+      expect(q.get("aging")).toBe("overdue");
+      expect(q.get("sort")).toBe("balanceDue");
+    });
   });
 
   it("does not override a view the bookkeeper arrived with", async () => {
@@ -322,23 +328,46 @@ describe("A/R filters and the URL", () => {
 
     fireEvent.click(screen.getByTestId("ar-filter-clear"));
 
-    await waitFor(() => expect(nav.history[nav.history.length - 1]).toBe("/invoices"));
+    // After clearing, the role lands on its default: unpaid-and-overdue, biggest
+    // balance first (Task #1950 — now universal across all invoice-reading roles).
+    await waitFor(() => {
+      const q = new URLSearchParams(nav.history[nav.history.length - 1].split("?")[1] ?? "");
+      expect(q.get("aging")).toBe("overdue");
+      expect(q.get("paymentStatus")).toBe("unpaid");
+      expect(q.get("sort")).toBe("balanceDue");
+      expect(q.get("dir")).toBe("desc");
+    });
   });
 
   it("a sortable A/R header cycles desc → asc → off in the URL", async () => {
-    const { nav } = renderInvoices("/invoices");
-    await waitForInvoiceFetch();
+    // Use ?paymentStatus=unpaid so the landing-default effect fires but returns
+    // early (non-empty query) without triggering an extra fetch.  We do NOT
+    // use ?aging=overdue here because the client-side aging filter would drop
+    // cleanInvoice() (agingBucket="current"), leaving the table empty.
+    const { nav } = renderInvoices("/invoices?paymentStatus=unpaid");
+    // Wait for the table and its sort headers to appear.
+    await waitFor(() => screen.getAllByTestId("ar-sort-balanceDue")[0]);
     const last = () => nav.history[nav.history.length - 1];
 
     // Descending first: collections wants the biggest balance at the top.
-    fireEvent.click(screen.getByTestId("ar-sort-balanceDue"));
+    fireEvent.click(screen.getAllByTestId("ar-sort-balanceDue")[0]);
     await waitFor(() => expect(last()).toContain("sort=balanceDue&dir=desc"));
+    // The new query key triggers a re-fetch; wait for the table to reappear
+    // before clicking again — the header is absent during the loading state.
+    await waitFor(() => screen.getAllByTestId("ar-sort-balanceDue")[0]);
 
-    fireEvent.click(screen.getByTestId("ar-sort-balanceDue"));
+    fireEvent.click(screen.getAllByTestId("ar-sort-balanceDue")[0]);
     await waitFor(() => expect(last()).toContain("sort=balanceDue&dir=asc"));
+    await waitFor(() => screen.getAllByTestId("ar-sort-balanceDue")[0]);
 
-    fireEvent.click(screen.getByTestId("ar-sort-balanceDue"));
-    await waitFor(() => expect(last()).toBe("/invoices"));
+    // "Off" removes the sort columns; other filters stay intact.
+    fireEvent.click(screen.getAllByTestId("ar-sort-balanceDue")[0]);
+    await waitFor(() => {
+      const q = new URLSearchParams(last().split("?")[1] ?? "");
+      expect(q.get("sort")).toBeNull();
+      expect(q.get("dir")).toBeNull();
+      expect(q.get("paymentStatus")).toBe("unpaid"); // untouched
+    });
   });
 });
 
@@ -379,7 +408,10 @@ describe("existing ?aging= deep links", () => {
 describe("flag badges", () => {
   it("renders nothing but an em dash for a clean invoice", async () => {
     rowsForResponse = [cleanInvoice()];
-    renderInvoices();
+    // Use ?paymentStatus=unpaid so the landing-default effect fires but returns
+    // early (non-empty query) and the client-side aging filter (all) passes the
+    // cleanInvoice() fixture (agingBucket="current").
+    renderInvoices("/invoices?paymentStatus=unpaid");
     await waitFor(() => expect(screen.getByTestId("ar-flags-none-1")).toBeTruthy());
   });
 
@@ -397,7 +429,7 @@ describe("flag badges", () => {
         ],
       }),
     ];
-    renderInvoices();
+    renderInvoices("/invoices?paymentStatus=unpaid");
 
     await waitFor(() => expect(screen.getByTestId("ar-flags-1")).toBeTruthy());
     for (const flag of [
@@ -426,7 +458,7 @@ describe("flag badges", () => {
       paymentSyncedAt: null,
     }) as Row;
     rowsForResponse = [withoutFlags];
-    renderInvoices();
+    renderInvoices("/invoices?paymentStatus=unpaid");
 
     await waitFor(() => expect(screen.getByTestId("ar-flag-never_sent-1")).toBeTruthy());
     expect(screen.getByTestId("ar-flag-not_in_qb-1")).toBeTruthy();
@@ -436,7 +468,7 @@ describe("flag badges", () => {
   it("never flags a draft as never sent", async () => {
     const { arFlags, ...draft } = cleanInvoice({ status: "draft", sentAt: null }) as Row;
     rowsForResponse = [draft];
-    renderInvoices();
+    renderInvoices("/invoices?paymentStatus=unpaid");
 
     await waitFor(() => expect(screen.getByTestId("ar-balance-1")).toBeTruthy());
     expect(screen.queryByTestId("ar-flag-never_sent-1")).toBeNull();
@@ -448,7 +480,7 @@ describe("flag badges", () => {
 describe("balance due", () => {
   it("shows the synced balance when a sync has run", async () => {
     rowsForResponse = [cleanInvoice({ balanceDue: "120.00", balanceIsFallback: false })];
-    renderInvoices();
+    renderInvoices("/invoices?paymentStatus=unpaid");
     await waitFor(() => expect(screen.getByTestId("ar-balance-1")).toHaveTextContent("$120.00"));
   });
 
@@ -462,7 +494,7 @@ describe("balance due", () => {
         arFlags: ["stale_sync"],
       }),
     ];
-    renderInvoices();
+    renderInvoices("/invoices?paymentStatus=unpaid");
 
     await waitFor(() => expect(screen.getByTestId("ar-balance-1")).toHaveTextContent("$500.00"));
     // The figure may be wrong, and the row says so rather than implying
@@ -496,7 +528,7 @@ describe("A/R columns", () => {
 
   it("leaves days overdue blank for an invoice that is not yet due", async () => {
     rowsForResponse = [cleanInvoice()];
-    renderInvoices();
+    renderInvoices("/invoices?paymentStatus=unpaid");
     await waitFor(() => expect(screen.getByTestId("ar-bucket-1")).toHaveTextContent("Current"));
     // Task #1942 — the balance cell says so in words rather than with a dash.
     expect(screen.getByTestId("ar-days-overdue-1")).toHaveTextContent("Not yet due");
@@ -512,7 +544,7 @@ describe("A/R columns", () => {
       }),
     ];
     eligibilityForResponse = [eligible(1)];
-    renderInvoices();
+    renderInvoices("/invoices?paymentStatus=unpaid");
     // Task #1942 — the reminder history moved into the status cell's second
     // line; the action it used to sit beside is now the row's named primary
     // action, and its state comes from the server.
@@ -526,7 +558,7 @@ describe("A/R columns", () => {
   it("says so and offers the send action when no reminder has gone out", async () => {
     rowsForResponse = [cleanInvoice({ lastReminderAt: null, reminderCount: 0 })];
     eligibilityForResponse = [eligible(1)];
-    renderInvoices();
+    renderInvoices("/invoices?paymentStatus=unpaid");
     await waitFor(() =>
       expect(firstByTestId("ar-last-reminder-1")).toHaveTextContent("No reminders"),
     );
@@ -653,7 +685,7 @@ describe("bookkeeper controls", () => {
   it("still offers a billing manager the authoring controls", async () => {
     roleRef.current = "billing_manager";
     rowsForResponse = [cleanInvoice()];
-    renderInvoices();
+    renderInvoices("/invoices?paymentStatus=unpaid");
     await waitFor(() => expect(screen.getByTestId("ar-balance-1")).toBeTruthy());
 
     await openActionsMenu(1);
@@ -715,7 +747,7 @@ describe("internal A/R note indicator", () => {
     // conversation about this customer exists.
     roleRef.current = "irrigation_manager";
     rowsForResponse = [cleanInvoice()];
-    renderInvoices();
+    renderInvoices("/invoices?paymentStatus=unpaid");
     await waitFor(() => expect(screen.getByTestId("ar-balance-1")).toBeTruthy());
     expect(screen.queryByTestId("ar-note-indicator-1")).toBeNull();
     expect(screen.queryByTestId("ar-note-indicator-mobile-1")).toBeNull();

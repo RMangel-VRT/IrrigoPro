@@ -688,10 +688,15 @@ export function __collectionsDefaultIsNotACapability(): void {
 }
 
 describe("collections landing default is not usable as an authorization guard", () => {
-  it("resolves the bookkeeper default through the helper, not a role string", () => {
+  it("returns true for every invoice-reading role and false for everything else", () => {
+    // All roles in CAN_READ_INVOICES get the AR-first landing.
     assert.equal(usesUiDefault("bookkeeper", COLLECTIONS_LANDING_DEFAULT), true);
-    assert.equal(usesUiDefault("billing_manager", COLLECTIONS_LANDING_DEFAULT), false);
-    assert.equal(usesUiDefault("company_admin", COLLECTIONS_LANDING_DEFAULT), false);
+    assert.equal(usesUiDefault("billing_manager", COLLECTIONS_LANDING_DEFAULT), true);
+    assert.equal(usesUiDefault("company_admin", COLLECTIONS_LANDING_DEFAULT), true);
+    assert.equal(usesUiDefault("irrigation_manager", COLLECTIONS_LANDING_DEFAULT), true);
+    assert.equal(usesUiDefault("super_admin", COLLECTIONS_LANDING_DEFAULT), true);
+    // Non-invoice roles and bad inputs always return false.
+    assert.equal(usesUiDefault("field_tech", COLLECTIONS_LANDING_DEFAULT), false);
     assert.equal(usesUiDefault("not_a_role", COLLECTIONS_LANDING_DEFAULT), false);
     assert.equal(usesUiDefault(null, COLLECTIONS_LANDING_DEFAULT), false);
     assert.equal(usesUiDefault(undefined, COLLECTIONS_LANDING_DEFAULT), false);
