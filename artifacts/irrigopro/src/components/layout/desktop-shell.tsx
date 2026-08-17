@@ -277,6 +277,15 @@ export function DesktopShell({ navConfig, children }: DesktopShellProps) {
   // rather than firing one that 403s in the background.
   const enableOverdueBadge = hasCapability(userRole, CAN_READ_INVOICES);
   const badges = useNavBadges(enableBadges, enableOverdueBadge);
+  // Task #1946 — the ShellHint (sidebar-collapse tutorial popover) fires for
+  // every desktop role that has a persistent sidebar. The bookkeeper qualifies
+  // but must NOT be added to `enableBadges` above: that flag is also the gate
+  // for five approval-badge queries (parts, reviews, wet-checks, estimates,
+  // manager-workspace) that the bookkeeper has no scope for. A separate flag
+  // lets the popover appear without issuing any of those background requests.
+  const showShellHint =
+    enableBadges ||
+    userRole === "bookkeeper";
 
   const [actionsTarget, setActionsTarget] = useState<HTMLDivElement | null>(
     null,
@@ -307,7 +316,7 @@ export function DesktopShell({ navConfig, children }: DesktopShellProps) {
             navConfig={navConfig}
             user={user}
             actionsRef={setActionsTarget}
-            showShellHint={enableBadges}
+            showShellHint={showShellHint}
           />
           <div className="flex-1 bg-gray-50">{children}</div>
           <PoweredByFooter />
@@ -461,7 +470,8 @@ function DesktopSidebar({
   const brandThemed =
     userRole === "company_admin" ||
     userRole === "billing_manager" ||
-    userRole === "irrigation_manager";
+    userRole === "irrigation_manager" ||
+    userRole === "bookkeeper";
   return (
     <Sidebar
       collapsible="icon"

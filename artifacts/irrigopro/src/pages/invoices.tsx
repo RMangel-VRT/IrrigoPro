@@ -2166,7 +2166,7 @@ export default function InvoicesPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="max-w-6xl mx-auto p-4 lg:p-6">
+      <div className="w-full px-4 lg:px-6 py-4 lg:py-6">
         {/* Task #1942 — the header states the two numbers this page exists to
             answer: how much is outstanding under the current filter, and how
             many invoices that is. Both are server-computed. */}
@@ -2748,7 +2748,7 @@ export default function InvoicesPage() {
           reminder send, so it shows whichever actions this user holds) */}
       {canSelectRows && selectedIds.size > 0 && (
         <div className="fixed inset-x-0 bottom-0 z-40 border-t border-gray-200 bg-white shadow-lg">
-          <div className="max-w-6xl mx-auto px-4 lg:px-6 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="w-full px-4 lg:px-6 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
               <Button
                 variant="ghost"

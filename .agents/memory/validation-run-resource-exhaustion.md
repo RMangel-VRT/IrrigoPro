@@ -1,10 +1,29 @@
 ---
-name: Validation run resource exhaustion
-description: Parallel validation runs can fail with spawn EAGAIN / uv_thread_create / pino ERR_WORKER_INIT_FAILED — transient, not real test failures.
+name: Validation run thread/PID exhaustion
+description: Parallel completion validation dies with EAGAIN / pthread_create / ERR_WORKER_INIT_FAILED. Retry ONCE; if every run fails, it is a hard ceiling — skip validation instead.
 ---
 
-The full validation run executes ~19 suites concurrently and can exhaust process/thread limits. Symptoms: `spawn ... EAGAIN` from vitest's tinypool, `uv_thread_create` assertion, or pino's `ERR_WORKER_INIT_FAILED` in api-server tests.
+Completion validation runs every registered command **concurrently**. Symptoms of exhaustion:
+`Error: EAGAIN`, `pthread_create: Resource temporarily unavailable`, `uv_thread_create`,
+tinypool `Worker exited unexpectedly`, pino `ERR_WORKER_INIT_FAILED`.
 
-**Why:** container thread/process limits, not the code under test — the same suite passes when run alone.
+These are never assertion failures. Confirm by reading the inspect log: if there is no
+assertion error, the code under test is not what broke.
 
-**How to apply:** when a validation failure's log shows one of these signatures, rerun the single suite in the shell to confirm it passes, then just call markTaskComplete again; do not "fix" the test.
+**Why:** the container has a hard cgroup process cap — `/sys/fs/cgroup/pids.max` is **1024**
+(~309 PIDs in use at idle). Each vitest suite spawns pnpm + node + a tinypool of workers, and
+each Node process claims ~10 platform threads. Past ~20 concurrent commands the run races for
+the last few PIDs. CPU (8 cores) and RAM (16 GB) are NOT the constraint — only PIDs are.
+
+**How to apply — and when to STOP:**
+1. Re-run the affected suites **serially** in the shell to prove the diff is green:
+   `npx vitest run <file> --pool=forks --poolOptions.forks.singleFork` (one file per command).
+2. Retry `markTaskComplete` **once**. A single transient flake usually clears.
+3. **Stop condition — this is the part that matters.** If consecutive runs all fail *and the
+   failing subset is different each time*, it is the PID ceiling, not a flake. Retrying can
+   never converge, because every retry re-launches the same over-subscribed fan-out. Do not
+   keep retrying: each attempt costs the user real money. Escalate to `markTaskComplete` with
+   a `skip_validation_reason` documenting the cap, the shifting failure set, the absence of
+   assertion errors, and the serial runs that passed.
+
+A shifting failure set with zero assertion errors is the fingerprint. Read it early.

@@ -5,7 +5,7 @@ import { Settings, DollarSign, Users } from "lucide-react";
 export default function QuickBooksPage() {
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="max-w-4xl mx-auto p-4">
+      <div className="w-full px-4 lg:px-6 py-4 lg:py-6">
         {/* Header */}
         <div className="mb-6">
           <h1 className="text-2xl font-bold text-gray-900 mb-2">QuickBooks Integration</h1>
@@ -14,7 +14,7 @@ export default function QuickBooksPage() {
           </p>
         </div>
 
-        <div className="grid gap-6 md:grid-cols-2">
+        <div className="grid gap-6 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
           {/* QuickBooks Connection Card */}
           <Card>
             <CardHeader>
@@ -80,7 +80,7 @@ export default function QuickBooksPage() {
           </Card>
 
           {/* Usage Instructions Card */}
-          <Card className="md:col-span-2">
+          <Card className="sm:col-span-2 lg:col-span-1">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Users className="w-5 h-5 text-indigo-600" />
@@ -88,7 +88,7 @@ export default function QuickBooksPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid gap-4 md:grid-cols-3">
+              <div className="grid gap-4 grid-cols-1 sm:grid-cols-3 lg:grid-cols-1">
                 <div className="text-center">
                   <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 font-bold flex items-center justify-center mx-auto mb-2 text-sm">
                     1
