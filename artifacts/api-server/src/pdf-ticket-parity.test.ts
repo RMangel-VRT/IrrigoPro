@@ -261,6 +261,28 @@ describe("ticketPageBS + ticketPageWCB — intentional differences (Slice 4)", (
   });
 });
 
+describe("ticketPageWCB — historical snapshot metadata", () => {
+  it("prefers the billing snapshot address over a later inspection address", () => {
+    const html = ticketPageWCB({
+      ...wcbFixture,
+      wetCheckBilling: {
+        ...wcbFixture.wetCheckBilling,
+        propertyAddress: "Captured Billing Address",
+      },
+      wetCheckView: {
+        ...wcbFixture.wetCheckView,
+        inspection: {
+          ...wcbFixture.wetCheckView.inspection,
+          propertyAddress: "Later Inspection Address",
+        },
+      },
+    }, INVOICE_NUMBER, [], null, undefined, DEFAULT_BRAND_COLORS);
+
+    assert.match(html, /Captured Billing Address/);
+    assert.doesNotMatch(html, /Later Inspection Address/);
+  });
+});
+
 // ── approval text absent from PDF (Task #1193) ────────────────────────────────
 
 describe("ticketPageBS + ticketPageWCB — approval text absent from PDF (Task #1193)", () => {

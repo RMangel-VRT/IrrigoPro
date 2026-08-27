@@ -22,6 +22,7 @@ import { VRT_LOGO_DATA_URI } from './assets/vrt-logo.js';
 import { IRRIGOPRO_LOGO_DATA_URI } from './assets/irrigopro-logo.js';
 import { humanizeIssueType } from './inspection-issue-labels';
 import { isEmptyZone } from './wet-check-zone-filter';
+import { buildPdfSiteMetadata } from './pdf-site-metadata';
 import { ObjectStorageService } from './objectStorage';
 import { thumbPath } from './photo-pipeline';
 import sharp from 'sharp';
@@ -280,6 +281,13 @@ export function buildWetCheckReportHtml(
   const zoneRecords = allZoneRecords.filter(z => !isEmptyZone(z));
   const allPhotos = wc.photos ?? [];
   const summary = deriveHealthSummary(zoneRecords);
+  const site = buildPdfSiteMetadata({
+    locationCandidates: [wc.propertyAddress],
+    branch: wc.branchName,
+  });
+  const inspectedControllers = Array.from(
+    new Set(zoneRecords.map((zone) => zone.controllerLetter).filter(Boolean)),
+  ).map((letter) => `Clock ${letter}`).join(', ');
 
   const attentionZones = zoneRecords.filter(z => z.status === 'checked_with_issues');
   const runningWellZones = zoneRecords.filter(z => z.status === 'checked_ok');
@@ -388,10 +396,12 @@ export function buildWetCheckReportHtml(
 
   <div class="meta-grid">
     <div class="meta-item"><div class="k">Customer</div><div class="v">${esc(wc.customerName)}</div></div>
-    <div class="meta-item"><div class="k">Property Address</div><div class="v">${esc(wc.propertyAddress || '—')}</div></div>
+    ${site.location ? `<div class="meta-item"><div class="k">Location</div><div class="v">${esc(site.location)}</div></div>` : ''}
+    ${site.branch ? `<div class="meta-item"><div class="k">Branch</div><div class="v">${esc(site.branch)}</div></div>` : ''}
     <div class="meta-item"><div class="k">Technician</div><div class="v">${esc(wc.technicianName)}</div></div>
     <div class="meta-item"><div class="k">Inspection Date</div><div class="v">${esc(fmtDate(wc.startedAt))}</div></div>
     <div class="meta-item"><div class="k">Zones Inspected</div><div class="v">${summary.total}</div></div>
+    ${inspectedControllers ? `<div class="meta-item"><div class="k">Controller / Clock</div><div class="v">${esc(inspectedControllers)}</div></div>` : ''}
     ${wc.weather ? `<div class="meta-item"><div class="k">Weather</div><div class="v">${esc(wc.weather)}</div></div>` : '<div class="meta-item"></div>'}
   </div>
 

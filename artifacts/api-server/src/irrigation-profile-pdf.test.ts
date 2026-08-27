@@ -124,6 +124,22 @@ describe('buildIrrigationProfileReportHtml', () => {
     assert.ok(html.includes('Acme Property'), 'Customer/property name present');
   });
 
+  it('renders current property, branch, clock, controller location, and qualified zones', () => {
+    const ctrl = makeControllerWithDetail(
+      { letter: 'A', branchName: 'North', location: 'Pump room' },
+      [makeProgram()],
+      [makeZone({ zoneNumber: 5, isActive: false })],
+    );
+    const html = buildIrrigationProfileReportHtml([ctrl], 'Acme Property', {
+      propertyAddress: '500 Current Site',
+    });
+    assert.ok(html.includes('500 Current Site'));
+    assert.ok(html.includes('North'));
+    assert.ok(html.includes('Clock A'));
+    assert.ok(html.includes('Pump room'));
+    assert.ok(html.includes('Clock A · Zone 5'));
+  });
+
   it('renders the run-time schedule table entries for active programs', () => {
     const prog = makeProgram({ id: 1, name: 'A', startTimes: ['06:00'], wateringDays: ['Mon', 'Thu'] });
     const zones = [

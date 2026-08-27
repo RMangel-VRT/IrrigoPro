@@ -16,6 +16,7 @@ import type {
   IrrigationProgram,
   IrrigationProfileZone,
 } from '@workspace/db/schema';
+import { buildPdfSiteMetadata, pdfSiteMetadataLines } from './pdf-site-metadata';
 import { resolveChromiumExecutable } from './chromium-resolver';
 import { fetchLogoAsBase64 } from './pdf-generator';
 import { VRT_LOGO_DATA_URI } from './assets/vrt-logo.js';
@@ -223,9 +224,16 @@ function renderControllerBlock(
 
   const activePrograms = ctrl.programs.filter((p: any) => p.isActive);
   const inactiveZones = ctrl.zones.filter((z: any) => !z.isActive);
+  const controllerSite = buildPdfSiteMetadata({
+    branch: ctrl.branchName,
+    controllerLabel: ctrl.letter,
+    controllerLocation: ctrl.location,
+  });
 
   const detailPairs: [string, string][] = [
-    ctrl.location ? ['Location', ctrl.location] : null,
+    ...pdfSiteMetadataLines(controllerSite)
+      .filter((line) => line.label !== 'Location')
+      .map((line): [string, string] => [line.label, line.value]),
     ctrl.brand ? ['Brand', ctrl.brand] : null,
     ctrl.model ? ['Model', ctrl.model] : null,
     ctrl.totalZones != null ? ['Total Zones', String(ctrl.totalZones)] : null,
@@ -296,7 +304,7 @@ function renderControllerBlock(
         .map(
           (z: any) => `
         <div class="attention-zone">
-          <span class="zone-ref">Zone ${esc(z.zoneNumber)}</span>
+          <span class="zone-ref">${esc([controllerSite.controller, `Zone ${z.zoneNumber}`].filter(Boolean).join(' · '))}</span>
           <span class="attention-badge-sm">&#9888; Inactive</span>
           ${z.name ? ` &mdash; ${esc(z.name)}` : ''}
           ${z.notes ? `<span class="zone-note"> &middot; ${esc(z.notes)}</span>` : ''}

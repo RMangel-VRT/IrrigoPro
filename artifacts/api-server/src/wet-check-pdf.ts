@@ -7,6 +7,7 @@ import { VRT_LOGO_DATA_URI } from './assets/vrt-logo.js';
 import { IRRIGOPRO_LOGO_DATA_URI } from './assets/irrigopro-logo.js';
 import { resolveCompanyLogoUrl, pdfLogoBaseUrl } from './logo-url';
 import { isEmptyZone } from './wet-check-zone-filter';
+import { buildPdfSiteMetadata, pdfControllerZoneText } from './pdf-site-metadata';
 
 const DEFAULT_BRAND_COLOR = '#1E5A99';
 const DEFAULT_BRAND_DARK = '#143F6B';
@@ -186,6 +187,13 @@ export function buildWetCheckHtml(
   const zonesNA = zoneRecords.filter(z => z.status === 'not_applicable').length;
 
   const zoneRows = zoneRecords.map((zone, idx) => renderZoneBlock(zone, idx)).join('');
+  const site = buildPdfSiteMetadata({
+    locationCandidates: [wc.propertyAddress],
+    branch: wc.branchName,
+  });
+  const inspectedControllers = Array.from(
+    new Set(zoneRecords.map((zone) => zone.controllerLetter).filter(Boolean)),
+  ).join(', ');
 
   return `<!DOCTYPE html>
 <html>
@@ -270,7 +278,8 @@ export function buildWetCheckHtml(
 
   <div class="meta-grid">
     <div class="meta-item"><div class="k">Customer</div><div class="v">${esc(wc.customerName)}</div></div>
-    <div class="meta-item"><div class="k">Property Address</div><div class="v">${esc(wc.propertyAddress || '—')}</div></div>
+    ${site.location ? `<div class="meta-item"><div class="k">Location</div><div class="v">${esc(site.location)}</div></div>` : ''}
+    ${site.branch ? `<div class="meta-item"><div class="k">Branch</div><div class="v">${esc(site.branch)}</div></div>` : ''}
     <div class="meta-item"><div class="k">Technician</div><div class="v">${esc(wc.technicianName)}</div></div>
     <div class="meta-item"><div class="k">Started</div><div class="v">${esc(fmtDate(wc.startedAt))}</div></div>
     <div class="meta-item"><div class="k">Submitted</div><div class="v">${esc(fmtDate(wc.submittedAt))}</div></div>
@@ -278,6 +287,7 @@ export function buildWetCheckHtml(
     ${wc.weather ? `<div class="meta-item"><div class="k">Weather</div><div class="v">${esc(wc.weather)}</div></div>` : ''}
     <div class="meta-item"><div class="k">Inspection Labor</div><div class="v">${Number(wc.totalLaborHours || 0).toFixed(2)}h</div></div>
     <div class="meta-item"><div class="k">Controllers</div><div class="v">${esc(wc.numControllers)}</div></div>
+    ${inspectedControllers ? `<div class="meta-item"><div class="k">Controller / Clock</div><div class="v">${esc(inspectedControllers.split(', ').map((letter) => pdfControllerZoneText(buildPdfSiteMetadata({ controllerLabel: letter }))!).join(', '))}</div></div>` : ''}
   </div>
 
   ${wc.notes ? `

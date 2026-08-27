@@ -4,6 +4,7 @@ import { formatEstimateNumber } from '@workspace/shared';
 import { VRT_LOGO_DATA_URI } from './assets/vrt-logo.js';
 import { IRRIGOPRO_LOGO_DATA_URI } from './assets/irrigopro-logo.js';
 import { humanizeIssueType } from './inspection-issue-labels.js';
+import { buildPdfSiteMetadata, pdfControllerZoneText } from './pdf-site-metadata.js';
 
 export const DEFAULT_BRAND_COLOR = '#1E5A99';
 export const DEFAULT_BRAND_DARK = '#143F6B';
@@ -372,9 +373,12 @@ export function buildEstimateHtml(
 
   const lat = estimate.workLocationLat;
   const lng = estimate.workLocationLng;
-  const workAddr = estimate.workLocationAddress;
-  const controllerLetter = estimate.controllerLetter;
-  const zoneNumber = estimate.zoneNumber;
+  const site = buildPdfSiteMetadata({
+    locationCandidates: [estimate.workLocationAddress, estimate.projectAddress],
+    branch: estimate.branchName,
+    controllerLabel: estimate.controllerLetter,
+    zoneNumber: estimate.zoneNumber,
+  });
   const hasPin = lat != null && lng != null;
   const mapLink = hasPin
     ? `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`
@@ -386,10 +390,10 @@ export function buildEstimateHtml(
   const pinSection = hasPin ? `
     <section class="card pin-card">
       <h2>Pinned Work Location</h2>
-      ${workAddr ? `<div><span class="lbl">Address:</span> ${escapeHtml(workAddr)}</div>` : ''}
+       ${site.location ? `<div><span class="lbl">Location:</span> ${escapeHtml(site.location)}</div>` : ''}
       <div><span class="lbl">Coordinates:</span> <span class="mono">${escapeHtml(coordsText)}</span></div>
       <div><span class="lbl">Map link:</span> <a href="${escapeHtml(mapLink)}">${escapeHtml(mapLink)}</a></div>
-      ${(controllerLetter || zoneNumber != null) ? `<div><span class="lbl">Controller / Zone:</span> ${controllerLetter ? `Controller ${escapeHtml(String(controllerLetter))}` : ''}${controllerLetter && zoneNumber != null ? ' \u00b7 ' : ''}${zoneNumber != null ? `Zone ${escapeHtml(String(zoneNumber))}` : ''}</div>` : ''}
+       ${pdfControllerZoneText(site) ? `<div><span class="lbl">Controller / Zone:</span> ${escapeHtml(pdfControllerZoneText(site))}</div>` : ''}
     </section>` : '';
 
   const company = opts.company;
@@ -601,13 +605,9 @@ export function buildEstimateHtml(
     <section class="card">
       <h2>Project / Work Site</h2>
       <div class="part-name">${escapeHtml(estimate.projectName)}</div>
-      ${estimate.projectAddress ? `<div class="muted">${escapeHtml(estimate.projectAddress)}</div>` : ''}
-      ${(() => {
-        const parts: string[] = [];
-        if (controllerLetter) parts.push(`Clock ${escapeHtml(String(controllerLetter))}`);
-        if (zoneNumber != null) parts.push(`Zone ${escapeHtml(String(zoneNumber))}`);
-        return parts.length > 0 ? `<div class="muted">${parts.join(' \u00b7 ')}</div>` : '';
-      })()}
+      ${site.location ? `<div class="muted">${escapeHtml(site.location)}</div>` : ''}
+      ${site.branch ? `<div class="muted">Branch: ${escapeHtml(site.branch)}</div>` : ''}
+      ${pdfControllerZoneText(site) ? `<div class="muted">${escapeHtml(pdfControllerZoneText(site))}</div>` : ''}
     </section>
   </div>
 

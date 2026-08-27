@@ -141,6 +141,21 @@ describe("buildWetCheckReportHtml", () => {
     assert.ok(html.includes("99 Oak Ave"), "Property address missing");
   });
 
+  it("uses the inspection snapshot location, branch, clocks, and zone identifiers", () => {
+    const wc = makeWc({
+      propertyAddress: "Historical Inspection Address",
+      branchName: "North Branch",
+      zoneRecords: [
+        makeZone({ controllerLetter: "B", zoneNumber: 6, status: "checked_ok" }),
+      ] as any,
+    });
+    const html = buildWetCheckReportHtml(wc);
+    assert.ok(html.includes("Historical Inspection Address"));
+    assert.ok(html.includes("North Branch"));
+    assert.ok(html.includes("Clock B"));
+    assert.ok(html.includes("B-6"));
+  });
+
   it("shows technician name", () => {
     const wc = makeWc({ technicianName: "Alice Sprinkler" });
     const html = buildWetCheckReportHtml(wc);

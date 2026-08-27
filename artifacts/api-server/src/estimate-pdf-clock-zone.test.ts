@@ -53,6 +53,14 @@ function makeEstimate(
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('buildEstimateHtml — Clock / Zone line (Project / Work Site section)', () => {
+  it('prefers the pinned work location address over the generic project address', () => {
+    const html = buildEstimateHtml(makeEstimate({
+      projectAddress: 'Generic Project Address',
+      workLocationAddress: 'Specific Pinned Address',
+    }));
+    assert.ok(html.includes('Specific Pinned Address'));
+    assert.ok(!html.includes('Generic Project Address'));
+  });
   it('renders "Clock A · Zone 12" when both fields are set', () => {
     const html = buildEstimateHtml(
       makeEstimate({ controllerLetter: 'A', zoneNumber: 12 }),

@@ -14,6 +14,7 @@ import { VRT_LOGO_DATA_URI } from './assets/vrt-logo';
 import { IRRIGOPRO_LOGO_DATA_URI } from './assets/irrigopro-logo';
 import { WATERMARK_DATA_URI } from './assets/watermark';
 import { JOB_TYPE_COLORS, type JobTypeKey } from '@workspace/shared';
+import { buildPdfSiteMetadata, pdfControllerZoneText } from './pdf-site-metadata';
 export { JOB_TYPE_COLORS, type JobTypeKey };
 
 /**
@@ -332,15 +333,19 @@ export function ticketPageWO(wo: PdfWorkOrderRow, invoiceNumber: string, photoDa
        </div>`
     : '';
 
-  const locationLine = [wo.projectAddress, wo.locationNotes].filter(Boolean).join(' — ');
-  const branchLine = wo.branchName
-    ? `<div class="ticket-header-branch">&#127970; Branch: ${wo.branchName}</div>`
+  const site = buildPdfSiteMetadata({
+    locationCandidates: [wo.workLocationAddress, wo.projectAddress],
+    branch: wo.branchName,
+    controllerLabel: wo.controllerLetter,
+    zoneNumber: wo.zoneNumber,
+  });
+  const locationLine = [site.location, wo.locationNotes].filter(Boolean).join(' — ');
+  const branchLine = site.branch
+    ? `<div class="ticket-header-branch">&#127970; Branch: ${site.branch}</div>`
     : '';
-  const clockZoneParts: string[] = [];
-  if (wo.controllerLetter) clockZoneParts.push(`Clock ${wo.controllerLetter}`);
-  if (wo.zoneNumber != null) clockZoneParts.push(`Zone ${wo.zoneNumber}`);
-  const clockZoneLine = clockZoneParts.length > 0
-    ? `<div class="ticket-header-branch">&#128336; ${clockZoneParts.join(' \u00b7 ')}</div>`
+  const clockZoneText = pdfControllerZoneText(site);
+  const clockZoneLine = clockZoneText
+    ? `<div class="ticket-header-branch">&#128336; ${clockZoneText}</div>`
     : '';
 
   const logoHtml = logoDataUri
@@ -416,11 +421,15 @@ export function ticketPageBS(bs: PdfBillingSheetRow, invoiceNumber: string, phot
       ? `<div class="ticket-header-company-name">${companyName}</div>`
       : '';
 
-  const bsClockZoneParts: string[] = [];
-  if (bs.controllerLetter) bsClockZoneParts.push(`Clock ${bs.controllerLetter}`);
-  if (bs.zoneNumber != null) bsClockZoneParts.push(`Zone ${bs.zoneNumber}`);
-  const bsClockZoneLine = bsClockZoneParts.length > 0
-    ? `<div class="ticket-header-branch">&#128336; ${bsClockZoneParts.join(' \u00b7 ')}</div>`
+  const bsSite = buildPdfSiteMetadata({
+    locationCandidates: [bs.workLocationAddress, bs.propertyAddress],
+    branch: bs.branchName,
+    controllerLabel: bs.controllerLetter,
+    zoneNumber: bs.zoneNumber,
+  });
+  const bsClockZoneText = pdfControllerZoneText(bsSite);
+  const bsClockZoneLine = bsClockZoneText
+    ? `<div class="ticket-header-branch">&#128336; ${bsClockZoneText}</div>`
     : '';
 
   return `
@@ -430,8 +439,8 @@ export function ticketPageBS(bs: PdfBillingSheetRow, invoiceNumber: string, phot
         ${bsLogoHtml}
         <div class="ticket-header-line1">Billing Sheet #${bs.billingNumber} &nbsp;|&nbsp; Invoice #${invoiceNumber}</div>
         <div class="ticket-header-line2">Date: ${formatDate(bs.workDate)} &nbsp;|&nbsp; Technician: ${bs.technicianName} &nbsp;|&nbsp; Hours: ${bs.totalHours} hrs</div>
-        ${bs.propertyAddress ? `<div class="ticket-header-line3">&#128205; ${bs.propertyAddress}</div>` : ''}
-        ${bs.branchName ? `<div class="ticket-header-branch">&#127970; Branch: ${bs.branchName}</div>` : ''}
+        ${bsSite.location ? `<div class="ticket-header-line3">&#128205; ${bsSite.location}</div>` : ''}
+        ${bsSite.branch ? `<div class="ticket-header-branch">&#127970; Branch: ${bsSite.branch}</div>` : ''}
         ${bsClockZoneLine}
       </div>
     </div>
@@ -485,6 +494,10 @@ export function ticketPageWCB(
   zonePhotoGroups?: WcbZonePhotoGroupResolved[],
 ): string {
   const { wetCheckBilling: wcb, wetCheckView: view } = row;
+  const wcbSite = buildPdfSiteMetadata({
+    locationCandidates: [wcb.propertyAddress, view.inspection.propertyAddress],
+    branch: wcb.branchName,
+  });
 
   const totalHours = parseFloat(String(wcb.totalHours || '0'));
   const laborRate = parseFloat(String(wcb.appliedLaborRate || wcb.laborRate || '0'));
@@ -523,8 +536,8 @@ export function ticketPageWCB(
         ${wcbLogoHtml}
         <div class="ticket-header-line1">WC Billing #${wcb.billingNumber} &nbsp;|&nbsp; Invoice #${invoiceNumber}</div>
         <div class="ticket-header-line2">Date: ${formatDate(new Date(wcb.workDate))} &nbsp;|&nbsp; Technician: ${wcb.technicianName} &nbsp;|&nbsp; Hours: ${totalHours} hrs</div>
-        ${wcb.propertyAddress ? `<div class="ticket-header-line3">&#128205; ${wcb.propertyAddress}</div>` : ''}
-        ${wcb.branchName ? `<div class="ticket-header-branch">&#127970; Branch: ${wcb.branchName}</div>` : ''}
+        ${wcbSite.location ? `<div class="ticket-header-line3">&#128205; ${wcbSite.location}</div>` : ''}
+        ${wcbSite.branch ? `<div class="ticket-header-branch">&#127970; Branch: ${wcbSite.branch}</div>` : ''}
       </div>
     </div>
 
