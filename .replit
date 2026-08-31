@@ -128,6 +128,10 @@ args = "estimate-expiry-anchor"
 task = "workflow.run"
 args = "estimate-lifecycle-ui"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "pdf-site-metadata"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -432,6 +436,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/irrigopro exec vitest run src/lib/lifecycle.test.ts src/lib/lifecycle-parity.test.ts"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "pdf-site-metadata"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/pdf-site-metadata.test.ts src/pdf-ticket-parity.test.ts src/pdf-view-model.test.ts src/pdf-helpers-wcb.test.ts"
 
 [workflows.workflow.metadata]
 isValidation = true

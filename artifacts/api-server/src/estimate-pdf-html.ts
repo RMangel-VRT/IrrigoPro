@@ -25,15 +25,8 @@ export interface RenderEstimatePdfOptions {
   sentAt?: Date | string | null;
 }
 
-export function escapeHtml(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
+export { escapeHtml } from './pdf-escape.js';
+import { escapeHtml } from './pdf-escape.js';
 
 export function fmtMoney(value: string | number | null | undefined): string {
   const n = typeof value === 'string' ? parseFloat(value) : (value ?? 0);
@@ -379,23 +372,21 @@ export function buildEstimateHtml(
   const totalLaborHours = parseFloat(estimate.totalLaborHours) || 0;
   const laborRateLabel = `Labor (${totalLaborHours.toFixed(2)}h \u00d7 ${fmtMoney(laborRate)}/hr)`;
 
-  const lat = estimate.workLocationLat;
-  const lng = estimate.workLocationLng;
+  // Task #1959 — the pin is normalized by the shared site-metadata contract so
+  // estimates and invoice tickets format coordinates and map links identically.
   const site = buildPdfSiteMetadata({
     locationCandidates: [estimate.workLocationAddress, estimate.projectAddress],
     branch: estimate.branchName,
     controllerLabel: estimate.controllerLetter,
     zoneNumber: estimate.zoneNumber,
+    latitude: estimate.workLocationLat,
+    longitude: estimate.workLocationLng,
   });
-  const hasPin = lat != null && lng != null;
-  const mapLink = hasPin
-    ? `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`
-    : '';
-  const latNum = hasPin ? parseFloat(String(lat)) : 0;
-  const lngNum = hasPin ? parseFloat(String(lng)) : 0;
-  const coordsText = hasPin ? `${latNum.toFixed(6)}, ${lngNum.toFixed(6)}` : '';
+  const pin = site.pin;
+  const mapLink = pin ? pin.mapUrl : '';
+  const coordsText = pin ? pin.coordinates : '';
 
-  const pinSection = hasPin ? `
+  const pinSection = pin ? `
     <section class="card pin-card">
       <h2>Pinned Work Location</h2>
        ${site.location ? `<div><span class="lbl">Location:</span> ${escapeHtml(site.location)}</div>` : ''}

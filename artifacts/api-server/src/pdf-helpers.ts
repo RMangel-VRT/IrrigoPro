@@ -14,7 +14,13 @@ import { VRT_LOGO_DATA_URI } from './assets/vrt-logo';
 import { IRRIGOPRO_LOGO_DATA_URI } from './assets/irrigopro-logo';
 import { WATERMARK_DATA_URI } from './assets/watermark';
 import { JOB_TYPE_COLORS, type JobTypeKey } from '@workspace/shared';
-import { buildPdfSiteMetadata, pdfControllerZoneText } from './pdf-site-metadata';
+import { escapeHtml } from './pdf-escape';
+import {
+  buildPdfSiteMetadata,
+  pdfControllerZoneText,
+  pdfLineItemZoneLabel,
+  type PdfSiteMetadata,
+} from './pdf-site-metadata';
 export { JOB_TYPE_COLORS, type JobTypeKey };
 
 /**
@@ -317,6 +323,31 @@ export function coverPage(
   </div>`;
 }
 
+/**
+ * Task #1959 — the work-site block in a ticket header.
+ *
+ * The address is the field a customer scans for first on a printed ticket, so
+ * it renders as its own emphasized block rather than as another small metadata
+ * line. The dropped pin sits beneath it when coordinates were captured.
+ *
+ * Returns '' when there is neither an address nor a pin, so a ticket with no
+ * site data renders no empty container and no orphan label.
+ */
+function ticketSiteBlock(site: PdfSiteMetadata, locationSuffix?: string | null): string {
+  const locationText = [site.location, locationSuffix].filter(Boolean).join(' — ');
+  const pin = site.pin;
+  if (!locationText && !pin) return '';
+
+  const addressHtml = locationText
+    ? `<div class="ticket-site-address">&#128205; ${escapeHtml(locationText)}</div>`
+    : '';
+  const pinHtml = pin
+    ? `<div class="ticket-site-pin">Pin ${escapeHtml(pin.coordinates)} &nbsp;&middot;&nbsp; <a href="${escapeHtml(pin.mapUrl)}">Open in Maps</a></div>`
+    : '';
+
+  return `<div class="ticket-site-block">${addressHtml}${pinHtml}</div>`;
+}
+
 export function ticketPageWO(wo: PdfWorkOrderRow, invoiceNumber: string, photoDataUris: string[], logoDataUri?: string | null, companyName?: string): string {
   const workText = wo.aiDetailedDescription || wo.workSummary || wo.workDescription;
   const workBullets = workText
@@ -333,19 +364,26 @@ export function ticketPageWO(wo: PdfWorkOrderRow, invoiceNumber: string, photoDa
        </div>`
     : '';
 
+  // Task #1959 — clock/zone are recorded per line item far more often than on
+  // the parent work order, so merge both sources. One distinct value still
+  // reads singular; several read as a multi-zone summary.
   const site = buildPdfSiteMetadata({
     locationCandidates: [wo.workLocationAddress, wo.projectAddress],
     branch: wo.branchName,
     controllerLabel: wo.controllerLetter,
     zoneNumber: wo.zoneNumber,
+    controllerLabels: (wo.items ?? []).map(item => item.controllerLetter),
+    zoneNumbers: (wo.items ?? []).map(item => item.zoneNumber),
+    latitude: wo.workLocationLat,
+    longitude: wo.workLocationLng,
   });
-  const locationLine = [site.location, wo.locationNotes].filter(Boolean).join(' — ');
+  const siteBlock = ticketSiteBlock(site, wo.locationNotes);
   const branchLine = site.branch
-    ? `<div class="ticket-header-branch">&#127970; Branch: ${site.branch}</div>`
+    ? `<div class="ticket-header-branch">&#127970; Branch: ${escapeHtml(site.branch)}</div>`
     : '';
   const clockZoneText = pdfControllerZoneText(site);
   const clockZoneLine = clockZoneText
-    ? `<div class="ticket-header-branch">&#128336; ${clockZoneText}</div>`
+    ? `<div class="ticket-header-branch">&#128336; ${escapeHtml(clockZoneText)}</div>`
     : '';
 
   const logoHtml = logoDataUri
@@ -361,7 +399,7 @@ export function ticketPageWO(wo: PdfWorkOrderRow, invoiceNumber: string, photoDa
         ${logoHtml}
         <div class="ticket-header-line1">Work Order #${wo.workOrderNumber} &nbsp;|&nbsp; Invoice #${invoiceNumber}</div>
         <div class="ticket-header-line2">Date: ${wo.completedAt ? formatDate(wo.completedAt) : 'N/A'} &nbsp;|&nbsp; Technician: ${wo.technicianName} &nbsp;|&nbsp; Hours: ${wo.totalHours} hrs</div>
-        ${locationLine ? `<div class="ticket-header-line3">&#128205; ${locationLine}</div>` : ''}
+        ${siteBlock}
         ${branchLine}
         ${clockZoneLine}
       </div>
@@ -387,7 +425,7 @@ export function ticketPageWO(wo: PdfWorkOrderRow, invoiceNumber: string, photoDa
       </div>
     </div>
 
-    ${partsTableFromWO(wo.items)}
+    ${partsTableFromWO(wo.items, site.zone)}
 
     ${photoFailWarning}
     ${photoGridSection(photoDataUris)}
@@ -421,15 +459,24 @@ export function ticketPageBS(bs: PdfBillingSheetRow, invoiceNumber: string, phot
       ? `<div class="ticket-header-company-name">${companyName}</div>`
       : '';
 
+  // Task #1959 — billing sheet line items carry no clock/zone columns at all;
+  // for wet-check-backed sheets the real values live on the inspected zone
+  // records that already drive the Repairs Summary below.
+  const bsWetCheckZones = bs.wetCheckView?.zones ?? [];
   const bsSite = buildPdfSiteMetadata({
     locationCandidates: [bs.workLocationAddress, bs.propertyAddress],
     branch: bs.branchName,
     controllerLabel: bs.controllerLetter,
     zoneNumber: bs.zoneNumber,
+    controllerLabels: bsWetCheckZones.map(zone => zone.controllerLetter),
+    zoneNumbers: bsWetCheckZones.map(zone => zone.zoneNumber),
+    latitude: bs.workLocationLat,
+    longitude: bs.workLocationLng,
   });
+  const bsSiteBlock = ticketSiteBlock(bsSite);
   const bsClockZoneText = pdfControllerZoneText(bsSite);
   const bsClockZoneLine = bsClockZoneText
-    ? `<div class="ticket-header-branch">&#128336; ${bsClockZoneText}</div>`
+    ? `<div class="ticket-header-branch">&#128336; ${escapeHtml(bsClockZoneText)}</div>`
     : '';
 
   return `
@@ -439,8 +486,8 @@ export function ticketPageBS(bs: PdfBillingSheetRow, invoiceNumber: string, phot
         ${bsLogoHtml}
         <div class="ticket-header-line1">Billing Sheet #${bs.billingNumber} &nbsp;|&nbsp; Invoice #${invoiceNumber}</div>
         <div class="ticket-header-line2">Date: ${formatDate(bs.workDate)} &nbsp;|&nbsp; Technician: ${bs.technicianName} &nbsp;|&nbsp; Hours: ${bs.totalHours} hrs</div>
-        ${bsSite.location ? `<div class="ticket-header-line3">&#128205; ${bsSite.location}</div>` : ''}
-        ${bsSite.branch ? `<div class="ticket-header-branch">&#127970; Branch: ${bsSite.branch}</div>` : ''}
+        ${bsSiteBlock}
+        ${bsSite.branch ? `<div class="ticket-header-branch">&#127970; Branch: ${escapeHtml(bsSite.branch)}</div>` : ''}
         ${bsClockZoneLine}
       </div>
     </div>
@@ -494,10 +541,21 @@ export function ticketPageWCB(
   zonePhotoGroups?: WcbZonePhotoGroupResolved[],
 ): string {
   const { wetCheckBilling: wcb, wetCheckView: view } = row;
+  // Task #1959 — clock/zone were previously never passed in here, so these
+  // lines could not render at all regardless of the data. They come from the
+  // inspected zone records, the same source as the Repairs Summary body.
   const wcbSite = buildPdfSiteMetadata({
     locationCandidates: [wcb.propertyAddress, view.inspection.propertyAddress],
     branch: wcb.branchName,
+    controllerLabels: (view.zones ?? []).map(zone => zone.controllerLetter),
+    zoneNumbers: (view.zones ?? []).map(zone => zone.zoneNumber),
+    // No pin here: wet_check_billings carries no coordinate columns.
   });
+  const wcbSiteBlock = ticketSiteBlock(wcbSite);
+  const wcbClockZoneText = pdfControllerZoneText(wcbSite);
+  const wcbClockZoneLine = wcbClockZoneText
+    ? `<div class="ticket-header-branch">&#128336; ${escapeHtml(wcbClockZoneText)}</div>`
+    : '';
 
   const totalHours = parseFloat(String(wcb.totalHours || '0'));
   const laborRate = parseFloat(String(wcb.appliedLaborRate || wcb.laborRate || '0'));
@@ -536,8 +594,9 @@ export function ticketPageWCB(
         ${wcbLogoHtml}
         <div class="ticket-header-line1">WC Billing #${wcb.billingNumber} &nbsp;|&nbsp; Invoice #${invoiceNumber}</div>
         <div class="ticket-header-line2">Date: ${formatDate(new Date(wcb.workDate))} &nbsp;|&nbsp; Technician: ${wcb.technicianName} &nbsp;|&nbsp; Hours: ${totalHours} hrs</div>
-        ${wcbSite.location ? `<div class="ticket-header-line3">&#128205; ${wcbSite.location}</div>` : ''}
-        ${wcbSite.branch ? `<div class="ticket-header-branch">&#127970; Branch: ${wcbSite.branch}</div>` : ''}
+        ${wcbSiteBlock}
+        ${wcbSite.branch ? `<div class="ticket-header-branch">&#127970; Branch: ${escapeHtml(wcbSite.branch)}</div>` : ''}
+        ${wcbClockZoneLine}
       </div>
     </div>
 
@@ -725,7 +784,7 @@ export function partsBlockForWetCheckBS(
 
     const subtotalRow = `
       <tr class="zone-subtotal-row">
-        <td colspan="4" style="font-weight:700; color:${black};">Zone ${zone.zoneLabel} Subtotal</td>
+        <td colspan="4" style="font-weight:700; color:${black};">Zone ${escapeHtml(zone.zoneLabel)} Subtotal</td>
         <td class="text-right" style="font-weight:700; color:${brown};">${money(String(zoneSubtotalAmt))}</td>
       </tr>`;
 
@@ -742,8 +801,8 @@ export function partsBlockForWetCheckBS(
     }
 
     const zoneHeaderLabel = (zone.controllerLetter && zone.zoneNumber != null)
-      ? `Clock ${zone.controllerLetter} \u00b7 Zone ${zone.zoneNumber}`
-      : `Zone ${zone.zoneLabel}`;
+      ? `Clock ${escapeHtml(zone.controllerLetter)} \u00b7 Zone ${escapeHtml(zone.zoneNumber)}`
+      : `Zone ${escapeHtml(zone.zoneLabel)}`;
 
     return `
   <div class="zone-block">
@@ -773,15 +832,26 @@ export function partsBlockForWetCheckBS(
   return repairsSummaryBlock + zoneBlocks;
 }
 
-export function partsTableFromWO(items: PdfWorkOrderRow['items']): string {
+/**
+ * Task #1959 — `ticketZoneSummary` is the ticket-level zone string. When a
+ * ticket spans several zones the per-line label is what makes the table
+ * readable, so it is emitted only where it adds information: a single-zone
+ * ticket already says so in its header.
+ */
+export function partsTableFromWO(items: PdfWorkOrderRow['items'], ticketZoneSummary?: string | null): string {
   if (!items || items.length === 0) {
     return `<div class="ticket-section"><p class="no-items-msg">No parts recorded for this work order.</p></div>`;
   }
+  const isMultiZoneTicket = typeof ticketZoneSummary === 'string' && ticketZoneSummary.startsWith('Zones ');
   const rows = items.map(item => {
+    const zoneLabel = isMultiZoneTicket
+      ? pdfLineItemZoneLabel(item.controllerLetter, item.zoneNumber)
+      : null;
+    const zoneTag = zoneLabel ? `<span class="item-zone-tag">${escapeHtml(zoneLabel)}</span>` : '';
     const subLines = [item.partDescription, item.notes].filter(Boolean).map(s => `<small class="item-note">${s}</small>`).join('');
     return `
       <tr>
-        <td>${item.partName}${subLines ? `<br>${subLines}` : ''}</td>
+        <td>${item.partName}${zoneTag}${subLines ? `<br>${subLines}` : ''}</td>
         <td class="text-right">${item.quantity}</td>
         <td class="text-right">${formatCurrency(item.unitPrice)}</td>
         <td class="text-right">${formatCurrency(item.rowTotal)}</td>
@@ -1641,10 +1711,35 @@ export function buildFullCSS(colors: PdfBrandColors = DEFAULT_BRAND_COLORS): str
     line-height: 1.3;
   }
 
-  .ticket-header-line3 {
-    font-size: 11px;
-    color: rgba(255,255,255,0.75);
+  /* Task #1959 — the work site reads as its own block, not as another small
+     metadata line. Emphasis is the point: this is what a customer scans for. */
+  .ticket-site-block {
+    margin-top: 5px;
+    padding: 5px 8px;
+    background: rgba(255,255,255,0.15);
+    border-left: 3px solid rgba(255,255,255,0.9);
+    border-radius: 2px;
+  }
+
+  .ticket-site-address {
+    font-size: 13px;
+    font-weight: 700;
+    color: #ffffff;
     line-height: 1.3;
+    letter-spacing: 0.01em;
+  }
+
+  .ticket-site-pin {
+    margin-top: 2px;
+    font-size: 9px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: rgba(255,255,255,0.85);
+    line-height: 1.3;
+  }
+
+  .ticket-site-pin a {
+    color: rgba(255,255,255,0.95);
+    text-decoration: underline;
   }
 
   .ticket-header-branch {
@@ -1772,6 +1867,20 @@ export function buildFullCSS(colors: PdfBrandColors = DEFAULT_BRAND_COLORS): str
   .items-table td { padding: 6px 10px; color: ${black}; }
   .items-table td.text-right { text-align: right; }
   .item-note { color: #6b7280; font-size: 10px; }
+
+  /* Task #1959 — per-line clock/zone on multi-zone work-order tickets. */
+  .item-zone-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 5px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    background: #f3f4f6;
+    color: #374151;
+    font-size: 8.5px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
   .no-items-msg { color: #9ca3af; font-size: 11px; font-style: italic; }
 
   /* Photos */

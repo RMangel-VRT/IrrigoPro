@@ -32,6 +32,14 @@ export interface PdfWorkOrderItemRow {
   laborHours: number;
   rowTotal: number;
   notes: string;
+  /**
+   * Task #1959 — techs record clock/zone per line item (Task #1437 carried
+   * these through estimate→work-order conversion), so the parent work order
+   * is usually blank while the items are not. Optional: non-inspection items
+   * never populate them.
+   */
+  controllerLetter?: string | null;
+  zoneNumber?: number | null;
 }
 
 export interface PdfWorkOrderRow {
@@ -39,6 +47,9 @@ export interface PdfWorkOrderRow {
   projectName: string;
   projectAddress: string;
   workLocationAddress?: string;
+  /** Task #1959 — dropped pin (map picker, wizard, or the tech's "I'm here"). */
+  workLocationLat?: string | number | null;
+  workLocationLng?: string | number | null;
   branchName: string | null;
   controllerLetter: string | null;
   zoneNumber: number | null;
@@ -74,6 +85,9 @@ export interface PdfBillingSheetRow {
   workDescription: string;
   propertyAddress: string;
   workLocationAddress?: string;
+  /** Task #1959 — dropped pin (mobile GPS at save/submit, or the web wizard picker). */
+  workLocationLat?: string | number | null;
+  workLocationLng?: string | number | null;
   branchName: string | null;
   controllerLetter: string | null;
   zoneNumber: number | null;
@@ -292,6 +306,8 @@ export function buildPdfViewModel(data: InvoiceDetailData): BuildPdfViewModelRes
         laborHours,
         rowTotal,
         notes: safeStr(item.notes),
+        controllerLetter: safeStr((item as any).controllerLetter) || null,
+        zoneNumber: (item as any).zoneNumber != null ? Number((item as any).zoneNumber) : null,
       };
     });
 
@@ -304,6 +320,8 @@ export function buildPdfViewModel(data: InvoiceDetailData): BuildPdfViewModelRes
       projectName: safeStr(workOrder.projectName, 'Service Work'),
       projectAddress: safeStr(workOrder.projectAddress),
       workLocationAddress: safeStr(workOrder.workLocationAddress),
+      workLocationLat: (workOrder as any).workLocationLat ?? null,
+      workLocationLng: (workOrder as any).workLocationLng ?? null,
       branchName: workOrder.branchName && workOrder.branchName.trim().length > 0 ? workOrder.branchName.trim() : null,
       controllerLetter: safeStr(workOrder.controllerLetter) || null,
       zoneNumber: workOrder.zoneNumber != null ? Number(workOrder.zoneNumber) : null,
@@ -360,6 +378,8 @@ export function buildPdfViewModel(data: InvoiceDetailData): BuildPdfViewModelRes
       workDescription: safeStr(billingSheet.workDescription, 'Additional Work'),
       propertyAddress: safeStr(billingSheet.propertyAddress),
       workLocationAddress: safeStr(billingSheet.workLocationAddress),
+      workLocationLat: (billingSheet as any).workLocationLat ?? null,
+      workLocationLng: (billingSheet as any).workLocationLng ?? null,
       branchName: billingSheet.branchName && billingSheet.branchName.trim().length > 0 ? billingSheet.branchName.trim() : null,
       controllerLetter: safeStr(billingSheet.controllerLetter) || null,
       zoneNumber: billingSheet.zoneNumber != null ? Number(billingSheet.zoneNumber) : null,
