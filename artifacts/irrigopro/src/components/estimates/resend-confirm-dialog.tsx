@@ -73,9 +73,11 @@ export function ResendConfirmDialog({
 
   const customerName = estimate?.customerName ?? "this customer";
   const title = isExpiredResend ? "Resend estimate" : "Re-deliver estimate";
+  // Task #1955 — the 30-day window runs from the last send, so any
+  // re-send restarts it (whether or not the estimate had expired).
   const description = isExpiredResend
-    ? `Send ${customerName} a fresh approval link. The estimate date will be reset and the 30-day window restarted.`
-    : `Re-deliver the approval email to ${customerName}. The estimate date and approval link remain unchanged.`;
+    ? `Send ${customerName} a fresh approval link. The estimate date will be reset and the 30-day window restarted from today's send.`
+    : `Re-deliver the approval email to ${customerName}. The estimate date and approval link remain unchanged, and the 30-day window restarts from today's send.`;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

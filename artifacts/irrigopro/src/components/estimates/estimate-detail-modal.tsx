@@ -1356,7 +1356,8 @@ export function EstimateDetailModal({ open, onOpenChange, estimateId, onEdit }: 
                 <AlertDialogTitle>Estimate marked as sent</AlertDialogTitle>
                 <AlertDialogDescription>
                   No email was sent. Share this approval link with the customer
-                  however you like — it expires in 30 days.
+                  however you like — the link and the estimate both expire 30
+                  days from when it was sent.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <div className="space-y-2">

@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { ChevronRight, ChevronDown, Send } from "lucide-react";
 import { useEstimateResend } from "@/hooks/use-estimate-resend";
 import { ResendConfirmDialog } from "@/components/estimates/resend-confirm-dialog";
+import { ESTIMATE_EXPIRATION_DAYS, estimateExpiryAnchor } from "@workspace/shared";
 
 interface EstimateBoardExpiredStripProps {
   estimates: Estimate[];
@@ -18,13 +19,11 @@ function formatCurrency(amount: number) {
   }).format(amount);
 }
 
-function ageDays(date: string | Date): number {
-  const then = typeof date === "string" ? new Date(date) : date;
-  if (Number.isNaN(then.getTime())) return 0;
-  return Math.max(
-    0,
-    Math.floor((Date.now() - then.getTime()) / (24 * 60 * 60 * 1000)),
-  );
+// Task #1955 — expiry is measured from the last send, so the card shows
+// when the estimate went out rather than when it was created.
+function formatSentDate(date: Date | null): string {
+  if (!date) return "—";
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 export function EstimateBoardExpiredStrip({
@@ -57,8 +56,8 @@ export function EstimateBoardExpiredStrip({
       >
         <span className="font-medium">
           Expired · {estimates.length}{" "}
-          {estimates.length === 1 ? "estimate" : "estimates"} older than 30
-          days · ready to resend
+          {estimates.length === 1 ? "estimate" : "estimates"} sent more than{" "}
+          {ESTIMATE_EXPIRATION_DAYS} days ago · ready to resend
         </span>
         {expanded ? (
           <ChevronDown className="w-4 h-4 flex-shrink-0" />
@@ -71,7 +70,7 @@ export function EstimateBoardExpiredStrip({
           <div className="overflow-x-auto">
             <div className="flex gap-2 p-3 min-w-min">
               {estimates.map((est) => {
-                const dateValue = est.estimateDate ?? est.createdAt;
+                const sentDate = estimateExpiryAnchor(est);
                 const amount = parseFloat(est.totalAmount);
                 return (
                   <div
@@ -94,7 +93,7 @@ export function EstimateBoardExpiredStrip({
                           )}
                         </span>
                         <span className="text-orange-600">
-                          {ageDays(dateValue)}d old
+                          Sent {formatSentDate(sentDate)}
                         </span>
                       </div>
                     </button>

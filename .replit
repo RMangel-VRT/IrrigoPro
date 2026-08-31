@@ -120,6 +120,14 @@ args = "migration-registry"
 task = "workflow.run"
 args = "username-normalization"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "estimate-expiry-anchor"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "estimate-lifecycle-ui"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -402,6 +410,28 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/lib/normalize-username.test.ts src/lib/migrations/normalize-usernames.test.ts src/lib/username-login-lookup.test.ts"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "estimate-expiry-anchor"
+author = "agent"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/lifecycle-column.test.ts src/estimate-summary.test.ts src/estimate-pdf-validity-window.test.ts src/estimate-resend-cas.test.ts && pnpm --filter @workspace/api-server exec node --import tsx --test --experimental-test-module-mocks --test-reporter=spec src/estimate-pdf-attachment-sent-at.test.ts"
+
+[[workflows.workflow]]
+name = "estimate-lifecycle-ui"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/irrigopro exec vitest run src/lib/lifecycle.test.ts src/lib/lifecycle-parity.test.ts"
 
 [workflows.workflow.metadata]
 isValidation = true

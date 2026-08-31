@@ -25,6 +25,12 @@ export interface EstimatePdfResult {
 export async function generateEstimatePdfForEmail(
   storage: IStorage,
   estimateId: number,
+  // Task #1955 — the send flow renders this attachment before it persists
+  // the new send timestamp (email-first ordering), so the reloaded row
+  // still carries the previous send time. Callers pass the pending send
+  // time so the attached PDF's "Valid Until" matches the 30-day window
+  // the customer is being given right now.
+  opts: { sentAt?: Date | null } = {},
 ): Promise<EstimatePdfResult | null> {
   try {
     const estimate = await storage.getEstimate(estimateId);
@@ -44,6 +50,7 @@ export async function generateEstimatePdfForEmail(
 
     const buffer = await renderEstimatePdf(estimate, {
       company: company ?? undefined,
+      sentAt: opts.sentAt ?? null,
     });
 
     const estNum = formatEstimateNumber(estimate.estimateNumber);

@@ -13,6 +13,7 @@ import {
   computeLifecycleStatus,
   deriveLifecycleForWrite,
   ESTIMATE_EXPIRATION_DAYS,
+  estimateExpiryAnchor,
 } from "@workspace/shared";
 
 describe("deriveLifecycleForWrite (Task #642)", () => {
@@ -99,7 +100,7 @@ describe("computeLifecycleStatus prefers stored lifecycle column (Task #642)", (
     );
   });
 
-  it("re-checks expiry for stored 'sent' against estimateDate", () => {
+  it("re-checks expiry for stored 'sent' against estimateDate when never-recorded send", () => {
     const now = new Date("2026-02-01T00:00:00Z");
     const oldDate = new Date(
       now.getTime() - (ESTIMATE_EXPIRATION_DAYS + 1) * 86400 * 1000,
@@ -148,5 +149,133 @@ describe("computeLifecycleStatus prefers stored lifecycle column (Task #642)", (
       ),
       "pending_review",
     );
+  });
+});
+
+// Task #1955 — the 30-day expiry window runs from the last send
+// (`approvalSentAt`), not from `estimateDate` (which defaults to
+// creation). `estimateDate` remains the fallback for rows sent before
+// the send timestamp was reliably recorded.
+describe("expiry anchors on the send date (Task #1955)", () => {
+  const NOW = new Date("2026-02-01T00:00:00Z");
+  const daysBefore = (n: number) =>
+    new Date(NOW.getTime() - n * 24 * 60 * 60 * 1000);
+
+  const sentEstimate = (fields: {
+    estimateDate?: Date | null;
+    approvalSentAt?: Date | null;
+  }) => ({
+    status: "pending",
+    internalStatus: "sent_to_customer",
+    lifecycle: "sent",
+    estimateDate: fields.estimateDate ?? null,
+    approvalSentAt: fields.approvalSentAt ?? null,
+  });
+
+  it("created 40 days ago but sent today is still awaiting the customer", () => {
+    assert.equal(
+      computeLifecycleStatus(
+        sentEstimate({ estimateDate: daysBefore(40), approvalSentAt: NOW }),
+        NOW,
+      ),
+      "sent",
+    );
+  });
+
+  it("sent 31 days ago is expired even with a fresh estimate date", () => {
+    assert.equal(
+      computeLifecycleStatus(
+        sentEstimate({
+          estimateDate: daysBefore(1),
+          approvalSentAt: daysBefore(ESTIMATE_EXPIRATION_DAYS + 1),
+        }),
+        NOW,
+      ),
+      "expired",
+    );
+  });
+
+  it("exactly 30 days after sending is still live (inclusive boundary)", () => {
+    assert.equal(
+      computeLifecycleStatus(
+        sentEstimate({
+          estimateDate: daysBefore(90),
+          approvalSentAt: daysBefore(ESTIMATE_EXPIRATION_DAYS),
+        }),
+        NOW,
+      ),
+      "sent",
+    );
+  });
+
+  it("falls back to the estimate date when there is no recorded send time", () => {
+    assert.equal(
+      computeLifecycleStatus(
+        sentEstimate({
+          estimateDate: daysBefore(ESTIMATE_EXPIRATION_DAYS + 1),
+          approvalSentAt: null,
+        }),
+        NOW,
+      ),
+      "expired",
+    );
+    assert.equal(
+      computeLifecycleStatus(
+        sentEstimate({
+          estimateDate: daysBefore(ESTIMATE_EXPIRATION_DAYS),
+          approvalSentAt: null,
+        }),
+        NOW,
+      ),
+      "sent",
+    );
+  });
+
+  it("a re-send moves the expiry boundary forward without a write", () => {
+    const beforeResend = sentEstimate({
+      estimateDate: daysBefore(60),
+      approvalSentAt: daysBefore(ESTIMATE_EXPIRATION_DAYS + 5),
+    });
+    assert.equal(computeLifecycleStatus(beforeResend, NOW), "expired");
+    // Re-delivering a still-live estimate re-stamps `approvalSentAt`
+    // only — `estimateDate` is untouched — and the row rolls back to
+    // `sent`.
+    const afterResend = { ...beforeResend, approvalSentAt: NOW };
+    assert.equal(computeLifecycleStatus(afterResend, NOW), "sent");
+  });
+
+  it("accepts ISO string send timestamps (JSON-serialized rows)", () => {
+    assert.equal(
+      computeLifecycleStatus(
+        {
+          status: "pending",
+          internalStatus: "sent_to_customer",
+          lifecycle: "sent",
+          estimateDate: daysBefore(60).toISOString(),
+          approvalSentAt: daysBefore(1).toISOString(),
+        },
+        NOW,
+      ),
+      "sent",
+    );
+  });
+
+  it("estimateExpiryAnchor prefers the send time and ignores invalid dates", () => {
+    assert.deepEqual(
+      estimateExpiryAnchor({
+        approvalSentAt: daysBefore(2),
+        estimateDate: daysBefore(40),
+      }),
+      daysBefore(2),
+    );
+    assert.deepEqual(
+      estimateExpiryAnchor({ approvalSentAt: null, estimateDate: daysBefore(40) }),
+      daysBefore(40),
+    );
+    assert.equal(
+      estimateExpiryAnchor({ approvalSentAt: "not-a-date", estimateDate: null }),
+      null,
+    );
+    assert.equal(estimateExpiryAnchor(null), null);
   });
 });

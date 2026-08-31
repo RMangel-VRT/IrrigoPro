@@ -125,6 +125,8 @@ export interface EstimateRoutesStorage {
       newEstimateDate: Date | null;
       isResend: boolean;
       isSentRedelivery?: boolean;
+      // Task #1955 — CAS value for the resend path.
+      previousApprovalToken?: string | null;
       // Task #1574 — actual delivery address for truthful audit attribution.
       sentToEmail?: string;
     },
@@ -1562,14 +1564,18 @@ export function registerEstimateRoutes(
     const approvalToken = opts.isSentRedelivery && estimateWithItems.approvalToken
       ? (estimateWithItems.approvalToken as string)
       : crypto.randomBytes(32).toString("hex");
-    const tokenExpiresAt = new Date();
+    // Task #1955 — one send timestamp for the whole flow. It is the
+    // expiry clock, so the PDF we attach below and the row we persist
+    // after a successful send must agree on it exactly.
+    const sentAt = new Date();
+    const tokenExpiresAt = new Date(sentAt);
     tokenExpiresAt.setDate(tokenExpiresAt.getDate() + 30);
 
     // If we're going to reset `estimateDate` (the `resend` flow), use the
     // new value in the email body so the customer sees today's date
     // matching what we're about to persist.
     const effectiveEstimateDate = opts.resetEstimateDate
-      ? new Date()
+      ? new Date(sentAt)
       : new Date(estimateWithItems.estimateDate);
 
     const items = estimateWithItems.items ?? [];
@@ -1596,6 +1602,11 @@ export function registerEstimateRoutes(
         const pdfResult = await generateEstimatePdfForEmail(
           storage as import("../storage").IStorage,
           estimateId,
+          // Task #1955 — the attached PDF must state the window the
+          // customer is being given by *this* send, not the one from the
+          // previous send still stored on the row. The same `sentAt` is
+          // persisted below once the email succeeds.
+          { sentAt },
         );
         if (pdfResult) {
           pdfAttachments = [{
@@ -1667,7 +1678,11 @@ export function registerEstimateRoutes(
     const persisted = await storage.markEstimateSentToCustomer!(estimateId, {
       approvalToken,
       tokenExpiresAt,
-      approvalSentAt: new Date(),
+      approvalSentAt: sentAt,
+      // Task #1955 — compare-and-swap value for the resend path (the row
+      // that was read at the top of this flow must still be the one on
+      // disk, or a concurrent send already won).
+      previousApprovalToken: (estimateWithItems.approvalToken as string | null) ?? null,
       newEstimateDate: opts.resetEstimateDate ? effectiveEstimateDate : null,
       isResend: !!opts.resetEstimateDate,
       isSentRedelivery: !!opts.isSentRedelivery,

@@ -12,6 +12,7 @@ import {
   ESTIMATE_EXPIRATION_DAYS,
   ESTIMATE_HIGH_VALUE_USD,
   ESTIMATE_STUCK_REVIEW_DAYS,
+  estimateExpiryAnchor,
 } from "@workspace/shared";
 import type {
   EstimateAttentionReason,
@@ -33,21 +34,28 @@ const STORED_LIFECYCLES = new Set<string>([
 // path, so the command-center aggregator trusts it directly instead
 // of re-deriving from the legacy `(status, internalStatus)` pair.
 // The only view-time computation is "expired", which is a sent row
-// older than ESTIMATE_EXPIRATION_DAYS — that is intentionally derived
-// here rather than stamped so a resend rolls the row back to `sent`
-// without a write.
+// last sent more than ESTIMATE_EXPIRATION_DAYS ago — that is
+// intentionally derived here rather than stamped so a resend rolls the
+// row back to `sent` without a write.
+//
+// Task #1955 — the expiry clock runs from `approvalSentAt` (falling
+// back to `estimateDate` for rows with no recorded send), resolved by
+// the shared `estimateExpiryAnchor` so the dashboard agrees with the
+// board and the detail view.
 function lifecycleFromRow(
-  row: { lifecycle?: string | null; estimateDate?: Date | string | null },
+  row: {
+    lifecycle?: string | null;
+    estimateDate?: Date | string | null;
+    approvalSentAt?: Date | string | null;
+  },
   now: Date,
 ): EstimateLifecycleBucket {
   const stored = row.lifecycle ?? "";
   if (!STORED_LIFECYCLES.has(stored)) return "pending_review";
   if (stored !== "sent") return stored as EstimateLifecycleBucket;
-  const ed = row.estimateDate;
-  if (!ed) return "sent";
-  const d = ed instanceof Date ? ed : new Date(ed);
-  if (Number.isNaN(d.getTime())) return "sent";
-  const ageDays = (now.getTime() - d.getTime()) / MS_PER_DAY;
+  const anchor = estimateExpiryAnchor(row);
+  if (!anchor) return "sent";
+  const ageDays = (now.getTime() - anchor.getTime()) / MS_PER_DAY;
   return ageDays > ESTIMATE_EXPIRATION_DAYS ? "expired" : "sent";
 }
 
@@ -61,6 +69,8 @@ interface EstimateRow {
   lifecycle?: string | null;
   createdAt?: Date | string | null;
   estimateDate?: Date | string | null;
+  // Task #1955 — last send; the anchor for the expiry windows below.
+  approvalSentAt?: Date | string | null;
 }
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -104,9 +114,12 @@ export function computeEstimateSummary(
 
     const createdAt = toDate(row.createdAt ?? null);
     const estimateDate = toDate(row.estimateDate ?? null);
+    // Task #1955 — every expiry / customer-silence window below is
+    // measured from the last send, not the estimate date.
+    const sentAnchor = estimateExpiryAnchor(row);
 
-    if (lifecycle === "sent" && estimateDate) {
-      const ageDays = (now.getTime() - estimateDate.getTime()) / MS_PER_DAY;
+    if (lifecycle === "sent" && sentAnchor) {
+      const ageDays = (now.getTime() - sentAnchor.getTime()) / MS_PER_DAY;
       if (ageDays > ESTIMATE_EXPIRATION_DAYS - 7 && ageDays <= ESTIMATE_EXPIRATION_DAYS) {
         expiringNext7Days.count += 1;
         expiringNext7Days.totalAmount += total;
@@ -139,8 +152,8 @@ export function computeEstimateSummary(
       }
     }
 
-    if (lifecycle === "sent" && total >= ESTIMATE_HIGH_VALUE_USD && estimateDate) {
-      const ageDays = (now.getTime() - estimateDate.getTime()) / MS_PER_DAY;
+    if (lifecycle === "sent" && total >= ESTIMATE_HIGH_VALUE_USD && sentAnchor) {
+      const ageDays = (now.getTime() - sentAnchor.getTime()) / MS_PER_DAY;
       if (ageDays >= 7) {
         attention.push({
           estimateId: row.id,

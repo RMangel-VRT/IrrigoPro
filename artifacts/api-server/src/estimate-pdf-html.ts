@@ -1,6 +1,6 @@
 import type { EstimateWithItems, EstimateItem, Company } from '@workspace/db';
 import { FAILED_PHOTO_SENTINEL } from './pdf-helpers';
-import { formatEstimateNumber } from '@workspace/shared';
+import { ESTIMATE_EXPIRATION_DAYS, estimateExpiryAnchor, formatEstimateNumber } from '@workspace/shared';
 import { VRT_LOGO_DATA_URI } from './assets/vrt-logo.js';
 import { IRRIGOPRO_LOGO_DATA_URI } from './assets/irrigopro-logo.js';
 import { humanizeIssueType } from './inspection-issue-labels.js';
@@ -15,6 +15,14 @@ export interface RenderEstimatePdfOptions {
   accentColor?: string;
   accentDark?: string;
   photoDataUris?: string[];
+  // Task #1955 — the send flow renders the attached PDF *before* it
+  // persists the new send timestamp (the email must succeed first), so
+  // the row on disk still carries the previous send time (or none at
+  // all). Callers in that flow pass the pending send time here so the
+  // attached PDF's validity date matches the window the customer is
+  // actually getting. Omitted everywhere else: a PDF downloaded from
+  // the app reads the persisted timestamp.
+  sentAt?: Date | string | null;
 }
 
 export function escapeHtml(value: unknown): string {
@@ -407,7 +415,23 @@ export function buildEstimateHtml(
     company?.email,
   ].filter(Boolean) as string[];
 
-  const expirationDate = addDays(estimate.estimateDate, 30);
+  // Task #1955 — the validity window runs from the date the estimate was
+  // sent to the customer, matching what the app enforces. `opts.sentAt`
+  // is the pending send time when this PDF is being attached to the
+  // outgoing email (not yet persisted); otherwise we read the stored
+  // anchor. An unsent estimate (or a row sent before send times were
+  // recorded) falls back to the estimate date.
+  const expirationDate = addDays(
+    estimateExpiryAnchor({
+      approvalSentAt: opts.sentAt ?? estimate.approvalSentAt,
+      estimateDate: estimate.estimateDate,
+    }) ?? estimate.estimateDate,
+    ESTIMATE_EXPIRATION_DAYS,
+  );
+  const validityTerms =
+    `This estimate is valid for ${ESTIMATE_EXPIRATION_DAYS} days from the date it was sent to you. Pricing is ` +
+    'based on the scope of work above; additional findings discovered on ' +
+    'site may adjust the final invoice.';
 
   const termsBlock = (estimate.locationNotes || estimate.accessInstructions) ? `
     <section class="card">
@@ -415,17 +439,13 @@ export function buildEstimateHtml(
       ${estimate.locationNotes ? `<div><span class="lbl">Location notes:</span> ${escapeHtml(estimate.locationNotes)}</div>` : ''}
       ${estimate.accessInstructions ? `<div style="margin-top:6px;"><span class="lbl">Access:</span> ${escapeHtml(estimate.accessInstructions)}</div>` : ''}
       <div class="muted" style="margin-top:10px;">
-        This estimate is valid for 30 days from the date issued. Pricing is
-        based on the scope of work above; additional findings discovered on
-        site may adjust the final invoice.
+        ${validityTerms}
       </div>
     </section>` : `
     <section class="card">
       <h2>Terms &amp; Notes</h2>
       <div class="muted">
-        This estimate is valid for 30 days from the date issued. Pricing is
-        based on the scope of work above; additional findings discovered on
-        site may adjust the final invoice.
+        ${validityTerms}
       </div>
     </section>`;
 

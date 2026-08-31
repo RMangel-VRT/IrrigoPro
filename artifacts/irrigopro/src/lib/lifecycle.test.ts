@@ -16,6 +16,7 @@ import {
   computeLifecycleStatus,
   customerResponseLabel,
   customerResponseLabelOf,
+  estimateExpiryAnchor,
   isApproved,
   isAwaitingCustomer,
   isAwaitingCustomerReply,
@@ -265,6 +266,100 @@ describe("predicates accept either an estimate or a lifecycle string", () => {
     expect(isReadyToSend(null)).toBe(false);
     expect(isConvertedToWorkOrder(null)).toBe(false);
     expect(isAwaitingCustomerReply(null)).toBe(false);
+  });
+});
+
+// Task #1955 — the 30-day window runs from the last send
+// (`approvalSentAt`), with `estimateDate` kept as the fallback for rows
+// that predate reliable send stamping. `lifecycleOf` is the UI entry
+// point, so it must forward the send timestamp into the computation.
+describe("expiry anchors on the send date (Task #1955)", () => {
+  const daysBefore = (n: number) =>
+    new Date(NOW.getTime() - n * 24 * 60 * 60 * 1000);
+
+  const sent = (fields: {
+    estimateDate?: Date | null;
+    approvalSentAt?: Date | null;
+  }) => ({
+    status: "pending",
+    internalStatus: "sent_to_customer",
+    lifecycle: "sent",
+    estimateDate: fields.estimateDate ?? null,
+    approvalSentAt: fields.approvalSentAt ?? null,
+  });
+
+  it("created 40 days ago but sent today reads as awaiting-customer", () => {
+    const estimate = sent({ estimateDate: daysBefore(40), approvalSentAt: NOW });
+    expect(lifecycleOf(estimate, NOW)).toBe("sent");
+    expect(isAwaitingCustomer(estimate, NOW)).toBe(true);
+    expect(isExpired(estimate, NOW)).toBe(false);
+  });
+
+  it("sent 31 days ago is expired even with a fresh estimate date", () => {
+    const estimate = sent({
+      estimateDate: daysBefore(1),
+      approvalSentAt: daysBefore(ESTIMATE_EXPIRATION_DAYS + 1),
+    });
+    expect(lifecycleOf(estimate, NOW)).toBe("expired");
+    expect(isExpired(estimate, NOW)).toBe(true);
+  });
+
+  it("exactly 30 days after sending is still live", () => {
+    expect(
+      lifecycleOf(
+        sent({
+          estimateDate: daysBefore(90),
+          approvalSentAt: daysBefore(ESTIMATE_EXPIRATION_DAYS),
+        }),
+        NOW,
+      ),
+    ).toBe("sent");
+  });
+
+  it("falls back to the estimate date when no send time was recorded", () => {
+    expect(
+      lifecycleOf(
+        sent({
+          estimateDate: daysBefore(ESTIMATE_EXPIRATION_DAYS + 1),
+          approvalSentAt: null,
+        }),
+        NOW,
+      ),
+    ).toBe("expired");
+    expect(
+      lifecycleOf(
+        sent({
+          estimateDate: daysBefore(ESTIMATE_EXPIRATION_DAYS),
+          approvalSentAt: null,
+        }),
+        NOW,
+      ),
+    ).toBe("sent");
+  });
+
+  it("a re-send restarts the 30-day window", () => {
+    const beforeResend = sent({
+      estimateDate: daysBefore(60),
+      approvalSentAt: daysBefore(ESTIMATE_EXPIRATION_DAYS + 5),
+    });
+    expect(lifecycleOf(beforeResend, NOW)).toBe("expired");
+    expect(lifecycleOf({ ...beforeResend, approvalSentAt: NOW }, NOW)).toBe(
+      "sent",
+    );
+  });
+
+  it("estimateExpiryAnchor resolves send date first, estimate date second", () => {
+    expect(
+      estimateExpiryAnchor({
+        approvalSentAt: daysBefore(2),
+        estimateDate: daysBefore(40),
+      }),
+    ).toEqual(daysBefore(2));
+    expect(
+      estimateExpiryAnchor({ approvalSentAt: null, estimateDate: daysBefore(40) }),
+    ).toEqual(daysBefore(40));
+    expect(estimateExpiryAnchor({})).toBeNull();
+    expect(estimateExpiryAnchor(null)).toBeNull();
   });
 });
 

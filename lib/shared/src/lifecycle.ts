@@ -17,9 +17,15 @@ export const LIFECYCLE_STATUSES = [
 export type LifecycleStatus = (typeof LIFECYCLE_STATUSES)[number];
 
 // Estimates with `internalStatus = sent_to_customer` and
-// `status = pending` flip from `sent` → `expired` once the
-// `estimateDate` is older than this many days. Boundary is inclusive at
-// the lower end: exactly 30 days old still counts as `sent`.
+// `status = pending` flip from `sent` → `expired` once it has been more
+// than this many days since the estimate was last sent to the customer
+// (`approvalSentAt`). Task #1955 moved the clock off `estimateDate`
+// (which defaults to creation time) so an estimate drafted a month ago
+// and emailed yesterday isn't already expired in the customer's inbox.
+// Rows sent before `approvalSentAt` was reliably recorded fall back to
+// `estimateDate` so no historical row silently changes bucket.
+// Boundary is inclusive at the lower end: exactly 30 days after the
+// send still counts as `sent`.
 export const ESTIMATE_EXPIRATION_DAYS = 30;
 
 // Estimate Command Center thresholds. A pending_review estimate older
@@ -36,15 +42,45 @@ type EstimateLifecycleInput = {
   status?: string | null;
   internalStatus?: string | null;
   estimateDate?: Date | string | null;
+  // Task #1955 — when the approval email was last sent to the customer.
+  // This is the expiry clock; `estimateDate` is only the fallback for
+  // rows sent before this was recorded.
+  approvalSentAt?: Date | string | null;
   // Canonical lifecycle column. Preferred over (status, internalStatus)
   // when set. `null`/missing means a pre-migration row.
   lifecycle?: string | null;
 };
 
+function toValidDate(value: Date | string | null | undefined): Date | null {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+// Task #1955 — the single definition of "when does the 30-day expiry
+// window start". Every surface that measures expiry (the lifecycle
+// helper, the Estimate Command Center aggregator, the estimate PDF's
+// validity date) must anchor on this so they never disagree.
+//
+// The anchor is the most recent send (`approvalSentAt`), which is
+// re-stamped on every send path — first send, resend of an expired
+// estimate, and re-delivery of a still-live one — so a resend restarts
+// the window. Rows with no recorded send time fall back to
+// `estimateDate`, preserving the pre-#1955 behavior for history.
+export function estimateExpiryAnchor(
+  estimate: {
+    approvalSentAt?: Date | string | null;
+    estimateDate?: Date | string | null;
+  } | null | undefined,
+): Date | null {
+  if (!estimate) return null;
+  return toValidDate(estimate.approvalSentAt) ?? toValidDate(estimate.estimateDate);
+}
+
 // Write-time derivation of the lifecycle column from the two legacy
 // axes. Returns only the five *stored* lifecycle values; `expired` is
 // intentionally excluded because it's a read-time view over
-// (lifecycle='sent', estimateDate > 30 days). Every write path that
+// (lifecycle='sent', last sent > 30 days ago). Every write path that
 // mutates `status` or `internalStatus` must also pass the result of
 // this helper through as `lifecycle` so the column stays in sync with
 // the legacy axes during the dual-write window.
@@ -88,14 +124,12 @@ export function computeLifecycleStatus(
     : deriveLifecycleForWrite(estimate);
 
   if (base === "sent") {
-    const ed = estimate.estimateDate;
-    if (ed) {
-      const sent = ed instanceof Date ? ed : new Date(ed);
-      if (!Number.isNaN(sent.getTime())) {
-        const ageMs = now.getTime() - sent.getTime();
-        const ageDays = ageMs / MS_PER_DAY;
-        if (ageDays > ESTIMATE_EXPIRATION_DAYS) return "expired";
-      }
+    // Task #1955 — measured from the last send, falling back to
+    // `estimateDate` when the row has no recorded send time.
+    const anchor = estimateExpiryAnchor(estimate);
+    if (anchor) {
+      const ageDays = (now.getTime() - anchor.getTime()) / MS_PER_DAY;
+      if (ageDays > ESTIMATE_EXPIRATION_DAYS) return "expired";
     }
     return "sent";
   }
@@ -105,7 +139,7 @@ export function computeLifecycleStatus(
 
 // Canonical entry point for the UI. Prefers the stored `lifecycle`
 // column when present, otherwise computes from
-// (status, internalStatus, estimateDate). Every component that needs
+// (status, internalStatus, approvalSentAt/estimateDate). Every component that needs
 // to reason about an estimate's state should go through this helper
 // (or one of the predicates below) — never read `estimate.status` or
 // `estimate.internalStatus` directly.
@@ -134,6 +168,9 @@ export function lifecycleOf(
           status: estimate.status,
           internalStatus: estimate.internalStatus,
           estimateDate: estimate.estimateDate,
+          // Task #1955 — the expiry clock. Must be forwarded or
+          // client-side expiry silently falls back to `estimateDate`.
+          approvalSentAt: estimate.approvalSentAt,
           lifecycle: estimate.lifecycle,
         },
         now,
@@ -146,6 +183,7 @@ export function lifecycleOf(
       status: estimate.status,
       internalStatus: estimate.internalStatus,
       estimateDate: estimate.estimateDate,
+      approvalSentAt: estimate.approvalSentAt,
       lifecycle: estimate.lifecycle,
     },
     now,
