@@ -35,3 +35,4 @@
 - [Estimate expiry anchor](estimate-expiry-anchor.md) — expiry is a read-time view anchored on the last send; new surfaces must resolve it via the shared helper, never re-derive.
 - [PDF HTML escaping](pdf-html-escaping.md) — PDF bodies are HTML strings; escape every DB string in a pdf-*.ts template, and use the standalone escaper module to dodge an import cycle.
 - [CodeExecution writes roll back on throw](code-execution-writes-roll-back-on-throw.md) — a fragile grep at the end of a block silently discards the writeFile calls above it.
+- [Offline IDB connection lifetime](offline-idb-connection-lifetime.md) — mobile closes the handle under you; heal at the one shared opener, probe don't string-match, and never charge a retry for local storage.

@@ -15,12 +15,14 @@ import {
   deletePhotoBlob,
   enqueueMutation,
   getPhotoBlob,
+  isConnectionClosedError,
   listAllMutations,
   openOfflineDB,
   pruneCompleted,
   putWetCheckMirror,
   resolveServerId,
   updateMutation,
+  withDB,
   type OfflineDB,
 } from "./db";
 import { backoffMs, readySet, resolveBody, resolveTemplate } from "./sortQueue";
@@ -92,7 +94,6 @@ const DEFAULT_MAX_ATTEMPTS = 8;
 const DEFAULT_MAX_RETRY_AGE_MS = 12 * 60 * 60 * 1000;
 
 export class SyncEngine {
-  private db: OfflineDB | null = null;
   private listeners = new Set<EngineListener>();
   private fetchImpl: typeof fetch;
   private now: () => number;
@@ -178,9 +179,13 @@ export class SyncEngine {
     }
   }
 
+  // Always resolve through the shared opener rather than caching a handle
+  // on the engine. `openOfflineDB` memoizes the healthy connection, so this
+  // is cheap — and when the browser closes the connection, the engine picks
+  // up the reopened one instead of holding a dead handle for the rest of
+  // the page's life.
   private async ensureDB(): Promise<OfflineDB> {
-    if (!this.db) this.db = await openOfflineDB();
-    return this.db;
+    return await openOfflineDB();
   }
 
   setOnline(next: boolean) {
@@ -220,6 +225,29 @@ export class SyncEngine {
       this.heartbeatTimer = setInterval(() => { this.heartbeat().catch(() => {}); }, this.heartbeatIntervalMs);
     }
     await this.ensureDB();
+    // Requeue orphaned `syncing` rows. In-flight state lives in memory
+    // only, so anything still marked `syncing` on disk is by definition not
+    // being dispatched by anyone — the page was closed mid-flight, or
+    // device storage failed before the dispatcher could record the outcome.
+    // `readySet` ignores those rows, so without this they are invisible
+    // forever and the photo never uploads.
+    //
+    // `attemptCount` is left alone, and a row that has already spent its
+    // budget (or aged out) is retired rather than requeued — otherwise
+    // restarting the app would quietly hand every capped mutation another
+    // network attempt, and the cap would mean nothing.
+    try {
+      const db = await this.ensureDB();
+      for (const m of await listAllMutations(db)) {
+        if (m.status !== "syncing") continue;
+        const capped = this.capExceededReason(m, m.attemptCount);
+        await updateMutation(db, m.id, capped
+          ? { status: "failed", lastError: capped }
+          : { status: "pending" });
+      }
+    } catch (err) {
+      console.warn("[offline-engine] could not requeue orphaned syncing rows:", err);
+    }
     // Task #510 — one-shot cleanup of legacy `photo.link` mutations
     // whose urlTemplate baked in a negative client-side id (e.g.
     // `/api/wet-checks/photos/-1714768241234`). Those will never
@@ -446,8 +474,22 @@ export class SyncEngine {
 
   private async dispatch(m: QueuedMutation): Promise<void> {
     this.inFlight.add(m.id);
-    const db = await this.ensureDB();
-    await updateMutation(db, m.id, { status: "syncing", lastAttemptAt: this.now() });
+    let db: OfflineDB;
+    try {
+      db = await this.ensureDB();
+      await updateMutation(db, m.id, { status: "syncing", lastAttemptAt: this.now() });
+    } catch (err) {
+      // Device storage went away before we touched the network. Nothing was
+      // attempted and the row is still durably `pending`, so back out
+      // cleanly — leaving the id in `inFlight` would make every future tick
+      // skip this mutation for the rest of the page's life, which is
+      // precisely how a captured photo disappears for good.
+      this.inFlight.delete(m.id);
+      this.aborts.delete(m.id);
+      if (!isConnectionClosedError(err)) throw err;
+      setTimeout(() => this.scheduleTick(), backoffMs(1));
+      return;
+    }
 
     let url: string;
     let body: unknown;
@@ -710,6 +752,30 @@ export class SyncEngine {
         }
       }
     } catch (err: any) {
+      // A dropped IndexedDB connection is infrastructure trouble on this
+      // device, not a delivery attempt. The shared helpers already reopen
+      // and retry once; reaching here means even the reopen failed, which
+      // on iOS usually just means the page is being suspended mid-write.
+      //
+      // Requeue WITHOUT incrementing attemptCount. Counting it would let a
+      // tech who backgrounds the app often enough burn through the retry
+      // cap and have a perfectly good queued photo — bytes still on disk,
+      // server never contacted — marked permanently failed.
+      if (isConnectionClosedError(err)) {
+        try {
+          await updateMutation(db, m.id, {
+            status: "pending",
+            lastError: "local_storage_unavailable",
+          });
+        } catch {
+          // Storage is unreachable entirely. The row is already `pending`
+          // on disk from the last successful write, so the next tick after
+          // the connection recovers will pick it up unchanged.
+        }
+        await this.broadcastState().catch(() => {});
+        setTimeout(() => this.scheduleTick(), backoffMs(1));
+        return;
+      }
       // Network error — treat as offline + backoff (Task #501 cap applies).
       this.setOnline(false);
       const errMessage = err?.message ?? String(err);
@@ -875,22 +941,18 @@ export class SyncEngine {
 
   private async applyServerIdToMirror(db: OfflineDB, m: QueuedMutation, id: number | null) {
     if (id == null) return;
-    if (m.kind === "wet_check.create") {
-      const tx = db.transaction("wetChecks", "readwrite");
+    const store =
+      m.kind === "wet_check.create" ? "wetChecks"
+      : m.kind === "zone_record.upsert" ? "wetCheckZoneRecords"
+      : m.kind === "finding.create" ? "wetCheckFindings"
+      : null;
+    if (!store) return;
+    await withDB(db, async (d) => {
+      const tx = d.transaction(store, "readwrite");
       const cur = await tx.store.get(m.clientId);
-      if (cur) await tx.store.put({ ...cur, id });
+      if (cur) await tx.store.put({ ...cur, id } as any);
       await tx.done;
-    } else if (m.kind === "zone_record.upsert") {
-      const tx = db.transaction("wetCheckZoneRecords", "readwrite");
-      const cur = await tx.store.get(m.clientId);
-      if (cur) await tx.store.put({ ...cur, id });
-      await tx.done;
-    } else if (m.kind === "finding.create") {
-      const tx = db.transaction("wetCheckFindings", "readwrite");
-      const cur = await tx.store.get(m.clientId);
-      if (cur) await tx.store.put({ ...cur, id });
-      await tx.done;
-    }
+    });
   }
 
   private async findWetCheckIdForMutation(db: OfflineDB, m: QueuedMutation): Promise<number | null> {
@@ -901,7 +963,7 @@ export class SyncEngine {
     while (cursor) {
       if (cursor.kind.startsWith("wet_check.")) {
         if (cursor.resolvedId) return cursor.resolvedId;
-        const mirror = await db.get("wetChecks", cursor.clientId);
+        const mirror = await withDB(db, (d) => d.get("wetChecks", cursor!.clientId));
         if (mirror?.id) return mirror.id;
       }
       // Many queued mutations target pre-existing server entities, so there
@@ -909,17 +971,17 @@ export class SyncEngine {
       // resolving via the per-entity mirrors / placeholders.
       const candidateWetCheckCids: string[] = [];
       if (cursor.kind === "finding.update" || cursor.kind === "finding.delete") {
-        const fRow = await db.get("wetCheckFindings", cursor.clientId);
+        const fRow = await withDB(db, (d) => d.get("wetCheckFindings", cursor!.clientId));
         if (fRow?.wetCheckId) return fRow.wetCheckId;
         const zrCid = fRow?.zoneRecordClientId ?? cursor.parentClientId;
         if (zrCid) {
-          const zrRow = await db.get("wetCheckZoneRecords", zrCid);
+          const zrRow = await withDB(db, (d) => d.get("wetCheckZoneRecords", zrCid));
           if (zrRow?.wetCheckId) return zrRow.wetCheckId;
           if (zrRow?.wetCheckClientId) candidateWetCheckCids.push(zrRow.wetCheckClientId);
         }
       }
       if (cursor.kind === "zone_record.upsert") {
-        const zrRow = await db.get("wetCheckZoneRecords", cursor.clientId);
+        const zrRow = await withDB(db, (d) => d.get("wetCheckZoneRecords", cursor!.clientId));
         if (zrRow?.wetCheckId) return zrRow.wetCheckId;
         if (zrRow?.wetCheckClientId) candidateWetCheckCids.push(zrRow.wetCheckClientId);
       }
@@ -929,7 +991,7 @@ export class SyncEngine {
       if (placeholderWcCid) candidateWetCheckCids.push(placeholderWcCid);
       if (cursor.parentClientId) candidateWetCheckCids.push(cursor.parentClientId);
       for (const wcCid of candidateWetCheckCids) {
-        const wcMirror = await db.get("wetChecks", wcCid);
+        const wcMirror = await withDB(db, (d) => d.get("wetChecks", wcCid));
         if (wcMirror?.id) return wcMirror.id;
       }
       cursor = cursor.parentClientId ? byClientId.get(cursor.parentClientId) ?? null : null;
@@ -953,11 +1015,15 @@ export class SyncEngine {
       // finding that lost the conflict and was rejected, or one that has
       // been converted/deleted server-side) are removed instead of
       // continuing to render via assembleFromMirror.
-      const existingZones = await db.getAllFromIndex("wetCheckZoneRecords", "byWetCheckClientId", clientId);
+      const existingZones = await withDB(db, (d) =>
+        d.getAllFromIndex("wetCheckZoneRecords", "byWetCheckClientId", clientId));
       for (const zr of existingZones) {
-        const existingFindings = await db.getAllFromIndex("wetCheckFindings", "byZoneRecordClientId", zr.clientId);
-        for (const f of existingFindings) await db.delete("wetCheckFindings", f.clientId);
-        await db.delete("wetCheckZoneRecords", zr.clientId);
+        const existingFindings = await withDB(db, (d) =>
+          d.getAllFromIndex("wetCheckFindings", "byZoneRecordClientId", zr.clientId));
+        for (const f of existingFindings) {
+          await withDB(db, (d) => d.delete("wetCheckFindings", f.clientId));
+        }
+        await withDB(db, (d) => d.delete("wetCheckZoneRecords", zr.clientId));
       }
       await putWetCheckMirror(db, {
         clientId,
@@ -970,18 +1036,18 @@ export class SyncEngine {
       const zoneRecords: any[] = Array.isArray(data?.zoneRecords) ? data.zoneRecords : [];
       for (const zr of zoneRecords) {
         if (!zr?.clientId) continue;
-        await db.put("wetCheckZoneRecords", {
+        await withDB(db, (d) => d.put("wetCheckZoneRecords", {
           clientId: zr.clientId,
           id: typeof zr.id === "number" ? zr.id : undefined,
           wetCheckClientId: clientId,
           wetCheckId,
           data: zr,
           updatedAt,
-        });
+        }));
         const findings: any[] = Array.isArray(zr?.findings) ? zr.findings : [];
         for (const f of findings) {
           if (!f?.clientId) continue;
-          await db.put("wetCheckFindings", {
+          await withDB(db, (d) => d.put("wetCheckFindings", {
             clientId: f.clientId,
             id: typeof f.id === "number" ? f.id : undefined,
             zoneRecordClientId: zr.clientId,
@@ -989,7 +1055,7 @@ export class SyncEngine {
             wetCheckId,
             data: f,
             updatedAt,
-          });
+          }));
         }
       }
     } catch {

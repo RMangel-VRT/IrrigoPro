@@ -10,7 +10,10 @@
 //   - mutationQueue             (key: id)               indexes: status, createdAt, parentClientId, clientId
 
 import { openDB, type IDBPDatabase, type DBSchema } from "idb";
+import { isConnectionClosedError } from "./connection-errors";
 import type { QueuedMutation } from "./types";
+
+export { isConnectionClosedError } from "./connection-errors";
 
 interface WetCheckMirror {
   clientId: string;
@@ -116,11 +119,106 @@ export type OfflineDB = IDBPDatabase<OfflineSchema>;
 const DB_NAME = "irrigopro_offline";
 const DB_VERSION = 4;
 
+// The open connection is shared by every caller. It is NOT permanent: the
+// browser is free to close it underneath us, and mobile browsers do so
+// routinely — iOS Safari and installed PWAs drop IndexedDB connections when
+// a tab is backgrounded or the system reclaims memory, and any tab can force
+// a close by starting a schema upgrade. A phone in a truck backgrounds
+// constantly, so a page that has been open all morning is very likely
+// holding a dead handle.
+//
+// Every operation therefore goes through `withDB`, which reopens and retries
+// once when it sees a closed-connection error. Without that, the first tap
+// after coming back from the lock screen throws a raw DOMException and the
+// photo the tech just took is never written anywhere.
 let dbPromise: Promise<OfflineDB> | null = null;
+let dbHandle: OfflineDB | null = null;
+// Bumped on every open and every invalidation. Lifecycle callbacks captured
+// the generation they were registered for, so a late `terminated` from a
+// connection we already replaced cannot tear down its healthy successor.
+let dbGeneration = 0;
+
+/**
+ * Drop the shared connection so the next call opens a fresh one.
+ *
+ * Bumping the generation also disarms the lifecycle callbacks of the
+ * connection we are discarding.
+ */
+export function invalidateOfflineDB(): void {
+  dbGeneration++;
+  dbPromise = null;
+  dbHandle = null;
+}
+
+// A single in-flight recovery, shared by everyone who was holding the dead
+// handle when it failed.
+let recovery: Promise<OfflineDB> | null = null;
+
+/**
+ * Replace a dead connection with a live one, exactly once.
+ *
+ * When the browser closes the connection, every concurrent caller fails at
+ * more or less the same moment. Left to their own devices they would each
+ * invalidate and reopen, and each would discard the successor the previous
+ * one had just opened — leaving a trail of orphaned connections that keep
+ * the database pinned and can block a later schema upgrade. Funnelling them
+ * through one promise means the first caller heals and the rest wait for it.
+ */
+function recoverFrom(dead: OfflineDB): Promise<OfflineDB> {
+  if (recovery) return recovery;
+  // Someone already replaced the handle while we were failing. Take theirs,
+  // but only after checking it is actually alive: a replacement that has
+  // since died too must be healed, not passed along. `withDB` gets exactly
+  // one retry, so handing it a second corpse turns a recoverable situation
+  // into a lost photo.
+  let doomed = dead;
+  if (dbHandle && dbHandle !== dead) {
+    if (isConnectionUsable(dbHandle)) return Promise.resolve(dbHandle);
+    doomed = dbHandle;
+  }
+  const attempt = (async () => {
+    invalidateOfflineDB();
+    // Release the corpses rather than leaving them pinned to the database,
+    // where they would block the next schema upgrade.
+    try { doomed.close(); } catch { /* already gone */ }
+    if (doomed !== dead) {
+      try { dead.close(); } catch { /* already gone */ }
+    }
+    return await openOfflineDB();
+  })();
+  recovery = attempt;
+  return attempt.finally(() => {
+    if (recovery === attempt) recovery = null;
+  });
+}
 
 export function openOfflineDB(): Promise<OfflineDB> {
   if (!dbPromise) {
-    dbPromise = openDB<OfflineSchema>(DB_NAME, DB_VERSION, {
+    const generation = ++dbGeneration;
+    // Only tear down the shared state if it still belongs to this
+    // connection — a slow `terminated` callback must not clobber a
+    // successor that has already been opened and used.
+    const invalidateThisConnection = () => {
+      if (dbGeneration !== generation) return;
+      dbPromise = null;
+      dbHandle = null;
+    };
+    const opening = openDB<OfflineSchema>(DB_NAME, DB_VERSION, {
+      // Another tab wants to upgrade the schema. Close immediately so we
+      // don't block it, and reopen lazily against the new version.
+      blocking() {
+        // Grab the handle before clearing the shared state — otherwise
+        // there is nothing left to close and the other tab stays blocked.
+        const doomed = dbGeneration === generation ? dbHandle : null;
+        invalidateThisConnection();
+        try { doomed?.close(); } catch { /* already gone */ }
+      },
+      // The browser closed the connection on its own: backgrounding,
+      // memory pressure, storage eviction, or a crashed backing store.
+      // Not called for a close we requested ourselves.
+      terminated() {
+        invalidateThisConnection();
+      },
       upgrade(db) {
         if (!db.objectStoreNames.contains("apiCache")) {
           db.createObjectStore("apiCache", { keyPath: "key" });
@@ -170,24 +268,93 @@ export function openOfflineDB(): Promise<OfflineDB> {
         }
       },
     });
+    dbPromise = opening.then(
+      (db) => {
+        if (dbGeneration === generation) dbHandle = db;
+        return db;
+      },
+      (err) => {
+        // A failed open must not be cached, or the page stays broken until
+        // it is reloaded. Clear it so the next caller gets a real attempt.
+        invalidateThisConnection();
+        throw err;
+      },
+    );
   }
   return dbPromise;
+}
+
+/**
+ * Ask a connection whether it still works, by opening the cheapest possible
+ * transaction on it.
+ *
+ * Message text is not a reliable signal on its own: Chromium says "The
+ * database connection is closing", Safari talks about losing the backing
+ * store, and the spec's own generic InvalidStateError wording mentions
+ * neither. Rather than maintain a phrasebook, ask the object directly — a
+ * closed connection refuses to start a transaction, a healthy one does not.
+ */
+export function isConnectionUsable(db: OfflineDB): boolean {
+  try {
+    const tx = db.transaction("mutationQueue", "readonly");
+    // Nothing to read; release it immediately and swallow the resulting
+    // abort rejection so it never surfaces as an unhandled rejection.
+    tx.done.catch(() => {});
+    try { tx.abort(); } catch { /* already settled */ }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Run one IndexedDB operation, reopening the database and retrying once if
+ * the connection turns out to be closed.
+ *
+ * `db` is whatever handle the caller already had. It may be stale — callers
+ * cache it across awaits and the engine holds one for the life of the page —
+ * so the retry deliberately ignores it and uses a freshly opened connection
+ * instead. Only closed-connection failures are retried; every other error
+ * propagates on the first throw so genuine bugs stay loud.
+ */
+export async function withDB<T>(
+  db: OfflineDB,
+  fn: (db: OfflineDB) => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn(db);
+  } catch (err) {
+    // Recognisable closed-connection wording, or a handle that fails the
+    // probe. Anything else is a genuine failure and must stay loud —
+    // retrying a quota error or a bad key would only hide it.
+    if (!isConnectionClosedError(err) && isConnectionUsable(db)) throw err;
+    const fresh = await recoverFrom(db);
+    return await fn(fresh);
+  }
+}
+
+/** `withDB` for callers that do not already hold a handle. */
+export async function runWithOfflineDB<T>(
+  fn: (db: OfflineDB) => Promise<T>,
+): Promise<T> {
+  return await withDB(await openOfflineDB(), fn);
 }
 
 // Test-only hook: reset the lazy singleton so a fresh fake-indexeddb
 // instance can be re-opened in test isolation.
 export function __resetOfflineDBForTests() {
-  dbPromise = null;
+  recovery = null;
+  invalidateOfflineDB();
 }
 
 // Queue helpers ----------------------------------------------------------
 
 export async function enqueueMutation(db: OfflineDB, m: QueuedMutation): Promise<void> {
-  await db.put("mutationQueue", m);
+  await withDB(db, (d) => d.put("mutationQueue", m));
 }
 
 export async function listAllMutations(db: OfflineDB): Promise<QueuedMutation[]> {
-  return await db.getAll("mutationQueue");
+  return await withDB(db, (d) => d.getAll("mutationQueue"));
 }
 
 export async function updateMutation(
@@ -195,84 +362,92 @@ export async function updateMutation(
   id: string,
   patch: Partial<QueuedMutation>,
 ): Promise<void> {
-  const tx = db.transaction("mutationQueue", "readwrite");
-  const current = await tx.store.get(id);
-  if (!current) {
+  await withDB(db, async (d) => {
+    const tx = d.transaction("mutationQueue", "readwrite");
+    const current = await tx.store.get(id);
+    if (!current) {
+      await tx.done;
+      return;
+    }
+    await tx.store.put({ ...current, ...patch });
     await tx.done;
-    return;
-  }
-  await tx.store.put({ ...current, ...patch });
-  await tx.done;
+  });
 }
 
 export async function deleteMutation(db: OfflineDB, id: string): Promise<void> {
-  await db.delete("mutationQueue", id);
+  await withDB(db, (d) => d.delete("mutationQueue", id));
 }
 
 // Prune completed mutations older than the cutoff (default: 24h).
 export async function pruneCompleted(db: OfflineDB, olderThanMs: number, now: number): Promise<number> {
-  const tx = db.transaction("mutationQueue", "readwrite");
-  let deleted = 0;
-  let cursor = await tx.store.index("byStatus").openCursor(IDBKeyRange.only("completed"));
-  while (cursor) {
-    const v = cursor.value;
-    if (now - v.createdAt > olderThanMs) {
-      await cursor.delete();
-      deleted++;
+  return await withDB(db, async (d) => {
+    const tx = d.transaction("mutationQueue", "readwrite");
+    let deleted = 0;
+    let cursor = await tx.store.index("byStatus").openCursor(IDBKeyRange.only("completed"));
+    while (cursor) {
+      const v = cursor.value;
+      if (now - v.createdAt > olderThanMs) {
+        await cursor.delete();
+        deleted++;
+      }
+      cursor = await cursor.continue();
     }
-    cursor = await cursor.continue();
-  }
-  await tx.done;
-  return deleted;
+    await tx.done;
+    return deleted;
+  });
 }
 
 // Resolve the server-assigned id for a clientId by looking at completed
 // mutations in the queue (their `resolvedId`) plus the mirrors. Used by
 // the engine to substitute placeholders before dispatch.
 export async function resolveServerId(db: OfflineDB, clientId: string): Promise<number | null> {
-  // 1) Check the queue for a completed mutation that produced this id.
-  const tx = db.transaction(["mutationQueue", "wetChecks", "wetCheckZoneRecords", "wetCheckFindings"]);
-  const fromQueue = await tx.objectStore("mutationQueue").index("byClientId").get(clientId);
-  if (fromQueue && fromQueue.status === "completed" && fromQueue.resolvedId != null) {
-    return fromQueue.resolvedId;
-  }
-  // 2) Fall through to mirrors (in case the wet check pre-existed online).
-  const wc = await tx.objectStore("wetChecks").get(clientId);
-  if (wc?.id != null) return wc.id;
-  const zr = await tx.objectStore("wetCheckZoneRecords").get(clientId);
-  if (zr?.id != null) return zr.id;
-  const f = await tx.objectStore("wetCheckFindings").get(clientId);
-  if (f?.id != null) return f.id;
-  return null;
+  return await withDB(db, async (d) => {
+    // 1) Check the queue for a completed mutation that produced this id.
+    const tx = d.transaction(["mutationQueue", "wetChecks", "wetCheckZoneRecords", "wetCheckFindings"]);
+    const fromQueue = await tx.objectStore("mutationQueue").index("byClientId").get(clientId);
+    if (fromQueue && fromQueue.status === "completed" && fromQueue.resolvedId != null) {
+      return fromQueue.resolvedId;
+    }
+    // 2) Fall through to mirrors (in case the wet check pre-existed online).
+    const wc = await tx.objectStore("wetChecks").get(clientId);
+    if (wc?.id != null) return wc.id;
+    const zr = await tx.objectStore("wetCheckZoneRecords").get(clientId);
+    if (zr?.id != null) return zr.id;
+    const f = await tx.objectStore("wetCheckFindings").get(clientId);
+    if (f?.id != null) return f.id;
+    return null;
+  });
 }
 
 // Mirror writers ---------------------------------------------------------
 
 export async function putWetCheckMirror(db: OfflineDB, m: WetCheckMirror) {
-  await db.put("wetChecks", m);
+  await withDB(db, (d) => d.put("wetChecks", m));
 }
 export async function getWetCheckMirrorByClientId(db: OfflineDB, clientId: string) {
-  return await db.get("wetChecks", clientId);
+  return await withDB(db, (d) => d.get("wetChecks", clientId));
 }
 export async function getWetCheckMirrorById(db: OfflineDB, id: number) {
-  return await db.getFromIndex("wetChecks", "byId", id);
+  return await withDB(db, (d) => d.getFromIndex("wetChecks", "byId", id));
 }
 
 export async function putZoneRecordMirror(db: OfflineDB, m: ZoneRecordMirror) {
-  await db.put("wetCheckZoneRecords", m);
+  await withDB(db, (d) => d.put("wetCheckZoneRecords", m));
 }
 export async function listZoneRecordsForWetCheck(db: OfflineDB, wetCheckClientId: string) {
-  return await db.getAllFromIndex("wetCheckZoneRecords", "byWetCheckClientId", wetCheckClientId);
+  return await withDB(db, (d) =>
+    d.getAllFromIndex("wetCheckZoneRecords", "byWetCheckClientId", wetCheckClientId));
 }
 
 export async function putFindingMirror(db: OfflineDB, m: FindingMirror) {
-  await db.put("wetCheckFindings", m);
+  await withDB(db, (d) => d.put("wetCheckFindings", m));
 }
 export async function deleteFindingMirror(db: OfflineDB, clientId: string) {
-  await db.delete("wetCheckFindings", clientId);
+  await withDB(db, (d) => d.delete("wetCheckFindings", clientId));
 }
 export async function listFindingsForZoneRecord(db: OfflineDB, zoneRecordClientId: string) {
-  return await db.getAllFromIndex("wetCheckFindings", "byZoneRecordClientId", zoneRecordClientId);
+  return await withDB(db, (d) =>
+    d.getAllFromIndex("wetCheckFindings", "byZoneRecordClientId", zoneRecordClientId));
 }
 
 // Photo blob helpers (4C) ----------------------------------------------
@@ -284,24 +459,24 @@ export async function listFindingsForZoneRecord(db: OfflineDB, zoneRecordClientI
 export type PhotoBlob = PhotoBlobRow;
 
 export async function putPhotoBlob(db: OfflineDB, row: PhotoBlobRow): Promise<void> {
-  await db.put("photoBlobs", row);
+  await withDB(db, (d) => d.put("photoBlobs", row));
 }
 export async function getPhotoBlob(db: OfflineDB, clientId: string): Promise<PhotoBlobRow | undefined> {
-  return await db.get("photoBlobs", clientId);
+  return await withDB(db, (d) => d.get("photoBlobs", clientId));
 }
 export async function deletePhotoBlob(db: OfflineDB, clientId: string): Promise<void> {
-  await db.delete("photoBlobs", clientId);
+  await withDB(db, (d) => d.delete("photoBlobs", clientId));
 }
 export async function listPhotoBlobs(db: OfflineDB): Promise<PhotoBlobRow[]> {
-  return await db.getAll("photoBlobs");
+  return await withDB(db, (d) => d.getAll("photoBlobs"));
 }
 
 // Generic IDB-first read cache for GET endpoints (controllers, issue
 // type configs, parts-by-issue, etc.). Keyed by URL so callers can pass
 // the same URL they would pass to apiRequest.
 export async function getApiCache(db: OfflineDB, key: string) {
-  return await db.get("apiCache", key);
+  return await withDB(db, (d) => d.get("apiCache", key));
 }
 export async function putApiCache(db: OfflineDB, key: string, data: any) {
-  await db.put("apiCache", { key, data, updatedAt: Date.now() });
+  await withDB(db, (d) => d.put("apiCache", { key, data, updatedAt: Date.now() }));
 }

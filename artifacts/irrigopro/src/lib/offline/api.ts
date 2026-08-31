@@ -25,6 +25,7 @@ import {
   putPhotoBlob,
   putWetCheckMirror,
   putZoneRecordMirror,
+  withDB,
   type OfflineDB,
 } from "./db";
 import { getSyncEngine, isOfflineQueueEnabled } from "./engine";
@@ -241,10 +242,12 @@ export async function submitWetCheck(wetCheckClientId: string, wetCheckId: numbe
 // against zoneRecords / findings (which live in their own stores) are
 // visible immediately, not just the stale aggregate that was last warmed.
 async function assembleFromMirror(db: OfflineDB, root: any, wetCheckClientId: string): Promise<any> {
-  const zoneRows = await db.getAllFromIndex("wetCheckZoneRecords", "byWetCheckClientId", wetCheckClientId);
+  const zoneRows = await withDB(db, (d) =>
+    d.getAllFromIndex("wetCheckZoneRecords", "byWetCheckClientId", wetCheckClientId));
   const composedZones: any[] = [];
   for (const zr of zoneRows) {
-    const findingRows = await db.getAllFromIndex("wetCheckFindings", "byZoneRecordClientId", zr.clientId);
+    const findingRows = await withDB(db, (d) =>
+      d.getAllFromIndex("wetCheckFindings", "byZoneRecordClientId", zr.clientId));
     composedZones.push({
       ...(zr.data ?? {}),
       id: zr.id ?? zr.data?.id,
@@ -329,7 +332,7 @@ export async function upsertZoneRecord(input: UpsertZoneRecordInput): Promise<{ 
   // existing data payload) when reusing the same clientId — putZoneRecordMirror
   // is a full row replace, so otherwise a Needs Work → Ran OK flip would
   // strip the id and any cached server-shape we still want to surface.
-  const existingZr = await db.get("wetCheckZoneRecords", clientId);
+  const existingZr = await withDB(db, (d) => d.get("wetCheckZoneRecords", clientId));
   const existingId =
     existingZr?.id ?? (typeof existingZr?.data?.id === "number" ? existingZr.data.id : undefined);
   await putZoneRecordMirror(db, {
@@ -419,7 +422,7 @@ export async function updateFinding(findingClientId: string, findingId: number |
   }
   const db = await openOfflineDB();
   // Mirror update — preserve other fields.
-  const existing = await db.get("wetCheckFindings", findingClientId);
+  const existing = await withDB(db, (d) => d.get("wetCheckFindings", findingClientId));
   if (existing) {
     await putFindingMirror(db, {
       ...existing,
@@ -455,7 +458,7 @@ export async function patchZoneRecordRepairLabor(
     return;
   }
   const db = await openOfflineDB();
-  const existing = await db.get("wetCheckZoneRecords", zoneRecordClientId);
+  const existing = await withDB(db, (d) => d.get("wetCheckZoneRecords", zoneRecordClientId));
   if (existing) {
     await putZoneRecordMirror(db, {
       ...existing,
@@ -489,7 +492,7 @@ export async function patchZoneRecordReadings(
     return;
   }
   const db = await openOfflineDB();
-  const existing = await db.get("wetCheckZoneRecords", zoneRecordClientId);
+  const existing = await withDB(db, (d) => d.get("wetCheckZoneRecords", zoneRecordClientId));
   if (existing) {
     await putZoneRecordMirror(db, {
       ...existing,
@@ -695,10 +698,10 @@ export async function deleteFinding(findingClientId: string, findingId: number |
   //   (b) resolve the wet-check id on a 409 refusal so
   //       refreshMirrorFromServer can put the deleted row back —
   //       findWetCheckIdForMutation reads `placeholders.wc`.
-  const fMirror = await db.get("wetCheckFindings", findingClientId);
+  const fMirror = await withDB(db, (d) => d.get("wetCheckFindings", findingClientId));
   let wetCheckClientId: string | undefined;
   if (fMirror?.zoneRecordClientId) {
-    const zr = await db.get("wetCheckZoneRecords", fMirror.zoneRecordClientId);
+    const zr = await withDB(db, (d) => d.get("wetCheckZoneRecords", fMirror.zoneRecordClientId!));
     wetCheckClientId = zr?.wetCheckClientId;
   }
   await deleteFindingMirror(db, findingClientId);
@@ -891,7 +894,7 @@ export async function enqueueZoneRevertCascade(input: ZoneRevertCascadeInput): P
   for (const f of input.findings) {
     if (!f.needsResetToPending) continue;
     if (f.clientId) {
-      const existing = await db.get("wetCheckFindings", f.clientId);
+      const existing = await withDB(db, (d) => d.get("wetCheckFindings", f.clientId!));
       if (existing) {
         await putFindingMirror(db, {
           ...existing,
@@ -947,7 +950,7 @@ export async function enqueueZoneRevertCascade(input: ZoneRevertCascadeInput): P
   // doesn't strip it from the mirror — `assembleFromMirror` reads `zr.id`
   // / `zr.data?.id`, and downstream readers (e.g. `wc.photos.filter` by
   // `zoneRecordId`) need the id to remain stable across the revert.
-  const existingZr = await db.get("wetCheckZoneRecords", input.zoneRecordClientId);
+  const existingZr = await withDB(db, (d) => d.get("wetCheckZoneRecords", input.zoneRecordClientId));
   const existingId =
     existingZr?.id ?? (typeof existingZr?.data?.id === "number" ? existingZr.data.id : input.zoneRecordId);
   await putZoneRecordMirror(db, {

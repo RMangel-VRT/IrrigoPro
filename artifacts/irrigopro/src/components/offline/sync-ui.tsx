@@ -274,6 +274,12 @@ function friendlyErrorMessage(raw: string): string {
     }
     return "Gave up after repeated failures — tap Retry to try again";
   }
+  // The device's IndexedDB connection was closed mid-dispatch (iOS does this
+  // whenever the app is backgrounded). Nothing was sent and no attempt was
+  // spent — the queue picks this up again on its own.
+  if (head.startsWith("local_storage_unavailable")) {
+    return "Device storage was busy — will retry";
+  }
   if (
     head.startsWith("<!doctype") ||
     head.startsWith("<html") ||

@@ -16,6 +16,7 @@ import {
   ensurePersistentStorage,
   queuePhotoUpload,
 } from "@/lib/offline/api";
+import { photoErrorMessage } from "@/lib/offline/connection-errors";
 import type { WetCheckPhoto } from "@workspace/db/schema";
 import { newClientId, uploadPhotoToStorage } from "./helpers";
 
@@ -149,7 +150,7 @@ export function PhotoCaptureButton({
     } catch (err: any) {
       toast({
         title: "Photo capture failed",
-        description: err?.message ?? "Try again",
+        description: photoErrorMessage(err),
         variant: "destructive",
       });
     } finally {
@@ -201,7 +202,7 @@ export function PhotoCaptureButton({
       } catch (err: any) {
         toast({
           title: "Photo upload failed",
-          description: err?.message ?? "Try again",
+          description: photoErrorMessage(err),
           variant: "destructive",
         });
       } finally {
