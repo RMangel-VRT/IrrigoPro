@@ -42,9 +42,12 @@ describe("field work type seeding", () => {
     }
   });
 
-  it("inserts all seven defaults once and never resets tenant customizations", async () => {
-    assert.equal(await seedFieldWorkTypesForCompany(companyId), 7);
-    assert.equal(await seedFieldWorkTypesForCompany(companyId), 0);
+  // Presets are owned by `seeds/field-work-types.ts`. A re-run inserts what is
+  // missing AND corrects what has drifted from that file — the only thing it
+  // never writes is `active`, because retirement is the tenant's decision.
+  it("inserts all seven defaults once, then reconciles drift without un-retiring", async () => {
+    assert.deepEqual(await seedFieldWorkTypesForCompany(companyId), { inserted: 7, updated: 0 });
+    assert.deepEqual(await seedFieldWorkTypesForCompany(companyId), { inserted: 0, updated: 0 });
 
     // The label is presentation; the code is the stored key every ticket and
     // gate rule joins on, so a rename must never move it.
@@ -74,17 +77,25 @@ describe("field work type seeding", () => {
         eq(fieldWorkTypes.code, "backflow"),
       ));
 
-    assert.equal(await seedFieldWorkTypesForCompany(companyId), 0);
-    const [customized] = await db
+    assert.deepEqual(
+      await seedFieldWorkTypesForCompany(companyId),
+      { inserted: 0, updated: 1 },
+      "a drifted row is corrected, and reported as an update rather than an insert",
+    );
+    const [reconciled] = await db
       .select()
       .from(fieldWorkTypes)
       .where(and(
         eq(fieldWorkTypes.companyId, companyId),
         eq(fieldWorkTypes.code, "backflow"),
       ));
-    assert.equal(customized.label, "Tenant Backflow");
-    assert.equal(customized.sortOrder, 3);
-    assert.equal(customized.active, false);
+    assert.equal(reconciled.label, backflow.label);
+    assert.equal(reconciled.sortOrder, backflow.sortOrder);
+    assert.equal(
+      reconciled.active,
+      false,
+      "retirement survives the reconcile — the seed never writes `active`",
+    );
   });
 
   it("makes all seven defaults visible before createCompany resolves", async () => {

@@ -12,6 +12,7 @@ import {
   computeFieldWorkTypeSeedState,
   resolveFieldWorkTypeSeedStatus,
 } from "./seed-field-work-types";
+import { FIELD_WORK_TYPE_SEEDS } from "../../seeds/field-work-types";
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
 
@@ -93,18 +94,32 @@ describe("migration registry — static shape", () => {
     );
   });
 
-  it("computes missing field-work-type rows idempotently by company and code", () => {
+  it("computes missing and drifted field-work-type rows by company and code", () => {
+    const zoneRepair = FIELD_WORK_TYPE_SEEDS.find((seed) => seed.code === "zone_repair")!;
+    const rowFor = (companyId: number, overrides: Record<string, unknown> = {}) => ({
+      companyId,
+      code: zoneRepair.code,
+      label: zoneRepair.label,
+      requiresController: zoneRepair.requiresController,
+      requiresZone: zoneRepair.requiresZone,
+      requiresDetails: zoneRepair.requiresDetails,
+      sortOrder: zoneRepair.sortOrder,
+      ...overrides,
+    });
+
     const state = computeFieldWorkTypeSeedState(
       [10, 20],
-      [
-        { companyId: 10, code: "zone_repair" },
-        { companyId: 20, code: "zone_repair" },
-      ],
+      [rowFor(10), rowFor(20, { label: "Zone Fix" })],
     );
     assert.deepEqual(state, {
       companyCount: 2,
       companiesMissingDefaults: 2,
       rowsMissing: 12,
+      rowsDrifted: 1,
+      companiesWithDrift: 1,
+      driftDetails: [
+        'Company 20 · zone_repair (Zone Fix): label "Zone Fix" → "Zone Repair"',
+      ],
     });
   });
 
@@ -119,28 +134,44 @@ describe("migration registry — static shape", () => {
   });
 
   it("does not report the field-work-type migration complete without its marker", () => {
+    const reconciled = {
+      companyCount: 2,
+      companiesMissingDefaults: 0,
+      rowsMissing: 0,
+      rowsDrifted: 0,
+      companiesWithDrift: 0,
+      driftDetails: [],
+    };
     assert.deepEqual(
-      resolveFieldWorkTypeSeedStatus({
-        companyCount: 2,
-        companiesMissingDefaults: 0,
-        rowsMissing: 0,
-      }),
+      resolveFieldWorkTypeSeedStatus(reconciled),
       {
         state: "partially_applied",
         details: "All defaults are present, but the completion marker is missing.",
       },
     );
     assert.deepEqual(
-      resolveFieldWorkTypeSeedStatus({
-        companyCount: 2,
-        companiesMissingDefaults: 0,
-        rowsMissing: 0,
-      }, "2026-09-02T12:00:00.000Z"),
+      resolveFieldWorkTypeSeedStatus(reconciled, "2026-09-02T12:00:00.000Z"),
       {
         state: "completed",
         completedAt: "2026-09-02T12:00:00.000Z",
       },
     );
+  });
+
+  // Presets are owned by the source file, so "every row exists" is no longer
+  // the same question as "every row is correct". A company holding a stale
+  // label still owes the migration a run.
+  it("reports the field-work-type migration partially applied while rows have drifted", () => {
+    const status = resolveFieldWorkTypeSeedStatus({
+      companyCount: 2,
+      companiesMissingDefaults: 0,
+      rowsMissing: 0,
+      rowsDrifted: 2,
+      companiesWithDrift: 2,
+      driftDetails: [],
+    }, "2026-09-02T12:00:00.000Z");
+    assert.equal(status.state, "partially_applied");
+    assert.match(String((status as any).details), /2 field work type\(s\) differ from the source file/);
   });
 
   it("previews field-work-type seeding without mutating state", async () => {
@@ -153,6 +184,14 @@ describe("migration registry — static shape", () => {
     ]);
     assert.ok((result.orphanRows?.companies ?? -1) >= 0);
     assert.ok((result.orphanRows?.fieldWorkTypesMissing ?? -1) >= 0);
+    assert.ok((result.orphanRows?.fieldWorkTypesDrifted ?? -1) >= 0);
+    // The preview must not promise something the reconcile no longer honours.
+    for (const warning of result.warnings) {
+      assert.doesNotMatch(warning, /will not be changed/i);
+    }
+    for (const step of result.steps) {
+      assert.doesNotMatch(step.description, /without overwriting/i);
+    }
   });
 
   it("invoice-sent-status-backfill-v1 has the required MigrationDefinition shape", () => {

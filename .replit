@@ -156,6 +156,10 @@ args = "retired-work-types"
 task = "workflow.run"
 args = "financial-pulse-manager-access"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "work-type-seed-reconcile"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -537,6 +541,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/routes/financial-pulse-access.test.ts"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "work-type-seed-reconcile"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/lib/migrations/seed-field-work-types-contract.test.ts src/lib/migrations/registry.test.ts src/seed-field-work-types.test.ts"
 
 [workflows.workflow.metadata]
 isValidation = true
