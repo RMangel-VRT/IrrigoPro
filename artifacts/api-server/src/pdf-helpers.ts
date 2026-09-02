@@ -336,31 +336,7 @@ export function coverPage(
   </div>`;
 }
 
-/**
- * Task #1959 — the work-site block in a ticket header.
- *
- * The address is the field a customer scans for first on a printed ticket, so
- * it renders as its own emphasized block rather than as another small metadata
- * line. The dropped pin sits beneath it when coordinates were captured.
- *
- * Returns '' when there is neither an address nor a pin, so a ticket with no
- * site data renders no empty container and no orphan label.
- */
-function ticketSiteBlock(site: PdfSiteMetadata, locationSuffix?: string | null): string {
-  const locationText = [site.location, locationSuffix].filter(Boolean).join(' — ');
-  const pin = site.pin;
-  if (!locationText && !pin) return '';
-
-  const addressHtml = locationText
-    ? `<div class="ticket-site-address">${PDF_PIN_ICON} ${escapeHtml(locationText)}</div>`
-    : '';
-  const pinHtml = pin
-    ? `<div class="ticket-site-pin">Pin ${escapeHtml(pin.coordinates)} &nbsp;&middot;&nbsp; <a href="${escapeHtml(pin.mapUrl)}">Open in Maps</a></div>`
-    : '';
-
-  return `<div class="ticket-site-block">${addressHtml}${pinHtml}</div>`;
-}
-
+type InvoiceTicketSiteJobType = Extract<JobTypeKey, 'workOrder' | 'billingSheet' | 'wetCheck'>;
 export function ticketPageWO(wo: PdfWorkOrderRow, invoiceNumber: string, photoDataUris: string[], logoDataUri?: string | null, companyName?: string): string {
   const workText = wo.aiDetailedDescription || wo.workSummary || wo.workDescription;
   const workBullets = workText
@@ -390,14 +366,7 @@ export function ticketPageWO(wo: PdfWorkOrderRow, invoiceNumber: string, photoDa
     latitude: wo.workLocationLat,
     longitude: wo.workLocationLng,
   });
-  const siteBlock = ticketSiteBlock(site, wo.locationNotes);
-  const branchLine = site.branch
-    ? `<div class="ticket-header-branch">${PDF_BRANCH_ICON} Branch: ${escapeHtml(site.branch)}</div>`
-    : '';
-  const clockZoneText = pdfControllerZoneText(site);
-  const clockZoneLine = clockZoneText
-    ? `<div class="ticket-header-branch">${PDF_CLOCK_ICON} ${escapeHtml(clockZoneText)}</div>`
-    : '';
+  const sitePanel = ticketSitePanel(site, 'workOrder', wo.locationNotes);
 
   const logoHtml = logoDataUri
     ? `<img src="${logoDataUri}" class="ticket-header-logo" alt="Company logo">`
@@ -407,15 +376,15 @@ export function ticketPageWO(wo: PdfWorkOrderRow, invoiceNumber: string, photoDa
 
   return `
   <div class="ticket-page ticket-type-wo">
-    <div class="ticket-header ticket-header-wo">
-      <div class="ticket-header-condensed">
-        ${logoHtml}
-        <div class="ticket-header-line1">Work Order #${wo.workOrderNumber} &nbsp;|&nbsp; Invoice #${invoiceNumber}</div>
-        <div class="ticket-header-line2">Date: ${wo.completedAt ? formatDate(wo.completedAt) : 'N/A'} &nbsp;|&nbsp; Technician: ${wo.technicianName} &nbsp;|&nbsp; Hours: ${wo.totalHours} hrs</div>
-        ${siteBlock}
-        ${branchLine}
-        ${clockZoneLine}
+    <div class="ticket-header-group">
+      <div class="ticket-header ticket-header-wo">
+        <div class="ticket-header-condensed">
+          ${logoHtml}
+          <div class="ticket-header-line1">Work Order #${wo.workOrderNumber} &nbsp;|&nbsp; Invoice #${invoiceNumber}</div>
+          <div class="ticket-header-line2">Date: ${wo.completedAt ? formatDate(wo.completedAt) : 'N/A'} &nbsp;|&nbsp; Technician: ${wo.technicianName} &nbsp;|&nbsp; Hours: ${wo.totalHours} hrs</div>
+        </div>
       </div>
+      ${sitePanel}
     </div>
 
     ${workBullets}
@@ -486,23 +455,19 @@ export function ticketPageBS(bs: PdfBillingSheetRow, invoiceNumber: string, phot
     latitude: bs.workLocationLat,
     longitude: bs.workLocationLng,
   });
-  const bsSiteBlock = ticketSiteBlock(bsSite);
-  const bsClockZoneText = pdfControllerZoneText(bsSite);
-  const bsClockZoneLine = bsClockZoneText
-    ? `<div class="ticket-header-branch">${PDF_CLOCK_ICON} ${escapeHtml(bsClockZoneText)}</div>`
-    : '';
+  const bsSitePanel = ticketSitePanel(bsSite, 'billingSheet');
 
   return `
   <div class="ticket-page ticket-type-bs">
-    <div class="ticket-header ticket-header-bs">
-      <div class="ticket-header-condensed">
-        ${bsLogoHtml}
-        <div class="ticket-header-line1">Billing Sheet #${bs.billingNumber} &nbsp;|&nbsp; Invoice #${invoiceNumber}</div>
-        <div class="ticket-header-line2">Date: ${formatDate(bs.workDate)} &nbsp;|&nbsp; Technician: ${bs.technicianName} &nbsp;|&nbsp; Hours: ${bs.totalHours} hrs</div>
-        ${bsSiteBlock}
-        ${bsSite.branch ? `<div class="ticket-header-branch">${PDF_BRANCH_ICON} Branch: ${escapeHtml(bsSite.branch)}</div>` : ''}
-        ${bsClockZoneLine}
+    <div class="ticket-header-group">
+      <div class="ticket-header ticket-header-bs">
+        <div class="ticket-header-condensed">
+          ${bsLogoHtml}
+          <div class="ticket-header-line1">Billing Sheet #${bs.billingNumber} &nbsp;|&nbsp; Invoice #${invoiceNumber}</div>
+          <div class="ticket-header-line2">Date: ${formatDate(bs.workDate)} &nbsp;|&nbsp; Technician: ${bs.technicianName} &nbsp;|&nbsp; Hours: ${bs.totalHours} hrs</div>
+        </div>
       </div>
+      ${bsSitePanel}
     </div>
 
     ${workBullets}
@@ -564,11 +529,7 @@ export function ticketPageWCB(
     zoneNumbers: (view.zones ?? []).map(zone => zone.zoneNumber),
     // No pin here: wet_check_billings carries no coordinate columns.
   });
-  const wcbSiteBlock = ticketSiteBlock(wcbSite);
-  const wcbClockZoneText = pdfControllerZoneText(wcbSite);
-  const wcbClockZoneLine = wcbClockZoneText
-    ? `<div class="ticket-header-branch">${PDF_CLOCK_ICON} ${escapeHtml(wcbClockZoneText)}</div>`
-    : '';
+  const wcbSitePanel = ticketSitePanel(wcbSite, 'wetCheck');
 
   const totalHours = parseFloat(String(wcb.totalHours || '0'));
   const laborRate = parseFloat(String(wcb.appliedLaborRate || wcb.laborRate || '0'));
@@ -602,15 +563,15 @@ export function ticketPageWCB(
 
   return `
   <div class="ticket-page ticket-type-wcb">
-    <div class="ticket-header ticket-header-wcb">
-      <div class="ticket-header-condensed">
-        ${wcbLogoHtml}
-        <div class="ticket-header-line1">WC Billing #${wcb.billingNumber} &nbsp;|&nbsp; Invoice #${invoiceNumber}</div>
-        <div class="ticket-header-line2">Date: ${formatDate(new Date(wcb.workDate))} &nbsp;|&nbsp; Technician: ${wcb.technicianName} &nbsp;|&nbsp; Hours: ${totalHours} hrs</div>
-        ${wcbSiteBlock}
-        ${wcbSite.branch ? `<div class="ticket-header-branch">${PDF_BRANCH_ICON} Branch: ${escapeHtml(wcbSite.branch)}</div>` : ''}
-        ${wcbClockZoneLine}
+    <div class="ticket-header-group">
+      <div class="ticket-header ticket-header-wcb">
+        <div class="ticket-header-condensed">
+          ${wcbLogoHtml}
+          <div class="ticket-header-line1">WC Billing #${wcb.billingNumber} &nbsp;|&nbsp; Invoice #${invoiceNumber}</div>
+          <div class="ticket-header-line2">Date: ${formatDate(new Date(wcb.workDate))} &nbsp;|&nbsp; Technician: ${wcb.technicianName} &nbsp;|&nbsp; Hours: ${totalHours} hrs</div>
+        </div>
       </div>
+      ${wcbSitePanel}
     </div>
 
     <div class="ticket-section ticket-financial">
@@ -1671,6 +1632,13 @@ export function buildFullCSS(colors: PdfBrandColors = DEFAULT_BRAND_COLORS): str
     page-break-after: avoid;
   }
 
+  .ticket-header-group {
+    page-break-inside: avoid;
+    break-inside: avoid;
+    page-break-after: avoid;
+    break-after: avoid;
+  }
+
   .ticket-header-wo {
     background: ${JOB_TYPE_COLORS.workOrder};
     color: white;
@@ -1724,24 +1692,6 @@ export function buildFullCSS(colors: PdfBrandColors = DEFAULT_BRAND_COLORS): str
     line-height: 1.3;
   }
 
-  /* Task #1959 — the work site reads as its own block, not as another small
-     metadata line. Emphasis is the point: this is what a customer scans for. */
-  .ticket-site-block {
-    margin-top: 5px;
-    padding: 5px 8px;
-    background: rgba(255,255,255,0.15);
-    border-left: 3px solid rgba(255,255,255,0.9);
-    border-radius: 2px;
-  }
-
-  .ticket-site-address {
-    font-size: 13px;
-    font-weight: 700;
-    color: #ffffff;
-    line-height: 1.3;
-    letter-spacing: 0.01em;
-  }
-
   .pdf-inline-icon {
     display: inline-block;
     width: 1em;
@@ -1750,25 +1700,105 @@ export function buildFullCSS(colors: PdfBrandColors = DEFAULT_BRAND_COLORS): str
     flex: 0 0 auto;
   }
 
+  /* Canonical full-width site continuation panel. It is deliberately outside
+     the colored identity header so site details remain high-contrast on paper. */
+  .ticket-site-panel {
+    background: #f8fafc;
+    border: 1px solid #dbe3ec;
+    border-top: none;
+    border-left: 4px solid var(--ticket-site-accent);
+    border-radius: 0 0 6px 6px;
+    padding: 10px 14px 11px;
+    color: #111827;
+    page-break-inside: avoid;
+    break-inside: avoid;
+    page-break-after: avoid;
+    break-after: avoid;
+  }
+
+  .ticket-site-panel-label {
+    color: var(--ticket-site-accent);
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    line-height: 1.2;
+    margin-bottom: 5px;
+  }
+
+  .ticket-site-address {
+    display: flex;
+    align-items: flex-start;
+    gap: 5px;
+    font-size: 14px;
+    font-weight: 800;
+    color: #111827;
+    line-height: 1.3;
+    letter-spacing: 0.01em;
+  }
+
+  .ticket-site-address .pdf-inline-icon,
+  .ticket-site-pin .pdf-inline-icon {
+    color: var(--ticket-site-accent);
+  }
+
+  .ticket-site-notes {
+    display: flex;
+    gap: 5px;
+    margin-top: 4px;
+    font-size: 10px;
+    color: #374151;
+    line-height: 1.35;
+  }
+
+  .ticket-site-notes-label {
+    color: #6b7280;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .ticket-site-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 7px;
+  }
+
+  .ticket-site-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    padding: 3px 7px;
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    background: white;
+    color: #1f2937;
+    font-size: 10px;
+    font-weight: 650;
+    line-height: 1.25;
+  }
+
+  .ticket-site-chip .pdf-inline-icon {
+    color: var(--ticket-site-accent);
+  }
+
   .ticket-site-pin {
-    margin-top: 2px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 7px;
     font-size: 9px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    color: rgba(255,255,255,0.85);
+    color: #4b5563;
     line-height: 1.3;
   }
 
   .ticket-site-pin a {
-    color: rgba(255,255,255,0.95);
+    color: var(--ticket-site-accent);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+    font-weight: 700;
     text-decoration: underline;
-  }
-
-  .ticket-header-branch {
-    font-size: 11px;
-    font-weight: 600;
-    color: rgba(255,255,255,0.95);
-    line-height: 1.3;
-    margin-top: 2px;
   }
 
   /* ── Ticket Sections ── */
@@ -2232,3 +2262,80 @@ export function buildFullCSS(colors: PdfBrandColors = DEFAULT_BRAND_COLORS): str
   }
   `;
 }
+
+/** Named alias retained for callers that prefer an explicit PDF renderer name. */
+export const renderPdfTicketSitePanel = ticketSitePanel;
+
+/**
+ * Canonical site panel for every invoice ticket family.
+ *
+ * All ticket builders normalize their source data with buildPdfSiteMetadata,
+ * then delegate the complete site presentation here. Keeping the address,
+ * notes, chips, and map link in one renderer prevents the three ticket
+ * families from drifting apart again.
+ *
+ * Returns '' when no site value is available, so callers never render an
+ * empty panel or placeholder. The job-type accent is intentionally supplied
+ * by the renderer rather than inferred from the metadata contract.
+ */
+export function ticketSitePanel(
+  site: PdfSiteMetadata,
+  jobType: InvoiceTicketSiteJobType,
+  locationNotes?: string | null,
+): string {
+  const config = INVOICE_TICKET_SITE_CONFIG[jobType];
+  const notes = locationNotes?.trim() || null;
+  const hasSiteValue = Boolean(
+    site.location ||
+    notes ||
+    site.branch ||
+    site.controller ||
+    site.controllerLocation ||
+    site.zone ||
+    site.pin,
+  );
+  if (!hasSiteValue) return '';
+
+  const addressHtml = site.location
+    ? `<div class="ticket-site-address">${PDF_PIN_ICON}<span>${escapeHtml(site.location)}</span></div>`
+    : '';
+  const notesHtml = notes
+    ? `<div class="ticket-site-notes"><span class="ticket-site-notes-label">Location notes</span><span>${escapeHtml(notes)}</span></div>`
+    : '';
+  const pinHtml = site.pin
+    ? `<div class="ticket-site-pin">${PDF_PIN_ICON}<span>Pin ${escapeHtml(site.pin.coordinates)}</span>&nbsp;&middot;&nbsp;<a href="${escapeHtml(site.pin.mapUrl)}">Open in Maps</a></div>`
+    : '';
+  const controllerZoneText = [
+    site.controller
+      ? [site.controller, site.controllerLocation].filter(Boolean).join(' — ')
+      : site.controllerLocation,
+    site.zone,
+  ].filter(Boolean).join(' · ') || pdfControllerZoneText(site);
+  const chips = [
+    site.branch
+      ? `<span class="ticket-site-chip">${PDF_BRANCH_ICON}<span>Branch: ${escapeHtml(site.branch)}</span></span>`
+      : '',
+    controllerZoneText
+      ? `<span class="ticket-site-chip">${PDF_CLOCK_ICON}<span>${escapeHtml(controllerZoneText)}</span></span>`
+      : '',
+  ].filter(Boolean).join('');
+  const chipRow = chips ? `<div class="ticket-site-chip-row">${chips}</div>` : '';
+
+  return `
+    <div class="ticket-site-panel ticket-site-panel-${jobType}" style="--ticket-site-accent:${config.accent};">
+      <div class="ticket-site-panel-label">${config.label}</div>
+      ${addressHtml}
+      ${notesHtml}
+      ${chipRow}
+      ${pinHtml}
+    </div>`;
+}
+
+const INVOICE_TICKET_SITE_CONFIG: Record<InvoiceTicketSiteJobType, {
+  label: string;
+  accent: string;
+}> = {
+  workOrder: { label: 'WORK ORDER SITE', accent: JOB_TYPE_COLORS.workOrder },
+  billingSheet: { label: 'BILLING SHEET SITE', accent: JOB_TYPE_COLORS.billingSheet },
+  wetCheck: { label: 'WET CHECK SITE', accent: JOB_TYPE_COLORS.wetCheck },
+};

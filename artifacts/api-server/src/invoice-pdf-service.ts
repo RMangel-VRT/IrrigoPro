@@ -120,6 +120,67 @@ function toNum(val: string | number | null | undefined): number {
   return isNaN(n) ? 0 : n;
 }
 
+function hasControllerOrZoneMetadata(
+  controller: string | null | undefined,
+  zone: number | string | null | undefined,
+): boolean {
+  return Boolean(
+    (typeof controller === 'string' ? controller.trim() : controller) ||
+    (zone !== null && zone !== undefined && String(zone).trim() !== ''),
+  );
+}
+
+interface ControllerZoneCarrier {
+  controllerLetter?: string | null;
+  zoneNumber?: number | string | null;
+}
+
+interface InvoiceTicketMetadataRows {
+  workOrders: Array<{
+    workOrder: ControllerZoneCarrier;
+    items: ControllerZoneCarrier[];
+  }>;
+  billingSheets: Array<{
+    billingSheet: ControllerZoneCarrier;
+    wetCheckView?: { zones?: ControllerZoneCarrier[] };
+  }>;
+  wetCheckBillings: Array<{
+    wetCheckView: { zones?: ControllerZoneCarrier[] };
+  }>;
+}
+
+export function countTicketRowsMissingControllerZoneMetadata(
+  rows: InvoiceTicketMetadataRows,
+): number {
+  return [
+    ...rows.workOrders.map(({ workOrder, items }) =>
+      hasControllerOrZoneMetadata(workOrder.controllerLetter, workOrder.zoneNumber) ||
+      items.some(item => hasControllerOrZoneMetadata(item.controllerLetter, item.zoneNumber)),
+    ),
+    ...rows.billingSheets.map(({ billingSheet, wetCheckView }) =>
+      hasControllerOrZoneMetadata(billingSheet.controllerLetter, billingSheet.zoneNumber) ||
+      (wetCheckView?.zones ?? []).some(zone =>
+        hasControllerOrZoneMetadata(zone.controllerLetter, zone.zoneNumber),
+      ),
+    ),
+    ...rows.wetCheckBillings.map(({ wetCheckView }) =>
+      (wetCheckView.zones ?? []).some(zone =>
+        hasControllerOrZoneMetadata(zone.controllerLetter, zone.zoneNumber),
+      ),
+    ),
+  ].filter(hasMetadata => !hasMetadata).length;
+}
+
+export function logInvoiceTicketMetadataSummary(
+  invoiceNumber: string,
+  rows: InvoiceTicketMetadataRows,
+  log: (message: string) => void = console.info,
+): number {
+  const missingCount = countTicketRowsMissingControllerZoneMetadata(rows);
+  log(`[PDF] Invoice ${invoiceNumber}: ${missingCount} ticket row(s) missing controller/zone metadata`);
+  return missingCount;
+}
+
 function validateRows(
   invoiceId: number,
   workOrders: Array<{ workOrder: WorkOrder; items: WorkOrderItem[] }>,
@@ -315,6 +376,14 @@ export class InvoicePdfService {
         }
         r.mergedPhotoUrls = merged;
       }
+
+      // Keep this as one packet-level informational summary rather than
+      // emitting a warning or a PDF placeholder for every incomplete row.
+      logInvoiceTicketMetadataSummary(invoice.invoiceNumber, {
+        workOrders,
+        billingSheets,
+        wetCheckBillings: wetCheckBillingRows,
+      });
 
       const storedInvoiceTotal = toNum(invoice.totalAmount);
       const validationFailure = validateRows(

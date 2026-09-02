@@ -33,6 +33,7 @@ import {
   PDF_CLOCK_ICON,
   PDF_WARNING_ICON,
   PDF_INFO_ICON,
+  JOB_TYPE_COLORS,
 } from "./pdf-helpers.js";
 import { DEFAULT_BRAND_COLORS } from "./pdf-view-model.js";
 import type { PdfWorkOrderRow, PdfBillingSheetRow, PdfBillingSheetItemRow } from "./pdf-view-model.js";
@@ -62,7 +63,7 @@ const snapStore: SnapStore = loadSnapStore();
 let snapDirty = false;
 
 function toMatchSnapshot(name: string, value: string): void {
-  if (snapStore[name] === undefined) {
+  if (snapStore[name] === undefined || process.env.UPDATE_SNAPSHOTS === "1") {
     snapStore[name] = value;
     snapDirty = true;
   } else {
@@ -82,10 +83,11 @@ process.on("exit", () => {
 const SHARED_CLASSES: string[] = [
   "ticket-page",
   "ticket-header",
+  "ticket-header-group",
   "ticket-header-condensed",
   "ticket-header-line1",
   "ticket-header-line2",
-  "ticket-site-block",
+  "ticket-site-panel",
   "ticket-site-address",
   "ticket-section",
   "ticket-financial",
@@ -318,6 +320,25 @@ describe("ticketPageWCB — historical snapshot metadata", () => {
 
     assert.match(html, /Captured Billing Address/);
     assert.doesNotMatch(html, /Later Inspection Address/);
+  });
+});
+
+describe("all invoice ticket families — canonical site panel", () => {
+  const woHtml = ticketPageWO(woFixture, INVOICE_NUMBER, []);
+  const tickets = [woHtml, bsHtml, wcbHtml];
+
+  it("renders exactly one panel after the identity header and no legacy in-header site markup", () => {
+    for (const html of tickets) {
+      assert.equal((html.match(/class="ticket-site-panel /g) ?? []).length, 1);
+      assert.ok(html.indexOf("ticket-site-panel") > html.indexOf("ticket-header ticket-header-"));
+      assert.doesNotMatch(html, /ticket-site-block|ticket-header-branch/);
+    }
+  });
+
+  it("uses each ticket family's fixed accent", () => {
+    assert.match(woHtml, new RegExp(`--ticket-site-accent:${JOB_TYPE_COLORS.workOrder}`));
+    assert.match(bsHtml, new RegExp(`--ticket-site-accent:${JOB_TYPE_COLORS.billingSheet}`));
+    assert.match(wcbHtml, new RegExp(`--ticket-site-accent:${JOB_TYPE_COLORS.wetCheck}`));
   });
 });
 

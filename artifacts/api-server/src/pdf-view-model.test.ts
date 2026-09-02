@@ -306,11 +306,12 @@ function bsRow(branchName: string | null, controllerLetter: string | null = null
   };
 }
 
-describe("ticketPageWO — Branch header line (Task #479)", () => {
-  it("renders the Branch line when branchName is set", () => {
+describe("ticketPageWO — Branch site chip", () => {
+  it("renders the Branch chip when branchName is set", () => {
     const html = ticketPageWO(woRow("First Bank"), "INV-1", []);
-    assert.match(html, /ticket-header-branch/);
+    assert.match(html, /ticket-site-chip/);
     assert.match(html, /Branch: First Bank/);
+    assert.doesNotMatch(html, /ticket-header-branch/);
   });
 
   it("omits the Branch line when branchName is null", () => {
@@ -353,11 +354,12 @@ describe("ticketPageWO — Clock/Zone header line (Task #1333)", () => {
   });
 });
 
-describe("ticketPageBS — Branch header line (Task #479)", () => {
-  it("renders the Branch line when branchName is set", () => {
+describe("ticketPageBS — Branch site chip", () => {
+  it("renders the Branch chip when branchName is set", () => {
     const html = ticketPageBS(bsRow("PNC"), "INV-1", []);
-    assert.match(html, /ticket-header-branch/);
+    assert.match(html, /ticket-site-chip/);
     assert.match(html, /Branch: PNC/);
+    assert.doesNotMatch(html, /ticket-header-branch/);
   });
 
   it("omits the Branch line when branchName is null", () => {

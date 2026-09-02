@@ -125,18 +125,20 @@ describe("ticketPageWCB — financial section (Task #787)", () => {
   });
 });
 
-describe("ticketPageWCB — branch header (Task #787)", () => {
-  it("renders branch line when branchName is set on wetCheckBilling", () => {
+describe("ticketPageWCB — branch site chip", () => {
+  it("renders a branch chip in the canonical panel when branchName is set", () => {
     const row = makeRow();
     (row.wetCheckBilling as any).branchName = "North Campus";
     const html = ticketPageWCB(row, "INV-1", []);
-    assert.match(html, /ticket-header-branch/);
+    assert.match(html, /ticket-site-chip/);
     assert.match(html, /Branch: North Campus/);
+    assert.doesNotMatch(html, /ticket-header-branch/);
   });
 
-  it("omits branch line when branchName is null", () => {
+  it("omits the branch chip when branchName is null", () => {
     const html = ticketPageWCB(makeRow(), "INV-1", []);
     assert.doesNotMatch(html, /ticket-header-branch/);
+    assert.doesNotMatch(html, /Branch: /);
   });
 });
 

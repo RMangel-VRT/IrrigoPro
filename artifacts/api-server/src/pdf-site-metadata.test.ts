@@ -7,7 +7,7 @@ import {
   pdfLineItemZoneLabel,
   pdfSiteMetadataLines,
 } from './pdf-site-metadata';
-import { ticketPageBS, ticketPageWO } from './pdf-helpers';
+import { buildFullCSS, JOB_TYPE_COLORS, ticketPageBS, ticketPageWO } from './pdf-helpers';
 import { ticketPageWCB } from './pdf-helpers';
 import { buildPdfViewModel } from './pdf-view-model';
 import type {
@@ -262,11 +262,16 @@ describe('per-line-item clock/zone label', () => {
   });
 });
 
-describe('ticket rendering — prominent site block and pin', () => {
-  it('renders the work site as its own emphasized block, not another metadata line', () => {
+describe('ticket rendering — canonical site panel and pin', () => {
+  it('renders the work site in one full-width panel immediately after the identity header', () => {
     const html = ticketPageWO(baseWorkOrder, '1', []);
-    assert.match(html, /ticket-site-block/);
-    assert.match(html, /<div class="ticket-site-address">[\s\S]*Specific Work Site<\/div>/);
+    assert.match(html, /ticket-header-group/);
+    assert.match(html, /ticket-site-panel ticket-site-panel-workOrder/);
+    assert.match(html, /<div class="ticket-site-address">[\s\S]*Specific Work Site[\s\S]*<\/div>/);
+    assert.ok(html.indexOf('ticket-site-panel') > html.indexOf('ticket-header ticket-header-wo'));
+    assert.equal((html.match(/class="ticket-site-panel /g) ?? []).length, 1);
+    assert.doesNotMatch(html, /ticket-site-block/);
+    assert.doesNotMatch(html, /ticket-header-branch/);
     assert.doesNotMatch(html, /ticket-header-line3/);
   });
 
@@ -302,7 +307,7 @@ describe('ticket rendering — prominent site block and pin', () => {
       '1',
       [],
     );
-    assert.doesNotMatch(html, /ticket-site-block/);
+    assert.doesNotMatch(html, /ticket-site-panel/);
     assert.doesNotMatch(html, /ticket-site-address/);
     assert.doesNotMatch(html, /ticket-site-pin/);
     assert.doesNotMatch(html, /Branch:/);
@@ -316,9 +321,19 @@ describe('ticket rendering — prominent site block and pin', () => {
       '1',
       [],
     );
-    assert.match(html, /ticket-site-block/);
+    assert.match(html, /ticket-site-panel/);
     assert.doesNotMatch(html, /ticket-site-address/);
     assert.match(html, /39\.500000, -104\.500000/);
+  });
+
+  it('uses the job-type accent and keeps the header-plus-panel group together for print', () => {
+    const css = buildFullCSS();
+    assert.match(
+      ticketPageWO(baseWorkOrder, '1', []),
+      new RegExp(`--ticket-site-accent:${JOB_TYPE_COLORS.workOrder}`),
+    );
+    assert.match(css, /\.ticket-header-group\s*\{[^}]*page-break-inside:\s*avoid[^}]*break-inside:\s*avoid[^}]*page-break-after:\s*avoid[^}]*break-after:\s*avoid/s);
+    assert.match(css, /\.ticket-site-panel\s*\{[^}]*border-left:\s*4px solid var\(--ticket-site-accent\)/s);
   });
 });
 
