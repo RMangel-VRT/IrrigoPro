@@ -13,29 +13,46 @@ import type { AddressInfo } from "node:net";
 
 import { registerBudgetRoutes } from "./budget-routes";
 import { db } from "../db";
+import { getTableName } from "drizzle-orm";
 
 // Shim db.select to return empty WCBs so computeCustomerSpend's WCB leg
 // is deterministic (tests only configure invoice data via storage stubs).
 // Must be installed before any module that imports budget-spend is loaded.
-const _dbChain: any = new Proxy(
-  {},
-  {
+function _makeMockChain(fromTableName?: string): any {
+  const chain: any = new Proxy({}, {
     get(_t, prop) {
       if (prop === "then") {
-        return (resolve: (v: any[]) => void) => resolve([]);
+        return (resolve: (v: any[]) => void) => {
+          if (fromTableName === "customer_budget_months") {
+            const amount = state.monthlyAllocs.get(state.activeCustomerId ?? -1);
+            resolve(amount == null ? [] : [{ customerId: state.activeCustomerId, amount }]);
+          } else {
+            resolve([]);
+          }
+        };
       }
-      return () => _dbChain;
+      if (prop === "from") {
+        return (table: any) => {
+          let name: string | undefined;
+          try {
+            name = getTableName(table);
+          } catch {
+            name = undefined;
+          }
+          return _makeMockChain(name);
+        };
+      }
+      return () => _makeMockChain(fromTableName);
     },
-  },
-);
-const _realDbSelect = (db as any).select.bind(db);
-(db as any).select = () => _dbChain;
+  });
+  return chain;
+}
+(db as any).select = () => _makeMockChain();
 
 interface StubCustomer {
   id: number;
   companyId: number;
-  monthlyBudgetCap: string | null;
-  annualBudgetCap: string | null;
+  annualBudgetGoal: string | null;
   budgetSoftThresholdPercent: number | null;
   budgetHardThresholdPercent: number | null;
 }
@@ -55,12 +72,17 @@ interface StubInvoice {
 const state = {
   customers: new Map<number, StubCustomer>(),
   invoices: [] as StubInvoice[],
+  monthlyAllocs: new Map<number, string>(),
+  activeCustomerId: null as number | null,
 };
 
 // Patch the real storage singleton so the route under test reads from
 // our in-memory map without touching Postgres.
 import { storage } from "../storage";
-(storage as any).getCustomer = async (id: number) => state.customers.get(id);
+(storage as any).getCustomer = async (id: number) => {
+  state.activeCustomerId = id;
+  return state.customers.get(id);
+};
 (storage as any).getInvoicesByCustomer = async (customerId: number) =>
   state.invoices.filter((i) => i.customerId === customerId);
 
@@ -88,19 +110,20 @@ async function startServer(app: Express): Promise<{ server: Server; base: string
 function setSeed() {
   state.customers.clear();
   state.invoices.length = 0;
+  state.monthlyAllocs.clear();
+  state.activeCustomerId = null;
   state.customers.set(1, {
     id: 1,
     companyId: 10,
-    monthlyBudgetCap: "1000.00",
-    annualBudgetCap: "10000.00",
+    annualBudgetGoal: "10000.00",
     budgetSoftThresholdPercent: 75,
     budgetHardThresholdPercent: 100,
   });
+  state.monthlyAllocs.set(1, "1000.00");
   state.customers.set(2, {
     id: 2,
     companyId: 20,
-    monthlyBudgetCap: null,
-    annualBudgetCap: null,
+    annualBudgetGoal: null,
     budgetSoftThresholdPercent: null,
     budgetHardThresholdPercent: null,
   });
@@ -163,7 +186,7 @@ describe("GET /api/customers/:id/budget-usage", () => {
     const { app } = makeApp("company_admin", 99);
     ({ server, base } = await startServer(app));
     const res = await fetch(`${base}/api/customers/1/budget-usage`);
-    assert.equal(res.status, 403);
+    assert.equal(res.status, 404);
     await new Promise<void>((r) => server!.close(() => r()));
     server = undefined;
   });

@@ -911,8 +911,8 @@ describe("Task #730 — cross-surface parity: per-customer summary billedMtd & u
   ];
 
   const customers: CustomerWithBudget[] = [
-    { id: 10, name: "Acme",   hiddenFromBilling: false, monthlyBudgetCap: null, annualBudgetCap: null } as CustomerWithBudget,
-    { id: 20, name: "Bravo",  hiddenFromBilling: false, monthlyBudgetCap: null, annualBudgetCap: null } as CustomerWithBudget,
+    { id: 10, name: "Acme", companyId: 1, hiddenFromBilling: false, monthlyAllocation: null } as CustomerWithBudget,
+    { id: 20, name: "Bravo", companyId: 1, hiddenFromBilling: false, monthlyAllocation: null } as CustomerWithBudget,
   ];
 
   it("computeTopCustomers.revenue equals computeBilled for the same customer (billedMtd parity)", () => {
@@ -1125,8 +1125,7 @@ describe("Task #731 — computePulseCustomers", () => {
     emergencyLaborRate: null,
     name: `Customer ${id}`,
     hiddenFromBilling: false,
-    monthlyBudgetCap: cap ?? null,
-    annualBudgetCap: null,
+    monthlyAllocation: typeof cap === "string" ? parseFloat(cap) : (cap ?? null),
     budgetSoftThresholdPercent: null,
     budgetHardThresholdPercent: null,
   });
@@ -1356,8 +1355,7 @@ describe("Task #731 — pulse-summary payload contract: YTD = invoicedYtd + inFl
     emergencyLaborRate: null,
     name: `Customer ${id}`,
     hiddenFromBilling: false,
-    monthlyBudgetCap: null,
-    annualBudgetCap: null,
+    monthlyAllocation: null,
     budgetSoftThresholdPercent: null,
     budgetHardThresholdPercent: null,
   });
@@ -1427,8 +1425,7 @@ describe("Task #731 — hidden-customer exclusion: tech inFlight equals tile inF
     emergencyLaborRate: null,
     name: `Customer ${id}`,
     hiddenFromBilling: hidden,
-    monthlyBudgetCap: null,
-    annualBudgetCap: null,
+    monthlyAllocation: null,
     budgetSoftThresholdPercent: null,
     budgetHardThresholdPercent: null,
   });

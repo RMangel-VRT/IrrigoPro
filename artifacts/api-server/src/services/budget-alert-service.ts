@@ -17,6 +17,7 @@
 import { db } from "../db";
 import {
   customerBudgetAlertEvents,
+  customerBudgetMonths,
   customers as customersTable,
   invoices as invoicesTable,
   users as usersTable,
@@ -444,21 +445,26 @@ export async function checkBudgetThresholds(invoice: Invoice): Promise<void> {
     const customer = await storage.getCustomer(invoice.customerId);
     if (!customer) return;
 
-    const monthlyCap = parseDecimal(customer.monthlyBudgetCap);
-    const annualCap = parseDecimal(customer.annualBudgetCap);
-    if (monthlyCap == null && annualCap == null) return;
-
-    const soft = customer.budgetSoftThresholdPercent ?? 75;
-    const hard = customer.budgetHardThresholdPercent ?? 100;
-
-    // Use the invoice's createdAt as the "now" the task spec asks for
-    // (referred to as invoice.invoiceDate). The invoices table doesn't
-    // have an invoiceDate column — createdAt is the canonical billing
-    // timestamp used by the dashboard rollups, so we match that here.
     const now: Date =
       invoice.createdAt instanceof Date
         ? invoice.createdAt
         : new Date(invoice.createdAt as unknown as string);
+    const [allocation] = await db
+      .select({ amount: customerBudgetMonths.amount })
+      .from(customerBudgetMonths)
+      .where(and(
+        eq(customerBudgetMonths.companyId, customer.companyId),
+        eq(customerBudgetMonths.customerId, customer.id),
+        eq(customerBudgetMonths.year, now.getFullYear()),
+        eq(customerBudgetMonths.month, now.getMonth() + 1),
+      ))
+      .limit(1);
+    const monthlyCap = allocation ? parseDecimal(allocation.amount) : null;
+    const annualCap = parseDecimal(customer.annualBudgetGoal);
+    if (monthlyCap == null && annualCap == null) return;
+
+    const soft = customer.budgetSoftThresholdPercent ?? 75;
+    const hard = customer.budgetHardThresholdPercent ?? 100;
     const { monthKey, yearKey } = getPeriodKeys(now);
     const monthWin = getMonthWindow(now);
     const yearWin = getYearWindow(now);

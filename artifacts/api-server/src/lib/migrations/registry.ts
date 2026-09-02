@@ -10,6 +10,7 @@ import { createWoodglennFollowupMigration } from './create-woodglenn-followup';
 import { invoiceSentStatusBackfillMigration } from './invoice-sent-status-backfill';
 import { normalizeUsernamesMigration } from './normalize-usernames';
 import { seedFieldWorkTypesMigration } from './seed-field-work-types';
+import { backfillSeasonalBudgetsMigration } from './backfill-seasonal-budgets';
 
 const REGISTRY = new Map<string, MigrationDefinition>([
   [repairTicketTotalDriftMigration.id, repairTicketTotalDriftMigration],
@@ -23,6 +24,7 @@ const REGISTRY = new Map<string, MigrationDefinition>([
   [invoiceSentStatusBackfillMigration.id, invoiceSentStatusBackfillMigration],
   [normalizeUsernamesMigration.id, normalizeUsernamesMigration],
   [seedFieldWorkTypesMigration.id, seedFieldWorkTypesMigration],
+  [backfillSeasonalBudgetsMigration.id, backfillSeasonalBudgetsMigration],
 ]);
 
 export function listMigrations(): MigrationDefinition[] {

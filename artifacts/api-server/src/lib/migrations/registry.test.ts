@@ -94,6 +94,11 @@ describe("migration registry — static shape", () => {
     );
   });
 
+  it("contains backfill-seasonal-budgets-v1", () => {
+    const ids = listMigrations().map((migration) => migration.id);
+    assert.ok(ids.includes("backfill-seasonal-budgets-v1"));
+  });
+
   it("computes missing and drifted field-work-type rows by company and code", () => {
     const zoneRepair = FIELD_WORK_TYPE_SEEDS.find((seed) => seed.code === "zone_repair")!;
     const rowFor = (companyId: number, overrides: Record<string, unknown> = {}) => ({

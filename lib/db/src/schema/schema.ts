@@ -26,6 +26,9 @@ export const companies = pgTable("companies", {
   // invoice. Enforced on the server, not in the UI. Configurable per company
   // because a 7-day cadence is a policy, not a law; 7 is the default.
   invoiceReminderThrottleDays: integer("invoice_reminder_throttle_days").notNull().default(7),
+  budgetSeasonCurve: jsonb("budget_season_curve")
+    .$type<{ month: number; percent: number }[]>()
+    .default(sql`'[{"month":4,"percent":0},{"month":5,"percent":10},{"month":6,"percent":20},{"month":7,"percent":20},{"month":8,"percent":20},{"month":9,"percent":20},{"month":10,"percent":10}]'::jsonb`),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -133,6 +136,8 @@ export const customers = pgTable("customers", {
   // migration is a no-op against existing rows.
   monthlyBudgetCap: decimal("monthly_budget_cap", { precision: 12, scale: 2 }),
   annualBudgetCap: decimal("annual_budget_cap", { precision: 12, scale: 2 }),
+  annualBudgetGoal: decimal("annual_budget_goal", { precision: 12, scale: 2 }),
+  budgetSeasonCurveOverride: jsonb("budget_season_curve_override").$type<{ month: number; percent: number }[]>(),
   budgetSoftThresholdPercent: integer("budget_soft_threshold_percent").default(75),
   budgetHardThresholdPercent: integer("budget_hard_threshold_percent").default(100),
   budgetAlertRecipientUserIds: jsonb("budget_alert_recipient_user_ids").$type<number[]>().default(sql`'[]'::jsonb`),
@@ -142,6 +147,39 @@ export const customers = pgTable("customers", {
   // Task #532 — index company-scoped lookups (the customers list endpoint
   // and almost every join coming off a customer is filtered by companyId).
   companyIdx: index("customers_company_idx").on(table.companyId),
+}));
+
+export const customerBudgetMonths = pgTable("customer_budget_months", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").references(() => companies.id).notNull(),
+  customerId: integer("customer_id").references(() => customers.id).notNull(),
+  year: integer("year").notNull(),
+  month: integer("month").notNull(),
+  amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+  isManualOverride: boolean("is_manual_override").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  uniqueYearMonth: uniqueIndex("customer_budget_months_unique").on(
+    table.companyId,
+    table.customerId,
+    table.year,
+    table.month,
+  ),
+  customerYearIdx: index("customer_budget_months_customer_year_idx").on(
+    table.customerId,
+    table.year,
+    table.month,
+  ),
+  companyYearIdx: index("customer_budget_months_company_year_idx").on(
+    table.companyId,
+    table.year,
+    table.month,
+  ),
+  validMonth: check(
+    "customer_budget_months_month_check",
+    sql`${table.month} >= 1 AND ${table.month} <= 12`,
+  ),
 }));
 
 // Site maps and controller management

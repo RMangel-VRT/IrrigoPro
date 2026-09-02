@@ -27,6 +27,27 @@ const moneyOrBlank = z
   .regex(/^(\d+(\.\d{1,2})?)?$/u, "Must be a valid amount")
   .optional();
 
+export function parseBudgetGoalInput(value: unknown): number | null {
+  if (value == null) return null;
+  const cleaned = String(value).trim().replace(/[$,\s]/g, "");
+  if (cleaned === "") return null;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+const DEFAULT_SEASON_CURVE = [
+  { month: 4, percent: 0 },
+  { month: 5, percent: 10 },
+  { month: 6, percent: 20 },
+  { month: 7, percent: 20 },
+  { month: 8, percent: 20 },
+  { month: 9, percent: 20 },
+  { month: 10, percent: 10 },
+] as const;
+const MONTH_LABELS: Record<number, string> = {
+  4: "Apr", 5: "May", 6: "Jun", 7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct",
+};
+
 const customerFormSchema = insertCustomerSchema.extend({
   companyId: z.number().min(1, "Company ID is required"),
   irrigoName: z.string().optional(),
@@ -49,8 +70,16 @@ const customerFormSchema = insertCustomerSchema.extend({
   // (matches laborRate convention so the existing apiRequest path passes
   // them through unchanged); thresholds are integers; channels is a
   // plain object so it round-trips as JSON; recipient ids are numbers.
-  monthlyBudgetCap: moneyOrBlank,
-  annualBudgetCap: moneyOrBlank,
+  annualBudgetGoal: z.string().optional().refine(
+    (value) => value == null || value.trim() === "" || parseBudgetGoalInput(value) != null,
+    "Enter a valid non-negative amount",
+  ),
+  budgetSeasonCurveOverride: z.array(z.object({
+    month: z.number().int().min(1).max(12),
+    percent: z.number().min(0),
+  })).nullable().optional(),
+  budgetYear: z.number().int().optional(),
+  budgetMonthOverrides: z.record(z.string(), z.union([z.string(), z.number()])).optional(),
   // Spec: soft is a warning percent (1..99), hard is exceed percent
   // (2..200, must be strictly greater than soft when caps are set).
   budgetSoftThresholdPercent: z.coerce.number().int().min(1).max(99).default(75),
@@ -61,14 +90,8 @@ const customerFormSchema = insertCustomerSchema.extend({
     .default({ inApp: true, push: true, email: false }),
   budgetNotifyCustomerContact: z.boolean().default(false),
 }).superRefine((data, ctx) => {
-  // Only enforce soft < hard when at least one cap is actually set.
-  // Otherwise the thresholds are inert and we don't want to block the form.
-  const monthly = (data.monthlyBudgetCap ?? "").trim();
-  const annual = (data.annualBudgetCap ?? "").trim();
-  const capSet =
-    (monthly !== "" && parseFloat(monthly) > 0) ||
-    (annual !== "" && parseFloat(annual) > 0);
-  if (capSet && data.budgetSoftThresholdPercent >= data.budgetHardThresholdPercent) {
+  const goalSet = parseBudgetGoalInput(data.annualBudgetGoal) != null;
+  if (goalSet && data.budgetSoftThresholdPercent >= data.budgetHardThresholdPercent) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: "Warning % must be lower than the exceeded %.",
@@ -135,8 +158,10 @@ function customerToFormValues(customer: Customer): CustomerFormData {
     contractEndDate: customer.contractEndDate ? new Date(customer.contractEndDate).toISOString().split('T')[0] : "",
     notes: customer.notes || "",
     branches: (customer as any).branches || [],
-    monthlyBudgetCap: customer.monthlyBudgetCap ?? "",
-    annualBudgetCap: customer.annualBudgetCap ?? "",
+    annualBudgetGoal: customer.annualBudgetGoal ?? "",
+    budgetSeasonCurveOverride: customer.budgetSeasonCurveOverride ?? null,
+    budgetYear: new Date().getFullYear(),
+    budgetMonthOverrides: {},
     budgetSoftThresholdPercent: customer.budgetSoftThresholdPercent ?? 75,
     budgetHardThresholdPercent: customer.budgetHardThresholdPercent ?? 100,
     budgetAlertRecipientUserIds: (customer.budgetAlertRecipientUserIds as number[] | null) ?? [],
@@ -212,8 +237,10 @@ export function CustomerForm({ customer, trigger, defaultOpen = false, onOpenCha
       contractEndDate: "",
       notes: "",
       branches: [],
-      monthlyBudgetCap: "",
-      annualBudgetCap: "",
+      annualBudgetGoal: "",
+      budgetSeasonCurveOverride: null,
+      budgetYear: new Date().getFullYear(),
+      budgetMonthOverrides: {},
       budgetSoftThresholdPercent: 75,
       budgetHardThresholdPercent: 100,
       budgetAlertRecipientUserIds: [],
@@ -265,6 +292,7 @@ export function CustomerForm({ customer, trigger, defaultOpen = false, onOpenCha
 
       return apiRequest(endpoint, method, {
         ...data,
+        annualBudgetGoal: parseBudgetGoalInput(data.annualBudgetGoal)?.toFixed(2) ?? null,
         address: addressForServer,
         contractStartDate: data.contractStartDate ? new Date(data.contractStartDate).toISOString() : null,
         contractEndDate: data.contractEndDate ? new Date(data.contractEndDate).toISOString() : null,
@@ -840,11 +868,15 @@ interface BudgetUsageResponse {
   hardThresholdPercent: number;
   currentMonthKey: string;
   currentYearKey: string;
+  monthlyAllocation: number | null;
   monthlyCap: number | null;
   monthlySpend: number;
   monthlyPercent: number | null;
   monthlyStatus: BudgetStatus;
   annualCap: number | null;
+  annualGoal: number | null;
+  seasonToDateTarget: number;
+  seasonToDateSpend: number;
   annualSpend: number;
   annualPercent: number | null;
   annualStatus: BudgetStatus;
@@ -872,6 +904,205 @@ function statusLabel(status: BudgetStatus): string {
 
 function formatCurrency(n: number): string {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
+}
+
+type BudgetMonthsResponse = {
+  year: number;
+  months: Array<{ month: number; amount: number; isManualOverride: boolean }>;
+};
+
+function SeasonalBudgetEditor({ form, customer }: BudgetSectionProps) {
+  const year = form.watch("budgetYear") ?? new Date().getFullYear();
+  const goalText = form.watch("annualBudgetGoal") ?? "";
+  const overrideCurve = form.watch("budgetSeasonCurveOverride");
+  const monthOverrides = form.watch("budgetMonthOverrides") ?? {};
+  const mode = overrideCurve ? "custom" : "company";
+  const companyId = form.watch("companyId");
+  const { data: companyCurveResponse } = useQuery<{
+    curve: Array<{ month: number; percent: number }>;
+  }>({
+    queryKey: [`/api/companies/${companyId}/budget-season-curve`],
+    enabled: Boolean(companyId),
+  });
+  const companyCurve =
+    Array.isArray(companyCurveResponse?.curve) && companyCurveResponse.curve.length > 0
+      ? companyCurveResponse.curve
+      : DEFAULT_SEASON_CURVE;
+  const effectiveCurve = overrideCurve ?? companyCurve.map((row) => ({ ...row }));
+  const goal = parseBudgetGoalInput(goalText);
+  const curveTotal = effectiveCurve.reduce((sum, row) => sum + Number(row.percent || 0), 0);
+  const { data: savedMonths } = useQuery<BudgetMonthsResponse>({
+    queryKey: [`/api/customers/${customer?.id}/budget-months?year=${year}`],
+    enabled: Boolean(customer?.id),
+  });
+
+  useEffect(() => {
+    if (!savedMonths) return;
+    const loaded = Object.fromEntries(
+      savedMonths.months
+        .filter((row) => row.isManualOverride)
+        .map((row) => [String(row.month), row.amount.toFixed(2)]),
+    );
+    form.setValue("budgetMonthOverrides", loaded);
+  }, [savedMonths, form]);
+
+  const generated = effectiveCurve.map((row) => ({
+    month: row.month,
+    amount: goal == null || Math.abs(curveTotal - 100) > 0.001
+      ? 0
+      : Math.round(goal * row.percent) / 100,
+  }));
+  if (goal != null && generated.length > 0 && Math.abs(curveTotal - 100) <= 0.001) {
+    const centsGoal = Math.round(goal * 100);
+    const centsGenerated = generated.reduce((sum, row) => sum + Math.round(row.amount * 100), 0);
+    generated[generated.length - 1].amount += (centsGoal - centsGenerated) / 100;
+  }
+  const displayed = generated.map((row) => ({
+    ...row,
+    amount: parseBudgetGoalInput(monthOverrides[String(row.month)]) ?? row.amount,
+    overridden: monthOverrides[String(row.month)] != null,
+  }));
+  const displayedTotal = displayed.reduce((sum, row) => sum + row.amount, 0);
+  const hasDrift = goal != null && Math.abs(displayedTotal - goal) >= 0.005;
+
+  const resetOverride = async (month: number) => {
+    const next = { ...monthOverrides };
+    delete next[String(month)];
+    form.setValue("budgetMonthOverrides", next, { shouldDirty: true });
+    if (customer?.id) {
+      await apiRequest(
+        `/api/customers/${customer.id}/budget-months/${year}/${month}/override`,
+        "DELETE",
+      );
+      queryClient.invalidateQueries({
+        queryKey: [`/api/customers/${customer.id}/budget-months`],
+      });
+    }
+  };
+  const queryClient = useQueryClient();
+
+  return (
+    <div className="space-y-4" data-testid="seasonal-budget-editor">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <FormField
+          control={form.control}
+          name="annualBudgetGoal"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Annual Budget Goal</FormLabel>
+              <FormControl>
+                <div className="relative">
+                  <DollarSign className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
+                  <Input
+                    {...field}
+                    value={field.value ?? ""}
+                    placeholder="e.g. 7,500"
+                    className="pl-10"
+                    data-testid="annual-budget-goal-input"
+                  />
+                </div>
+              </FormControl>
+              <FormDescription>Enter once; the goal is spread across Apr–Oct.</FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+        <FormField
+          control={form.control}
+          name="budgetYear"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Budget Year</FormLabel>
+              <Select value={String(field.value ?? year)} onValueChange={(value) => field.onChange(Number(value))}>
+                <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                <SelectContent>
+                  {[year - 1, year, year + 1].map((value) => (
+                    <SelectItem key={value} value={String(value)}>{value}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </FormItem>
+          )}
+        />
+        <FormItem>
+          <FormLabel>Season Curve</FormLabel>
+          <Select
+            value={mode}
+            onValueChange={(value) => form.setValue(
+              "budgetSeasonCurveOverride",
+               value === "custom" ? companyCurve.map((row) => ({ ...row })) : null,
+              { shouldDirty: true },
+            )}
+          >
+            <FormControl><SelectTrigger data-testid="budget-curve-select"><SelectValue /></SelectTrigger></FormControl>
+            <SelectContent>
+              <SelectItem value="company">Company default</SelectItem>
+              <SelectItem value="custom">Custom curve</SelectItem>
+            </SelectContent>
+          </Select>
+        </FormItem>
+      </div>
+
+      {mode === "custom" && (
+        <div className="grid grid-cols-4 sm:grid-cols-7 gap-2" data-testid="custom-curve-grid">
+          {effectiveCurve.map((row, index) => (
+            <label key={row.month} className="text-xs text-center">
+              <span className="block mb-1 text-gray-600">{MONTH_LABELS[row.month]}</span>
+              <Input
+                type="number"
+                min={0}
+                step={0.1}
+                value={row.percent}
+                onChange={(event) => {
+                  const next = effectiveCurve.map((item) => ({ ...item }));
+                  next[index].percent = Number(event.target.value);
+                  form.setValue("budgetSeasonCurveOverride", next, { shouldDirty: true });
+                }}
+                className="text-center px-1"
+              />
+            </label>
+          ))}
+          <p className={`col-span-full text-xs ${Math.abs(curveTotal - 100) < 0.001 ? "text-emerald-700" : "text-red-600"}`}>
+            Curve total: {curveTotal}% {Math.abs(curveTotal - 100) < 0.001 ? "✓" : "— must equal 100%"}
+          </p>
+        </div>
+      )}
+
+      <div className="grid grid-cols-4 sm:grid-cols-7 gap-2" data-testid="budget-month-grid">
+        {displayed.map((row) => (
+          <div key={row.month} className={`rounded-md border p-2 ${row.overridden ? "border-amber-400 bg-amber-50" : "bg-gray-50"}`}>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-medium">{MONTH_LABELS[row.month]}</span>
+              {row.overridden && (
+                <button type="button" className="text-[10px] text-amber-800 underline" onClick={() => void resetOverride(row.month)}>
+                  Reset
+                </button>
+              )}
+            </div>
+            <Input
+              aria-label={`${MONTH_LABELS[row.month]} budget`}
+              value={row.overridden ? String(monthOverrides[String(row.month)]) : row.amount.toFixed(2)}
+              onChange={(event) => form.setValue(
+                "budgetMonthOverrides",
+                { ...monthOverrides, [String(row.month)]: event.target.value },
+                { shouldDirty: true },
+              )}
+              className="h-8 px-1 text-xs"
+            />
+            {row.overridden && <Badge variant="outline" className="mt-1 text-[9px]">Override</Badge>}
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center justify-between text-sm">
+        <span>Allocated total: <strong>{formatCurrency(displayedTotal)}</strong></span>
+        {hasDrift && (
+          <span className="text-amber-700" data-testid="budget-drift-notice">
+            Monthly allocations differ from the annual goal by {formatCurrency(Math.abs(displayedTotal - (goal ?? 0)))}.
+          </span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function BudgetAndAlertsCard({ form, customer }: BudgetSectionProps) {
@@ -909,54 +1140,7 @@ function BudgetAndAlertsCard({ form, customer }: BudgetSectionProps) {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <FormField
-            control={form.control}
-            name="monthlyBudgetCap"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Monthly Budget Cap</FormLabel>
-                <FormControl>
-                  <div className="relative">
-                    <DollarSign className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
-                    <Input
-                      placeholder="No cap"
-                      {...field}
-                      value={field.value ?? ""}
-                      className="pl-10"
-                      data-testid="monthly-budget-cap-input"
-                    />
-                  </div>
-                </FormControl>
-                <FormDescription>Leave blank for no monthly cap.</FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          <FormField
-            control={form.control}
-            name="annualBudgetCap"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Annual Budget Cap</FormLabel>
-                <FormControl>
-                  <div className="relative">
-                    <DollarSign className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
-                    <Input
-                      placeholder="No cap"
-                      {...field}
-                      value={field.value ?? ""}
-                      className="pl-10"
-                      data-testid="annual-budget-cap-input"
-                    />
-                  </div>
-                </FormControl>
-                <FormDescription>Leave blank for no annual cap.</FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-        </div>
+        <SeasonalBudgetEditor form={form} customer={customer} />
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <FormField
@@ -1110,13 +1294,7 @@ function BudgetAndAlertsCard({ form, customer }: BudgetSectionProps) {
 }
 
 function LiveBudgetPreview({ customer, form }: { customer: Customer; form: BudgetSectionProps["form"] }) {
-  // Watch cap/threshold values so the preview re-classifies as the user
-  // types. The server endpoint is the source of truth for the spend
-  // numbers; on every cap/threshold change we also re-fetch /budget-usage
-  // so a freshly invalidated snapshot (e.g. after save) reflects the new
-  // server-side calculation.
-  const monthlyCap = form.watch("monthlyBudgetCap");
-  const annualCap = form.watch("annualBudgetCap");
+  const annualGoal = form.watch("annualBudgetGoal");
   const softPct = form.watch("budgetSoftThresholdPercent");
   const hardPct = form.watch("budgetHardThresholdPercent");
 
@@ -1124,11 +1302,9 @@ function LiveBudgetPreview({ customer, form }: { customer: Customer; form: Budge
     queryKey: [`/api/customers/${customer.id}/budget-usage`],
   });
 
-  // Re-fetch the live spend whenever caps/thresholds change so the
-  // preview never shows stale data after an in-form edit or a save.
   useEffect(() => {
     refetch();
-  }, [monthlyCap, annualCap, softPct, hardPct, refetch]);
+  }, [annualGoal, softPct, hardPct, refetch]);
 
   if (isLoading || !data) {
     return (
@@ -1141,12 +1317,8 @@ function LiveBudgetPreview({ customer, form }: { customer: Customer; form: Budge
     );
   }
 
-  // Re-classify locally using the in-progress form values so the user
-  // sees the impact of edits before saving. The spend totals come from
-  // the server (we don't try to recompute those client-side).
-  const previewStatus = (cap: string | undefined, spend: number) => {
-    const capNum = cap && cap !== "" ? parseFloat(cap) : NaN;
-    if (!Number.isFinite(capNum) || capNum <= 0) return { status: "unset" as const, percent: null };
+  const previewStatus = (capNum: number | null, spend: number) => {
+    if (capNum == null || capNum <= 0) return { status: "unset" as const, percent: null };
     const pct = spend / capNum;
     const soft = Number(softPct) || 75;
     const hard = Number(hardPct) || 100;
@@ -1155,25 +1327,36 @@ function LiveBudgetPreview({ customer, form }: { customer: Customer; form: Budge
     return { status: "healthy" as const, percent: pct };
   };
 
+  const monthlyCap = data.monthlyAllocation ?? data.monthlyCap;
+  const annualCap = parseBudgetGoalInput(annualGoal) ?? data.annualGoal ?? data.annualCap;
   const monthly = previewStatus(monthlyCap, data.monthlySpend);
   const annual = previewStatus(annualCap, data.annualSpend);
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3" data-testid="budget-preview">
-      <PreviewRow
-        label={`This month (${data.currentMonthKey})`}
-        spend={data.monthlySpend}
-        cap={monthlyCap && monthlyCap !== "" ? parseFloat(monthlyCap) : null}
-        status={monthly.status}
-        percent={monthly.percent}
-      />
-      <PreviewRow
-        label={`This year (${data.currentYearKey})`}
-        spend={data.annualSpend}
-        cap={annualCap && annualCap !== "" ? parseFloat(annualCap) : null}
-        status={annual.status}
-        percent={annual.percent}
-      />
+    <div className="space-y-2" data-testid="budget-preview">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <PreviewRow
+          label={`This month (${data.currentMonthKey})`}
+          spend={data.monthlySpend}
+          cap={monthlyCap}
+          status={monthly.status}
+          percent={monthly.percent}
+        />
+        <PreviewRow
+          label={`This year (${data.currentYearKey})`}
+          spend={data.annualSpend}
+          cap={annualCap}
+          status={annual.status}
+          percent={annual.percent}
+        />
+      </div>
+      {data.seasonToDateTarget > 0 && (
+        <div className="rounded-md border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+          <span className="font-medium">Season to date:</span>{" "}
+          {formatCurrency(data.seasonToDateSpend)} spent of{" "}
+          {formatCurrency(data.seasonToDateTarget)} target (Apr–now)
+        </div>
+      )}
     </div>
   );
 }

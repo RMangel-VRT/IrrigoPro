@@ -598,6 +598,9 @@ export function computeArAging(
 }
 
 export interface BudgetFields {
+  monthlyAllocation?: number | null;
+  annualBudgetGoal?: string | number | null;
+  /** Compatibility-only inputs for historical pure-math callers. Live routes never select these retired columns. */
   monthlyBudgetCap?: string | number | null;
   annualBudgetCap?: string | number | null;
   budgetSoftThresholdPercent?: number | null;
@@ -710,12 +713,12 @@ export function computeTopCustomers(input: {
     const r = byCust.get(c.id);
     const monthSpend = r?.monthSpend ?? 0;
     const yearSpend = r?.yearSpend ?? 0;
-    const mCap = c.monthlyBudgetCap == null || c.monthlyBudgetCap === ""
+    const mCap = c.monthlyAllocation ??
+      (c.monthlyBudgetCap == null || c.monthlyBudgetCap === "" ? null : toNum(c.monthlyBudgetCap));
+    const annualRaw = c.annualBudgetGoal ?? c.annualBudgetCap;
+    const aCap = annualRaw == null || annualRaw === ""
       ? null
-      : toNum(c.monthlyBudgetCap);
-    const aCap = c.annualBudgetCap == null || c.annualBudgetCap === ""
-      ? null
-      : toNum(c.annualBudgetCap);
+      : toNum(annualRaw);
     const soft = c.budgetSoftThresholdPercent ?? 75;
     const hard = c.budgetHardThresholdPercent ?? 100;
     const mPct = mCap != null && mCap > 0 ? monthSpend / mCap : null;
@@ -1187,8 +1190,8 @@ export function computePulseCustomers(input: {
   const out: PulseCustomerRow[] = [];
   for (const c of custs) {
     if (c.hiddenFromBilling) continue;
-    const rawCap = c.monthlyBudgetCap;
-    const capN = rawCap == null || rawCap === "" ? null : toNum(rawCap) || null;
+    const capN = c.monthlyAllocation ??
+      (c.monthlyBudgetCap == null || c.monthlyBudgetCap === "" ? null : toNum(c.monthlyBudgetCap));
     const monthlySpend = monthlySpendByCust.get(c.id) ?? 0;
     const mPct = capN != null && capN > 0 ? monthlySpend / capN : null;
     const soft = c.budgetSoftThresholdPercent ?? 75;

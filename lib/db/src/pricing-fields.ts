@@ -17,8 +17,8 @@ export const PRICING_FIELDS_BY_TABLE = {
   // are stripped on the same field_tech boundary.
   customers: [
     "laborRate",
-    "monthlyBudgetCap",
-    "annualBudgetCap",
+    "annualBudgetGoal",
+    "budgetSeasonCurveOverride",
     "budgetSoftThresholdPercent",
     "budgetHardThresholdPercent",
     "budgetAlertRecipientUserIds",

@@ -8,6 +8,11 @@ import { z } from "zod/v4";
 import { insertCustomerSchema } from "@workspace/db";
 import { withDbRetry } from "@workspace/db";
 import { storage } from "../storage";
+import {
+  applyMonthOverride,
+  generateBudgetMonths,
+  validateCurve,
+} from "../services/generate-budget-months";
 
 export interface RegisterCustomerRoutesDeps {
   requireAuthentication: RequestHandler;
@@ -55,6 +60,11 @@ export function registerCustomerRoutes(
 
   app.post("/api/customers", requireAuthentication, requireCompanyAdminAccess, async (req, res) => {
     try {
+      const budgetYear = Number.isInteger(req.body?.budgetYear) ? req.body.budgetYear : new Date().getFullYear();
+      const budgetMonthOverrides = req.body?.budgetMonthOverrides as
+        | Record<string, string | number>
+        | undefined;
+      if (Array.isArray(req.body?.budgetSeasonCurveOverride)) validateCurve(req.body.budgetSeasonCurveOverride);
       let customerData = insertCustomerSchema.parse(req.body);
       // Only billing_manager may set billingNotes at creation time
       if ('billingNotes' in customerData && req.authenticatedUserRole !== 'billing_manager') {
@@ -62,6 +72,19 @@ export function registerCustomerRoutes(
         customerData = rest as typeof customerData;
       }
       const customer = await storage.createCustomer(customerData);
+      if (customer.annualBudgetGoal != null || customer.budgetSeasonCurveOverride != null) {
+        await generateBudgetMonths(customer.id, budgetYear);
+      }
+      if (budgetMonthOverrides) {
+        for (const [monthText, rawAmount] of Object.entries(budgetMonthOverrides)) {
+          const month = parseInt(monthText, 10);
+          const amount = parseFloat(String(rawAmount).replace(/[$,\s]/g, ""));
+          if (Number.isInteger(month) && month >= 1 && month <= 12 &&
+              Number.isFinite(amount) && amount >= 0) {
+            await applyMonthOverride({ customerId: customer.id, year: budgetYear, month, amount });
+          }
+        }
+      }
       res.status(201).json(customer);
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -77,6 +100,18 @@ export function registerCustomerRoutes(
   app.put("/api/customers/:id", requireAuthentication, requireCustomerEditAccess, async (req, res) => {
     try {
       const id = parseInt(String(req.params.id));
+      const budgetYear = Number.isInteger(req.body?.budgetYear)
+        ? req.body.budgetYear
+        : new Date().getFullYear();
+      const budgetMonthOverrides = req.body?.budgetMonthOverrides as
+        | Record<string, string | number>
+        | undefined;
+      const hasBudgetFields =
+        "annualBudgetGoal" in (req.body ?? {}) ||
+        "budgetSeasonCurveOverride" in (req.body ?? {});
+      if (Array.isArray(req.body?.budgetSeasonCurveOverride)) {
+        validateCurve(req.body.budgetSeasonCurveOverride);
+      }
       let customerData = insertCustomerSchema.partial().parse(req.body);
       // Only billing_manager may write billingNotes (use authenticated role, not raw header)
       if ('billingNotes' in customerData && req.authenticatedUserRole !== 'billing_manager') {
@@ -87,6 +122,19 @@ export function registerCustomerRoutes(
       if (!customer) {
         res.status(404).json({ message: "Customer not found" });
         return;
+      }
+      if (hasBudgetFields) {
+        await generateBudgetMonths(id, budgetYear);
+      }
+      if (budgetMonthOverrides) {
+        for (const [monthText, rawAmount] of Object.entries(budgetMonthOverrides)) {
+          const month = parseInt(monthText, 10);
+          const amount = parseFloat(String(rawAmount).replace(/[$,\s]/g, ""));
+          if (Number.isInteger(month) && month >= 1 && month <= 12 &&
+              Number.isFinite(amount) && amount >= 0) {
+            await applyMonthOverride({ customerId: id, year: budgetYear, month, amount });
+          }
+        }
       }
       res.json(applyBillingNotesVisibility(req, customer));
     } catch (error) {
@@ -103,6 +151,11 @@ export function registerCustomerRoutes(
   app.patch("/api/customers/:id", requireAuthentication, requireCustomerEditAccess, async (req, res) => {
     try {
       const id = parseInt(String(req.params.id));
+      const budgetYear = Number.isInteger(req.body?.budgetYear) ? req.body.budgetYear : new Date().getFullYear();
+      const hasBudgetFields =
+        "annualBudgetGoal" in (req.body ?? {}) ||
+        "budgetSeasonCurveOverride" in (req.body ?? {});
+      if (Array.isArray(req.body?.budgetSeasonCurveOverride)) validateCurve(req.body.budgetSeasonCurveOverride);
       let customerData = insertCustomerSchema.partial().parse(req.body);
       // Only billing_manager may write billingNotes (use authenticated role, not raw header)
       if ('billingNotes' in customerData && req.authenticatedUserRole !== 'billing_manager') {
@@ -114,6 +167,7 @@ export function registerCustomerRoutes(
         res.status(404).json({ message: "Customer not found" });
         return;
       }
+      if (hasBudgetFields) await generateBudgetMonths(id, budgetYear);
       res.json(applyBillingNotesVisibility(req, customer));
     } catch (error) {
       if (error instanceof z.ZodError) {

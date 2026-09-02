@@ -25,8 +25,7 @@ describe("LiveBudgetPreview re-fetch contract", () => {
     const body = SRC.slice(start, next === -1 ? undefined : next);
 
     // The form values that drive the preview must all be watched.
-    expect(body).toMatch(/form\.watch\(\s*"monthlyBudgetCap"\s*\)/);
-    expect(body).toMatch(/form\.watch\(\s*"annualBudgetCap"\s*\)/);
+    expect(body).toMatch(/form\.watch\(\s*"annualBudgetGoal"\s*\)/);
     expect(body).toMatch(/form\.watch\(\s*"budgetSoftThresholdPercent"\s*\)/);
     expect(body).toMatch(/form\.watch\(\s*"budgetHardThresholdPercent"\s*\)/);
 
@@ -37,8 +36,7 @@ describe("LiveBudgetPreview re-fetch contract", () => {
     );
     expect(effectMatch, "useEffect calling refetch() not found").not.toBeNull();
     const deps = effectMatch![1];
-    expect(deps).toMatch(/monthlyCap/);
-    expect(deps).toMatch(/annualCap/);
+    expect(deps).toMatch(/annualGoal/);
     expect(deps).toMatch(/softPct/);
     expect(deps).toMatch(/hardPct/);
     expect(deps).toMatch(/refetch/);

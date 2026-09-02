@@ -96,13 +96,13 @@ describe("Task #708 — FP cross-surface math invariants", () => {
     const rows = computeTopCustomers({
       customers: [
         { id: 1, companyId: 10, name: "Customer 1", hiddenFromBilling: false,
-          monthlyBudgetCap: null, annualBudgetCap: null,
+          monthlyAllocation: null,
           budgetSoftThresholdPercent: null, budgetHardThresholdPercent: null },
         { id: 2, companyId: 10, name: "Customer 2", hiddenFromBilling: false,
-          monthlyBudgetCap: null, annualBudgetCap: null,
+          monthlyAllocation: null,
           budgetSoftThresholdPercent: null, budgetHardThresholdPercent: null },
         { id: 3, companyId: 10, name: "Customer 3", hiddenFromBilling: false,
-          monthlyBudgetCap: null, annualBudgetCap: null,
+          monthlyAllocation: null,
           budgetSoftThresholdPercent: null, budgetHardThresholdPercent: null },
       ],
       invoices: INVOICES,

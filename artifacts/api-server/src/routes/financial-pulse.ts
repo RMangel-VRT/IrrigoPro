@@ -14,6 +14,7 @@ import { getMonthWindow, getYearWindow } from "../budget-status";
 import {
   billingSheets,
   customers,
+  customerBudgetMonths,
   invoiceItems,
   invoices,
   users,
@@ -171,14 +172,31 @@ async function loadCustomers(
     emergencyLaborRate: customers.emergencyLaborRate,
     name: customers.name,
     hiddenFromBilling: customers.hiddenFromBilling,
-    monthlyBudgetCap: customers.monthlyBudgetCap,
-    annualBudgetCap: customers.annualBudgetCap,
+    annualBudgetGoal: customers.annualBudgetGoal,
     budgetSoftThresholdPercent: customers.budgetSoftThresholdPercent,
     budgetHardThresholdPercent: customers.budgetHardThresholdPercent,
   };
   const rows = companyId == null
     ? await db.select(projection).from(customers)
     : await db.select(projection).from(customers).where(eq(customers.companyId, companyId));
+  const now = new Date();
+  const allocationRows = rows.length === 0
+    ? []
+    : await db
+        .select({
+          customerId: customerBudgetMonths.customerId,
+          amount: customerBudgetMonths.amount,
+        })
+        .from(customerBudgetMonths)
+        .where(and(
+          inArray(customerBudgetMonths.customerId, rows.map((row) => row.id)),
+          ...(companyId == null ? [] : [eq(customerBudgetMonths.companyId, companyId)]),
+          eq(customerBudgetMonths.year, now.getFullYear()),
+          eq(customerBudgetMonths.month, now.getMonth() + 1),
+        ));
+  const allocationMap = new Map(
+    allocationRows.map((row) => [row.customerId, Number(row.amount)]),
+  );
   return rows.map((c) => ({
     id: c.id,
     companyId: c.companyId,
@@ -186,8 +204,8 @@ async function loadCustomers(
     emergencyLaborRate: c.emergencyLaborRate ?? null,
     name: c.name ?? null,
     hiddenFromBilling: c.hiddenFromBilling ?? false,
-    monthlyBudgetCap: c.monthlyBudgetCap ?? null,
-    annualBudgetCap: c.annualBudgetCap ?? null,
+    monthlyAllocation: allocationMap.get(c.id) ?? null,
+    annualBudgetGoal: c.annualBudgetGoal ?? null,
     budgetSoftThresholdPercent: c.budgetSoftThresholdPercent ?? null,
     budgetHardThresholdPercent: c.budgetHardThresholdPercent ?? null,
   }));
@@ -1464,13 +1482,23 @@ export function registerFinancialPulseRoutes(
         const monthSpend = budgetMonthSpend.total;
         const yearSpend = budgetYearSpend.total;
 
+        const [monthAllocation] = await db
+          .select({ amount: customerBudgetMonths.amount })
+          .from(customerBudgetMonths)
+          .where(and(
+            eq(customerBudgetMonths.companyId, c.companyId),
+            eq(customerBudgetMonths.customerId, customerId),
+            eq(customerBudgetMonths.year, now.getFullYear()),
+            eq(customerBudgetMonths.month, now.getMonth() + 1),
+          ))
+          .limit(1);
         const parseCap = (v: unknown): number | null => {
           if (v == null || v === "") return null;
           const n = typeof v === "number" ? v : parseFloat(String(v));
           return Number.isFinite(n) && n > 0 ? n : null;
         };
-        const monthlyCap = parseCap(c.monthlyBudgetCap);
-        const annualCap = parseCap(c.annualBudgetCap);
+        const monthlyCap = monthAllocation ? parseCap(monthAllocation.amount) : null;
+        const annualCap = parseCap(c.annualBudgetGoal);
         const soft = c.budgetSoftThresholdPercent ?? 75;
         const hard = c.budgetHardThresholdPercent ?? 100;
         const classify = (
