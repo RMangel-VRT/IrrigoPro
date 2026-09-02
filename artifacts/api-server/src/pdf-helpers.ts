@@ -1992,6 +1992,8 @@ export function buildFullCSS(colors: PdfBrandColors = DEFAULT_BRAND_COLORS): str
 
   .recon-table tbody tr {
     border-bottom: 1px solid #e5e7eb;
+    page-break-inside: avoid;
+    break-inside: avoid;
   }
 
   .recon-table td {
@@ -2077,6 +2079,11 @@ export function buildFullCSS(colors: PdfBrandColors = DEFAULT_BRAND_COLORS): str
     border-top: 3px solid ${green};
   }
 
+  .recon-grand-total {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
   .recon-grand-label {
     letter-spacing: 0.5px;
   }
@@ -2088,12 +2095,20 @@ export function buildFullCSS(colors: PdfBrandColors = DEFAULT_BRAND_COLORS): str
   }
 
   .recon-totals-box {
+    /* Inline blocks are atomic in Chromium's paged layout, so the border
+       cannot be painted as separate fragments even when avoid is advisory. */
+    display: inline-block;
     border: 2px solid ${navy};
     border-radius: 8px;
     padding: 18px 22px;
     background: ${gray};
-    max-width: 360px;
-    margin-left: auto;
+    width: 360px;
+    max-width: 100%;
+    margin-left: calc(100% - 360px);
+    page-break-before: avoid;
+    break-before: avoid-page;
+    page-break-inside: avoid;
+    break-inside: avoid;
   }
 
   .recon-totals-row {

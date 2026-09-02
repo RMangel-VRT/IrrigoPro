@@ -11,7 +11,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coverPage, buildFullCSS, JOB_TYPE_COLORS } from './pdf-helpers';
+import { coverPage, buildFullCSS, JOB_TYPE_COLORS, reconciliationPage } from './pdf-helpers';
 import { DEFAULT_BRAND_COLORS } from './pdf-view-model';
 import type { PdfViewModel } from './pdf-view-model';
 import { resolveLogoToFetchableUrl } from './invoice-pdf-service';
@@ -27,6 +27,8 @@ function makeVm(overrides: {
   workOrders?: PdfViewModel['workOrders'];
   billingSheets?: PdfViewModel['billingSheets'];
   wetCheckBillings?: PdfViewModel['wetCheckBillings'];
+  customerHasBranches?: boolean;
+  branchSubtotals?: PdfViewModel['branchSubtotals'];
 } = {}): PdfViewModel {
   const navy = overrides.navy ?? '#1E5A99';
   return {
@@ -63,8 +65,8 @@ function makeVm(overrides: {
       ...DEFAULT_BRAND_COLORS,
       navy,
     },
-    customerHasBranches: false,
-    branchSubtotals: [],
+    customerHasBranches: overrides.customerHasBranches ?? false,
+    branchSubtotals: overrides.branchSubtotals ?? [],
   } as unknown as PdfViewModel;
 }
 
@@ -347,5 +349,59 @@ describe('buildFullCSS — logo tile transparency (Task #1302)', () => {
       emptyMatch[0].includes('rgba(255,255,255,0.15)'),
       '.cover-logo-tile-empty must have rgba(255,255,255,0.15) background for legibility on the navy band',
     );
+  });
+});
+
+describe('reconciliation pagination protection (Task #1967)', () => {
+  it('protects the totals card and bordered rows with modern and legacy print-break rules', () => {
+    const css = buildFullCSS(DEFAULT_BRAND_COLORS);
+    const totalsBoxRule = css.match(/\.recon-totals-box\s*\{[^}]+\}/)?.[0];
+    const bodyRowRule = css.match(/\.recon-table tbody tr\s*\{[^}]+\}/)?.[0];
+    const grandTotalRule = css.match(/\.recon-grand-total\s*\{[^}]+\}/)?.[0];
+
+    assert.ok(totalsBoxRule, 'Expected .recon-totals-box rule in CSS');
+    assert.ok(bodyRowRule, 'Expected .recon-table tbody tr rule in CSS');
+    assert.ok(grandTotalRule, 'Expected .recon-grand-total rule in CSS');
+
+    assert.match(totalsBoxRule, /display:\s*inline-block/);
+    assert.match(totalsBoxRule, /page-break-before:\s*avoid/);
+    assert.match(totalsBoxRule, /break-before:\s*avoid-page/);
+    assert.match(totalsBoxRule, /page-break-inside:\s*avoid/);
+    assert.match(totalsBoxRule, /break-inside:\s*avoid/);
+
+    for (const [name, rule] of [
+      ['body row', bodyRowRule],
+      ['grand-total row', grandTotalRule],
+    ] as const) {
+      assert.match(rule, /page-break-inside:\s*avoid/, `${name} needs the legacy inside-break guard`);
+      assert.match(rule, /break-inside:\s*avoid/, `${name} needs the modern inside-break guard`);
+    }
+  });
+
+  it('uses one intact totals card for both branch-grouped and flat layouts', () => {
+    const branchVm = makeVm({
+      customerHasBranches: true,
+      branchSubtotals: [{ branchName: 'North', workOrders: [], billingSheets: [], subtotal: 0 }],
+      totals: { laborSubtotal: 125, partsSubtotal: 75, grandTotal: 200 },
+    });
+    const flatVm = makeVm({
+      totals: { laborSubtotal: 125, partsSubtotal: 75, grandTotal: 200 },
+    });
+
+    for (const [layout, vm] of [['branch-grouped', branchVm], ['flat', flatVm]] as const) {
+      const html = reconciliationPage(vm);
+      const cardStart = html.indexOf('<div class="recon-totals-box">');
+      const cardEnd = html.lastIndexOf('</div>');
+      const cardHtml = cardStart >= 0 && cardEnd > cardStart ? html.slice(cardStart, cardEnd) : '';
+
+      assert.equal(
+        (html.match(/class="recon-totals-box"/g) ?? []).length,
+        1,
+        `${layout} layout should emit exactly one totals card`,
+      );
+      assert.ok(cardHtml.includes('Total Labor'), `${layout} card should contain Total Labor`);
+      assert.ok(cardHtml.includes('Total Parts'), `${layout} card should contain Total Parts`);
+      assert.ok(cardHtml.includes('Invoice Total'), `${layout} card should contain Invoice Total`);
+    }
   });
 });
