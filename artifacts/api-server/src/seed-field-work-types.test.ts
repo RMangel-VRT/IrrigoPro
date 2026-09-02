@@ -46,6 +46,21 @@ describe("field work type seeding", () => {
     assert.equal(await seedFieldWorkTypesForCompany(companyId), 7);
     assert.equal(await seedFieldWorkTypesForCompany(companyId), 0);
 
+    // The label is presentation; the code is the stored key every ticket and
+    // gate rule joins on, so a rename must never move it.
+    const controllerRepair = FIELD_WORK_TYPE_SEEDS.find(
+      (row) => row.code === "controller_repair",
+    )!;
+    assert.equal(controllerRepair.label, "Controller/Clock Repair");
+    const [seededControllerRepair] = await db
+      .select()
+      .from(fieldWorkTypes)
+      .where(and(
+        eq(fieldWorkTypes.companyId, companyId),
+        eq(fieldWorkTypes.code, "controller_repair"),
+      ));
+    assert.equal(seededControllerRepair.label, "Controller/Clock Repair");
+
     const backflow = FIELD_WORK_TYPE_SEEDS.find((row) => row.code === "backflow")!;
     const mainline = FIELD_WORK_TYPE_SEEDS.find((row) => row.code === "mainline_repair")!;
     assert.equal(backflow.requiresController, mainline.requiresController);

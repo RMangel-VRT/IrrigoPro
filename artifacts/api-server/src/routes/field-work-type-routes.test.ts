@@ -44,6 +44,62 @@ describe("field work type routes", () => {
     assert.equal(response.body[0].companyId, 41);
   });
 
+  it("answers a super admin for the named customer's tenant, not every tenant", async () => {
+    // The location gate fails open for a company with no active work types.
+    // A super admin has no company of their own, so the unscoped read would
+    // hand back another tenant's types and make the client re-impose a gate
+    // the server has already waived for this customer.
+    const calls: unknown[] = [];
+    const app = makeApp(
+      { role: "super_admin", companyId: null },
+      {
+        async getCustomerById(id: number) {
+          return id === 500 ? { id: 500, companyId: 88 } : undefined;
+        },
+        async getFieldWorkTypes(companyId: number | null, activeOnly: boolean) {
+          calls.push([companyId, activeOnly]);
+          return companyId === 88 ? [] : [{ id: 1, companyId: 41, code: "other" }];
+        },
+        async getFieldWorkTypeById() {},
+        async updateFieldWorkType() {},
+      },
+    );
+
+    const scoped = await request(app).get("/api/field-work-types?customerId=500");
+    assert.equal(scoped.status, 200);
+    assert.deepEqual(scoped.body, []);
+
+    // An unknown or absent customer keeps the previous unscoped behaviour.
+    const unknown = await request(app).get("/api/field-work-types?customerId=999");
+    assert.equal(unknown.status, 200);
+    const unscoped = await request(app).get("/api/field-work-types");
+    assert.equal(unscoped.status, 200);
+
+    assert.deepEqual(calls, [[88, true], [null, true], [null, true]]);
+  });
+
+  it("never lets the customer parameter move a tenant's own scope", async () => {
+    const calls: unknown[] = [];
+    const app = makeApp(
+      { role: "company_admin", companyId: 41 },
+      {
+        async getCustomerById() {
+          throw new Error("must not be called for a scoped caller");
+        },
+        async getFieldWorkTypes(companyId: number | null, activeOnly: boolean) {
+          calls.push([companyId, activeOnly]);
+          return [];
+        },
+        async getFieldWorkTypeById() {},
+        async updateFieldWorkType() {},
+      },
+    );
+
+    const response = await request(app).get("/api/field-work-types?customerId=500");
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, [[41, true]]);
+  });
+
   it("capability-gates admin reads", async () => {
     const app = makeApp(
       { role: "field_tech", companyId: 41 },

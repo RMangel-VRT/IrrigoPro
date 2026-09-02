@@ -146,8 +146,12 @@ export function clearLocationFieldsForRule(
 }
 
 /**
- * Tickets created before this instant are grandfathered. Both rollout
- * surfaces intentionally ship disabled by using a far-future date.
+ * Tickets created before this instant are grandfathered.
+ *
+ * Billing sheets activated the gate on 2026-09-02 and it is live. Work orders
+ * stay parked at 2099 until offline work-order mutations ship: as the
+ * work-order gate module records, a signal-less technician must never be
+ * trapped by a server requirement he has no way to satisfy in the field.
  */
 export const BILLING_SHEET_LOCATION_GATE_EFFECTIVE_AT = new Date(
   "2026-09-02T00:00:00.000Z",
@@ -164,6 +168,52 @@ export function isLocationGateEnforced(
   const created = createdAt instanceof Date ? createdAt : new Date(createdAt);
   if (Number.isNaN(created.getTime())) return false;
   return created.getTime() >= effectiveAt.getTime();
+}
+
+/**
+ * The single place both surfaces decide whether a gate evaluation runs.
+ *
+ * Work Type is required by the gate, but the registry is per-tenant and there
+ * is no way for a company with zero active work types to add one from inside
+ * the product. Enforcing there is not enforcement, it is an outage: it happened
+ * in production and blocked every field tech until a seed was run. So a
+ * confirmed-empty registry fails open, and says so explicitly (rather than
+ * merely returning `false`) because the skip has to be audited — a tenant that
+ * has silently lost field capture must be visible to Super Admin instead of
+ * being discovered by a tech who cannot finish his day.
+ *
+ * An *unknown* count (null/undefined) is not the same as a confirmed-empty one
+ * and keeps the gate on, so an unresolved lookup can never quietly disable it.
+ *
+ * This module stays pure: the count is an input, never a query performed here.
+ */
+export type LocationGateDecision = {
+  enforced: boolean;
+  skippedEmptyRegistry: boolean;
+};
+
+export function isEmptyWorkTypeRegistry(
+  activeWorkTypeCount: number | null | undefined,
+): boolean {
+  return (
+    typeof activeWorkTypeCount === "number" &&
+    Number.isFinite(activeWorkTypeCount) &&
+    activeWorkTypeCount <= 0
+  );
+}
+
+export function resolveLocationGate(input: {
+  createdAt: Date | string | null;
+  effectiveAt: Date;
+  activeWorkTypeCount?: number | null;
+}): LocationGateDecision {
+  if (!isLocationGateEnforced(input.createdAt, input.effectiveAt)) {
+    return { enforced: false, skippedEmptyRegistry: false };
+  }
+  if (isEmptyWorkTypeRegistry(input.activeWorkTypeCount)) {
+    return { enforced: false, skippedEmptyRegistry: true };
+  }
+  return { enforced: true, skippedEmptyRegistry: false };
 }
 
 export type LocationConfidence = "high" | "low" | "unknown";

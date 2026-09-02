@@ -3,7 +3,7 @@ import {
   fieldWorkTypes,
   type FieldWorkType,
 } from "@workspace/db";
-import { and, eq } from "drizzle-orm";
+import { and, count, eq } from "drizzle-orm";
 
 export type FieldWorkTypeSeed = Pick<
   FieldWorkType,
@@ -46,7 +46,7 @@ export const FIELD_WORK_TYPE_SEEDS: readonly FieldWorkTypeSeed[] = [
   },
   {
     code: "controller_repair",
-    label: "Controller Repair",
+    label: "Controller/Clock Repair",
     requiresController: true,
     requiresZone: false,
     requiresDetails: false,
@@ -100,6 +100,27 @@ export async function seedFieldWorkTypesForCompany(
     if (row) inserted++;
   }
   return inserted;
+}
+
+/**
+ * How many active work types the tenant actually has.
+ *
+ * The gate's fail-open needs this as a plain number so the shared policy can
+ * stay pure. Company scoping matches `getFieldWorkTypeRule`: a null companyId
+ * means "unscoped", which counts across tenants and therefore keeps the gate
+ * on rather than disabling it on an unresolved scope.
+ */
+export async function countActiveFieldWorkTypes(
+  companyId: number | null,
+): Promise<number> {
+  const [row] = await db
+    .select({ value: count() })
+    .from(fieldWorkTypes)
+    .where(and(
+      eq(fieldWorkTypes.active, true),
+      ...(companyId == null ? [] : [eq(fieldWorkTypes.companyId, companyId)]),
+    ));
+  return Number(row?.value ?? 0);
 }
 
 export async function getFieldWorkTypeRule(

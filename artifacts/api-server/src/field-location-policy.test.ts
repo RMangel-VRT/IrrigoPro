@@ -6,8 +6,10 @@ import {
   checkLocationGate,
   clearLocationFieldsForRule,
   deriveLocationConfidence,
+  isEmptyWorkTypeRegistry,
   isLocationGateEnforced,
   resolveLocationFieldVisibility,
+  resolveLocationGate,
 } from "@workspace/db";
 import { FIELD_WORK_TYPE_SEEDS } from "./seeds/field-work-types";
 
@@ -34,6 +36,8 @@ describe("field location policy", () => {
         { code: "head_replacement", controller: true, zone: true, details: false },
         { code: "valve_repair", controller: true, zone: true, details: false },
         { code: "controller_repair", controller: true, zone: false, details: false },
+        // Renamed to "Controller/Clock Repair"; the code is the stored key and
+        // must not move with the label.
         { code: "backflow", controller: false, zone: false, details: false },
         { code: "mainline_repair", controller: false, zone: false, details: false },
         { code: "other", controller: false, zone: false, details: true },
@@ -238,6 +242,50 @@ describe("field location policy", () => {
       );
       assert.deepEqual(violations, [], `${rule.code} should be satisfiable after clearing`);
     }
+  });
+
+  it("resolves the gate through one shared decision, failing open on an empty registry", () => {
+    // Work Type is required by the gate, but a tenant with zero active types
+    // has no action available that satisfies it — there is no create endpoint
+    // anywhere in the product. That is an outage, not enforcement, so the
+    // shared policy skips it explicitly (and audibly) instead of returning a
+    // bare false that no caller could audit.
+    const postCutoff = new Date("2026-09-03T00:00:00.000Z");
+    const effectiveAt = BILLING_SHEET_LOCATION_GATE_EFFECTIVE_AT;
+
+    assert.deepEqual(
+      resolveLocationGate({ createdAt: postCutoff, effectiveAt, activeWorkTypeCount: 0 }),
+      { enforced: false, skippedEmptyRegistry: true },
+    );
+    assert.deepEqual(
+      resolveLocationGate({ createdAt: postCutoff, effectiveAt, activeWorkTypeCount: 1 }),
+      { enforced: true, skippedEmptyRegistry: false },
+    );
+    // Grandfathered: the cutoff already answered it, so nothing was skipped.
+    assert.deepEqual(
+      resolveLocationGate({
+        createdAt: "2026-09-01T00:00:00.000Z",
+        effectiveAt,
+        activeWorkTypeCount: 0,
+      }),
+      { enforced: false, skippedEmptyRegistry: false },
+    );
+    // An unresolved count is not a confirmed-empty registry and must never
+    // quietly disable the gate.
+    assert.deepEqual(
+      resolveLocationGate({ createdAt: postCutoff, effectiveAt }),
+      { enforced: true, skippedEmptyRegistry: false },
+    );
+    assert.deepEqual(
+      resolveLocationGate({ createdAt: postCutoff, effectiveAt, activeWorkTypeCount: null }),
+      { enforced: true, skippedEmptyRegistry: false },
+    );
+
+    assert.equal(isEmptyWorkTypeRegistry(0), true);
+    assert.equal(isEmptyWorkTypeRegistry(1), false);
+    assert.equal(isEmptyWorkTypeRegistry(null), false);
+    assert.equal(isEmptyWorkTypeRegistry(undefined), false);
+    assert.equal(isEmptyWorkTypeRegistry(Number.NaN), false);
   });
 
   it("ships only billing enabled and evaluates an explicit cutoff independently", () => {

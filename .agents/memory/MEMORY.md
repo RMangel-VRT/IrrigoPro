@@ -40,4 +40,5 @@
 - [Chromium PDF atomic cards](chromium-pdf-atomic-cards.md) — break-inside alone may still fragment bordered blocks; use an atomic inline-block and verify the rasterized page boundary.
 - [Offline ordering dependencies](offline-ordering-dependencies.md) — serialize list+enqueue; reconnects must join existing chains, and terminal/cancelled ordering parents must release dependents.
 - [Report links across role boundaries](report-links-role-boundaries.md) — a report-read capability must not expose a broader mutable ticket page just to make canonical links work.
+- [Gates over an empty tenant registry](gate-fail-open-empty-registry.md) — a requirement the tenant cannot satisfy is an outage; fail open on a confirmed-empty count and audit the skip.
 - [Radix Select blank trigger](radix-select-sentinel-blank-trigger.md) — a sentinel value with no rendered item shows neither value nor placeholder; unseeded tenant option lists read as "won't open".

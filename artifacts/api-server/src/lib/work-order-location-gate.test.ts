@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   WORK_ORDER_LOCATION_GATE_EFFECTIVE_AT,
+  resolveWorkOrderLocationGate,
   workOrderLocationGateError,
 } from "./work-order-location-gate";
 
@@ -77,4 +78,45 @@ describe("work-order location cutoff", () => {
     );
   });
 
+  it("fails open for a tenant with no active work types, and reports the skip", () => {
+    // Work Type is required by the gate and nothing in the product lets a
+    // company add one, so an empty registry is an outage, not enforcement.
+    // Resolved through the shared policy so both surfaces cannot drift.
+    const postCutoff = {
+      createdAt: WORK_ORDER_LOCATION_GATE_EFFECTIVE_AT,
+      workLocationLat: null,
+      workLocationLng: null,
+      fieldWorkType: null,
+    };
+    assert.deepEqual(resolveWorkOrderLocationGate(postCutoff, 0), {
+      enforced: false,
+      skippedEmptyRegistry: true,
+    });
+    assert.equal(workOrderLocationGateError(postCutoff, null, 0), null);
+
+    assert.deepEqual(resolveWorkOrderLocationGate(postCutoff, 1), {
+      enforced: true,
+      skippedEmptyRegistry: false,
+    });
+    assert.equal(
+      workOrderLocationGateError(postCutoff, null, 1),
+      "Complete every required work location field before completing this work order.",
+    );
+  });
+
+  it("never reports a skip for a grandfathered work order, and keeps the gate on when the count is unknown", () => {
+    const grandfathered = {
+      createdAt: new Date(WORK_ORDER_LOCATION_GATE_EFFECTIVE_AT.getTime() - 1),
+    };
+    assert.deepEqual(resolveWorkOrderLocationGate(grandfathered, 0), {
+      enforced: false,
+      skippedEmptyRegistry: false,
+    });
+    assert.equal(
+      resolveWorkOrderLocationGate({
+        createdAt: WORK_ORDER_LOCATION_GATE_EFFECTIVE_AT,
+      }).enforced,
+      true,
+    );
+  });
 });

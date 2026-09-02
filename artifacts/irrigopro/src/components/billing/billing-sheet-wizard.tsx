@@ -66,9 +66,9 @@ import type {
   FieldWorkType,
 } from "@workspace/db/schema";
 import {
-  BILLING_SHEET_LOCATION_GATE_EFFECTIVE_AT,
-  isLocationGateEnforced,
-} from "@workspace/db/field-location-policy";
+  canContinueFromLocationStep,
+  shouldEnforceWizardLocationGate,
+} from "@/components/billing/billing-sheet-wizard-gate";
 
 type WizardLocationValue = CustomerLocationValue;
 
@@ -1246,12 +1246,10 @@ export function BillingSheetWizard({
   });
   const selectedWorkTypeLabel =
     workTypes.find((type) => type.code === locationStep.fieldWorkType)?.label ?? null;
-  const enforceBillingLocationGate =
-    isFieldTech &&
-    isLocationGateEnforced(
-      isEdit ? existing?.createdAt ?? null : new Date(),
-      BILLING_SHEET_LOCATION_GATE_EFFECTIVE_AT,
-    );
+  // No role condition — see billing-sheet-wizard-gate.ts.
+  const enforceBillingLocationGate = shouldEnforceWizardLocationGate(
+    isEdit ? existing?.createdAt ?? null : new Date(),
+  );
 
   // Wait for the real customer record before hydrating Step 1 so the wizard
   // mounts the real customer in a single pass — never the synthetic fallback
@@ -1550,7 +1548,7 @@ export function BillingSheetWizard({
       !!customerStep.customer &&
       (customerBranches.length === 0 || !!customerStep.branchName) &&
       !!customerStep.workDate,
-    2: !enforceBillingLocationGate || locationGateComplete,
+    2: canContinueFromLocationStep(enforceBillingLocationGate, locationGateComplete),
     3:
       partsLabor.items.length > 0 ||
       (partsLabor.laborMode === "per_part"

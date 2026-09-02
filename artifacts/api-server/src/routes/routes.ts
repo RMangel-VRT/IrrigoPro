@@ -72,6 +72,7 @@ import { computeBillingSheetTotal } from "../billing-sheet-total";
 import { computeDeferredItems } from "../lib/work-order-deferred-items";
 import {
   getWorkOrderLocationViolations,
+  resolveWorkOrderLocationGate,
   workOrderLocationGateError,
 } from "../lib/work-order-location-gate";
 import type {
@@ -421,12 +422,16 @@ import { registerQbPaymentSyncRoutes } from "./qb-payment-sync";
 import { registerAdminMigrationsRoutes } from "./admin-migrations-routes";
 import { registerFieldWorkTypeRoutes } from "./field-work-type-routes";
 import { registerMissingLocationDataRoute } from "./missing-location-data-route";
-import { getFieldWorkTypeRule } from "../seeds/field-work-types";
+import {
+  countActiveFieldWorkTypes,
+  getFieldWorkTypeRule,
+} from "../seeds/field-work-types";
 import {
   getBillingLocationViolations,
-  shouldEnforceBillingLocationCreate,
-  shouldEnforceBillingLocationPatch,
+  resolveBillingLocationCreateGate,
+  resolveBillingLocationPatchGate,
 } from "./billing-sheet-location-gate";
+import { recordLocationGateSkip } from "./location-gate-skip-audit";
 import { registerWcLaborBackfillRoutes } from "./admin-wc-labor-backfill-routes";
 import { registerInspectionZoneBackfillRoutes } from "./admin-inspection-zone-backfill-routes";
 import { registerCleanupInvoice71256Routes } from "./cleanup-invoice-71256";
@@ -9617,15 +9622,41 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Merge creation photos with completion photos (don't overwrite)
       const existingWorkOrder = existingWoForComplete;
-      const locationRule = await getFieldWorkTypeRule(
-        existingWorkOrder.companyId,
-        existingWorkOrder.fieldWorkType,
+      // The registry count only matters once the cutoff is live, so the cheap
+      // half of the decision runs first and the query is skipped entirely
+      // while work orders remain grandfathered at 2099.
+      const locationActiveWorkTypeCount = resolveWorkOrderLocationGate(existingWorkOrder)
+        .enforced
+        ? await countActiveFieldWorkTypes(existingWorkOrder.companyId)
+        : null;
+      const locationGate = resolveWorkOrderLocationGate(
+        existingWorkOrder,
+        locationActiveWorkTypeCount,
       );
+      if (locationGate.skippedEmptyRegistry) {
+        await recordLocationGateSkip(req, {
+          companyId: existingWorkOrder.companyId,
+          surface: "work_order_complete",
+          targetType: "work_order",
+          targetId: existingWorkOrder.id,
+        });
+      }
+      const locationRule = locationGate.enforced
+        ? await getFieldWorkTypeRule(
+            existingWorkOrder.companyId,
+            existingWorkOrder.fieldWorkType,
+          )
+        : null;
       const locationViolations = getWorkOrderLocationViolations(
         existingWorkOrder,
         locationRule,
+        locationActiveWorkTypeCount,
       );
-      const locationGateError = workOrderLocationGateError(existingWorkOrder, locationRule);
+      const locationGateError = workOrderLocationGateError(
+        existingWorkOrder,
+        locationRule,
+        locationActiveWorkTypeCount,
+      );
       if (locationGateError) {
         res.status(400).json({
           message: locationGateError,
@@ -10104,15 +10135,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(404).json({ message: "Work order not found" });
         return;
       }
-      const locationRule = await getFieldWorkTypeRule(
-        existingWorkOrder.companyId,
-        existingWorkOrder.fieldWorkType,
+      // Cheap half first: while work orders remain grandfathered at 2099 the
+      // registry count is never queried.
+      const locationActiveWorkTypeCount = resolveWorkOrderLocationGate(existingWorkOrder)
+        .enforced
+        ? await countActiveFieldWorkTypes(existingWorkOrder.companyId)
+        : null;
+      const locationGate = resolveWorkOrderLocationGate(
+        existingWorkOrder,
+        locationActiveWorkTypeCount,
       );
+      if (locationGate.skippedEmptyRegistry) {
+        await recordLocationGateSkip(req, {
+          companyId: existingWorkOrder.companyId,
+          surface: "work_order_complete",
+          targetType: "work_order",
+          targetId: existingWorkOrder.id,
+        });
+      }
+      const locationRule = locationGate.enforced
+        ? await getFieldWorkTypeRule(
+            existingWorkOrder.companyId,
+            existingWorkOrder.fieldWorkType,
+          )
+        : null;
       const locationViolations = getWorkOrderLocationViolations(
         existingWorkOrder,
         locationRule,
+        locationActiveWorkTypeCount,
       );
-      const locationGateError = workOrderLocationGateError(existingWorkOrder, locationRule);
+      const locationGateError = workOrderLocationGateError(
+        existingWorkOrder,
+        locationRule,
+        locationActiveWorkTypeCount,
+      );
       if (locationGateError) {
         res.status(400).json({
           message: locationGateError,
@@ -11447,24 +11503,37 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(400).json({ message: `Customer "${customerForRate.name}" does not have a labor rate configured. Please set a labor rate on the customer record before creating a billing sheet.` });
         return;
       }
-      if (shouldEnforceBillingLocationCreate(creatorRole)) {
+      {
         const locationCompanyId =
           req.authenticatedUserCompanyId ?? customerForRate.companyId ?? null;
-        const locationRule = await getFieldWorkTypeRule(
-          locationCompanyId,
-          billingSheetData.fieldWorkType,
+        const locationGate = resolveBillingLocationCreateGate(
+          new Date(),
+          await countActiveFieldWorkTypes(locationCompanyId),
         );
-        const locationViolations = getBillingLocationViolations(
-          billingSheetData,
-          locationRule,
-        );
-        if (locationViolations.length > 0) {
-          res.status(400).json({
-            message:
-              "Complete the required work location before submitting this billing sheet.",
-            violations: locationViolations,
+        if (locationGate.skippedEmptyRegistry) {
+          await recordLocationGateSkip(req, {
+            companyId: locationCompanyId,
+            surface: "billing_sheet_create",
+            targetType: "billing_sheet",
           });
-          return;
+        }
+        if (locationGate.enforced) {
+          const locationRule = await getFieldWorkTypeRule(
+            locationCompanyId,
+            billingSheetData.fieldWorkType,
+          );
+          const locationViolations = getBillingLocationViolations(
+            billingSheetData,
+            locationRule,
+          );
+          if (locationViolations.length > 0) {
+            res.status(400).json({
+              message:
+                "Complete the required work location before submitting this billing sheet.",
+              violations: locationViolations,
+            });
+            return;
+          }
         }
       }
       const bsAuthorizedLaborRate = parseFloat(customerForRate.laborRate);
@@ -11767,37 +11836,54 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Strip these fields unconditionally so no client payload can overwrite them.
       delete billingSheetData.technicianId;
       delete billingSheetData.technicianName;
-      if (
-        existingBsForLockCheck &&
-        shouldEnforceBillingLocationPatch(
-          req.authenticatedUserRole,
+      if (existingBsForLockCheck) {
+        const locationCompanyId =
+          (req.authenticatedUserRole === "super_admin"
+            ? existingBsForLockCheck.companyId
+            : req.authenticatedUserCompanyId) ?? null;
+        // The count is only worth a query once the patch is actually
+        // location-relevant and past the cutoff, so resolve the cheap half of
+        // the decision first: a labor-hours-only patch never reaches the DB.
+        const preliminaryGate = resolveBillingLocationPatchGate(
           existingBsForLockCheck.createdAt,
           billingSheetData,
-        )
-      ) {
-        const mergedLocation = {
-          ...existingBsForLockCheck,
-          ...billingSheetData,
-        };
-        const locationCompanyId =
-          req.authenticatedUserRole === "super_admin"
-            ? existingBsForLockCheck.companyId
-            : req.authenticatedUserCompanyId;
-        const locationRule = await getFieldWorkTypeRule(
-          locationCompanyId ?? null,
-          mergedLocation.fieldWorkType,
         );
-        const locationViolations = getBillingLocationViolations(
-          mergedLocation,
-          locationRule,
-        );
-        if (locationViolations.length > 0) {
-          res.status(400).json({
-            message:
-              "Complete the required work location before updating this billing sheet.",
-            violations: locationViolations,
+        const locationGate = preliminaryGate.enforced
+          ? resolveBillingLocationPatchGate(
+              existingBsForLockCheck.createdAt,
+              billingSheetData,
+              await countActiveFieldWorkTypes(locationCompanyId),
+            )
+          : preliminaryGate;
+        if (locationGate.skippedEmptyRegistry) {
+          await recordLocationGateSkip(req, {
+            companyId: locationCompanyId,
+            surface: "billing_sheet_patch",
+            targetType: "billing_sheet",
+            targetId: existingBsForLockCheck.id,
           });
-          return;
+        }
+        if (locationGate.enforced) {
+          const mergedLocation = {
+            ...existingBsForLockCheck,
+            ...billingSheetData,
+          };
+          const locationRule = await getFieldWorkTypeRule(
+            locationCompanyId,
+            mergedLocation.fieldWorkType,
+          );
+          const locationViolations = getBillingLocationViolations(
+            mergedLocation,
+            locationRule,
+          );
+          if (locationViolations.length > 0) {
+            res.status(400).json({
+              message:
+                "Complete the required work location before updating this billing sheet.",
+              violations: locationViolations,
+            });
+            return;
+          }
         }
       }
       // Normalize the optional pin / controller fields so they round-trip
@@ -14400,22 +14486,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Slice 4a: companyId is transitionally nullable in schema.ts; assert it is
       // populated (the migration admin page ensures this at the DB level).
       assertCompanyId(workOrder, `work order ${workOrderId} → create billing sheet`);
-      if (shouldEnforceBillingLocationCreate(creatorRole)) {
-        const locationRule = await getFieldWorkTypeRule(
-          workOrder.companyId,
-          workOrder.fieldWorkType,
+      {
+        const locationGate = resolveBillingLocationCreateGate(
+          new Date(),
+          await countActiveFieldWorkTypes(workOrder.companyId),
         );
-        const locationViolations = getBillingLocationViolations(
-          workOrder,
-          locationRule,
-        );
-        if (locationViolations.length > 0) {
-          res.status(400).json({
-            message:
-              "Complete the required work location on the work order before creating its billing sheet.",
-            violations: locationViolations,
+        if (locationGate.skippedEmptyRegistry) {
+          await recordLocationGateSkip(req, {
+            companyId: workOrder.companyId,
+            surface: "billing_sheet_create_from_work_order",
+            targetType: "work_order",
+            targetId: workOrderId,
           });
-          return;
+        }
+        if (locationGate.enforced) {
+          const locationRule = await getFieldWorkTypeRule(
+            workOrder.companyId,
+            workOrder.fieldWorkType,
+          );
+          const locationViolations = getBillingLocationViolations(
+            workOrder,
+            locationRule,
+          );
+          if (locationViolations.length > 0) {
+            res.status(400).json({
+              message:
+                "Complete the required work location on the work order before creating its billing sheet.",
+              violations: locationViolations,
+            });
+            return;
+          }
         }
       }
       const newBillingSheet = await storage.createBillingSheet({

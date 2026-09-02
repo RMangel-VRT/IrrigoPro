@@ -46,7 +46,7 @@ const WORK_TYPES: Rule[] = [
   { code: "zone_repair", label: "Zone Repair", requiresController: true, requiresZone: true, requiresDetails: false },
   { code: "head_replacement", label: "Head Replacement", requiresController: true, requiresZone: true, requiresDetails: false },
   { code: "valve_repair", label: "Valve Repair", requiresController: true, requiresZone: true, requiresDetails: false },
-  { code: "controller_repair", label: "Controller Repair", requiresController: true, requiresZone: false, requiresDetails: false },
+  { code: "controller_repair", label: "Controller/Clock Repair", requiresController: true, requiresZone: false, requiresDetails: false },
   { code: "backflow", label: "Backflow", requiresController: false, requiresZone: false, requiresDetails: false },
   { code: "mainline_repair", label: "Mainline Repair", requiresController: false, requiresZone: false, requiresDetails: false },
   { code: "other", label: "Other", requiresController: false, requiresZone: false, requiresDetails: true },
@@ -84,7 +84,11 @@ function renderControls(options: {
       queries: { retry: false, staleTime: Infinity, refetchOnMount: false },
     },
   });
-  client.setQueryData(["/api/field-work-types"], options.workTypes ?? WORK_TYPES);
+  // Keyed per customer on purpose — see the Super Admin scoping test below.
+  client.setQueryData(
+    [`/api/field-work-types?customerId=${CUSTOMER_ID}`],
+    options.workTypes ?? WORK_TYPES,
+  );
   client.setQueryData(["/api/properties", CUSTOMER_ID, "controllers"], CONTROLLERS);
 
   const onChange = options.onChange ?? vi.fn();
@@ -140,7 +144,7 @@ describe("work type picker", () => {
     });
   });
 
-  it("names the problem when the company has no work types configured", () => {
+  it("names the state when the company has no work types configured", () => {
     renderControls({ workTypes: [] });
 
     expect(screen.getByTestId("text-work-types-unavailable")).toBeInTheDocument();
@@ -148,6 +152,52 @@ describe("work type picker", () => {
       "No work types configured",
     );
     expect(screen.getByTestId("select-work-type")).toBeDisabled();
+  });
+
+  it("asks for the record's customer registry, not whatever the signed-in user can see", async () => {
+    // A Super Admin has no company of their own, so an unscoped read answers
+    // with every tenant's work types. If the control used that, a Super Admin
+    // on a record belonging to an empty tenant would be held to a requirement
+    // the server has already waived — the client would block a save the
+    // server accepts. The customer-scoped read is the whole fix, so prove the
+    // unscoped answer is not the one being used.
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, staleTime: Infinity, refetchOnMount: false },
+      },
+    });
+    client.setQueryData(["/api/field-work-types"], WORK_TYPES); // another tenant's
+    client.setQueryData([`/api/field-work-types?customerId=${CUSTOMER_ID}`], []);
+    client.setQueryData(["/api/properties", CUSTOMER_ID, "controllers"], CONTROLLERS);
+
+    const onGateStateChange = vi.fn();
+    render(
+      <QueryClientProvider client={client}>
+        <WorkLocationControls
+          customerId={CUSTOMER_ID}
+          value={emptyValue()}
+          onChange={vi.fn()}
+          enforceLocationGate
+          onGateStateChange={onGateStateChange}
+        />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByTestId("text-work-types-unavailable")).toBeInTheDocument();
+    await waitFor(() => expect(onGateStateChange).toHaveBeenCalled());
+    const [complete, violations] = onGateStateChange.mock.calls.at(-1)!;
+    expect(violations).toEqual([]);
+    expect(complete).toBe(true);
+  });
+
+  it("does not tell the user an administrator must add work types", () => {
+    // Nothing in the product lets an administrator add one, so that advice
+    // was unactionable. An empty registry means the gate does not apply.
+    renderControls({ workTypes: [] });
+
+    const notice = screen.getByTestId("text-work-types-unavailable");
+    expect(notice.textContent).not.toMatch(/administrator/i);
+    expect(notice.textContent).toMatch(/not required|save without/i);
   });
 
   it("still renders a stored code that is no longer offered", async () => {
@@ -247,7 +297,7 @@ describe("clearing stale values when the work type changes", () => {
   });
 
   it("keeps the controller but drops the zone for a controller-only rule", async () => {
-    const next = await switchTo("Controller Repair", {});
+    const next = await switchTo("Controller/Clock Repair", {});
     expect(next).toMatchObject({
       fieldWorkType: "controller_repair",
       controllerLetter: "A",
@@ -365,6 +415,39 @@ describe("gate reporting", () => {
     const [complete, violations] = onGateStateChange.mock.calls.at(-1)!;
     expect(violations).toEqual([]);
     expect(complete).toBe(true);
+  });
+
+  it("reports the gate satisfied when the tenant has no active work types", async () => {
+    // A company with an empty registry has no action available that satisfies
+    // a required Work Type, so the gate must not apply: the wizard's step 2
+    // and work-order completion both key off this callback. The server fails
+    // open on the same fact and audits the skip.
+    const onGateStateChange = vi.fn();
+    renderControls({
+      workTypes: [],
+      value: { workLocation: null, fieldWorkType: null },
+      onGateStateChange,
+    });
+
+    await waitFor(() => expect(onGateStateChange).toHaveBeenCalled());
+    const [complete, violations] = onGateStateChange.mock.calls.at(-1)!;
+    expect(violations).toEqual([]);
+    expect(complete).toBe(true);
+    expect(screen.queryByTestId("location-gate-status")).not.toBeInTheDocument();
+  });
+
+  it("goes back to enforcing as soon as one active work type exists", async () => {
+    const onGateStateChange = vi.fn();
+    renderControls({
+      workTypes: [WORK_TYPES[0]],
+      value: { workLocation: null, fieldWorkType: null },
+      onGateStateChange,
+    });
+
+    await waitFor(() => expect(onGateStateChange).toHaveBeenCalled());
+    const [complete, violations] = onGateStateChange.mock.calls.at(-1)!;
+    expect(violations).toEqual(["pin_missing", "work_type_missing"]);
+    expect(complete).toBe(false);
   });
 
   it("still blocks on a visible required field", async () => {

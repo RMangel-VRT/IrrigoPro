@@ -1,8 +1,9 @@
 import {
   WORK_ORDER_LOCATION_GATE_EFFECTIVE_AT,
   checkLocationGate,
-  isLocationGateEnforced,
+  resolveLocationGate,
   type FieldWorkTypeRule,
+  type LocationGateDecision,
   type LocationGateViolation,
 } from "@workspace/db";
 
@@ -21,20 +22,36 @@ type WorkOrderLocationGateInput = {
   zoneNumber?: number | null;
 };
 
+/**
+ * Both surfaces resolve through the shared policy so they cannot drift: the
+ * cutoff decides grandfathering, and a tenant whose work-type registry is
+ * confirmed empty fails open rather than being locked out by a Work Type
+ * requirement nobody in that company is able to satisfy.
+ */
+export function resolveWorkOrderLocationGate(
+  workOrder: WorkOrderLocationGateInput,
+  activeWorkTypeCount?: number | null,
+): LocationGateDecision {
+  return resolveLocationGate({
+    createdAt: workOrder.createdAt ?? null,
+    effectiveAt: WORK_ORDER_LOCATION_GATE_EFFECTIVE_AT,
+    activeWorkTypeCount,
+  });
+}
+
 export function isWorkOrderLocationGateEnforced(
   workOrder: WorkOrderLocationGateInput,
+  activeWorkTypeCount?: number | null,
 ): boolean {
-  return isLocationGateEnforced(
-    workOrder.createdAt ?? null,
-    WORK_ORDER_LOCATION_GATE_EFFECTIVE_AT,
-  );
+  return resolveWorkOrderLocationGate(workOrder, activeWorkTypeCount).enforced;
 }
 
 export function getWorkOrderLocationViolations(
   workOrder: WorkOrderLocationGateInput,
   rule: FieldWorkTypeRule | null,
+  activeWorkTypeCount?: number | null,
 ): LocationGateViolation[] {
-  if (!isWorkOrderLocationGateEnforced(workOrder)) return [];
+  if (!isWorkOrderLocationGateEnforced(workOrder, activeWorkTypeCount)) return [];
   return checkLocationGate(
     {
       workLocationLat: workOrder.workLocationLat ?? null,
@@ -51,8 +68,13 @@ export function getWorkOrderLocationViolations(
 export function workOrderLocationGateError(
   workOrder: WorkOrderLocationGateInput,
   rule: FieldWorkTypeRule | null = null,
+  activeWorkTypeCount?: number | null,
 ): string | null {
-  const violations = getWorkOrderLocationViolations(workOrder, rule);
+  const violations = getWorkOrderLocationViolations(
+    workOrder,
+    rule,
+    activeWorkTypeCount,
+  );
   return violations.length > 0
     ? "Complete every required work location field before completing this work order."
     : null;

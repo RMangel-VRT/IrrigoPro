@@ -114,7 +114,12 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
     isLoading: workTypesLoading,
     isError: workTypesError,
   } = useArrayQuery<FieldWorkType>({
-    queryKey: ["/api/field-work-types"],
+    // Scoped to the record's customer, not just to the signed-in company: a
+    // Super Admin has no company of their own, so an unscoped read answers
+    // with every tenant's work types and would re-impose a gate the server
+    // has already failed open on for this customer's empty tenant. For every
+    // other role the server ignores the parameter and stays tenant-scoped.
+    queryKey: [`/api/field-work-types?customerId=${customerId ?? ""}`],
     enabled: !!customerId,
   });
 
@@ -134,10 +139,14 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
 
   // The registry is per-tenant, so "no work types" is a real configuration
   // state, not just a loading frame. Left unsaid it renders an empty menu that
-  // simply does not appear to open — and, once the gate is live, an
-  // unsatisfiable requirement. Say it out loud instead.
+  // simply does not appear to open. Say it out loud instead — and, because
+  // nothing in the product lets anyone add a work type, treat the confirmed
+  // empty registry as "the gate does not apply" rather than as a requirement
+  // this company has no way to satisfy. The server fails open on exactly the
+  // same fact and audits the skip.
   const workTypesUnavailable =
     !!customerId && !workTypesLoading && !workTypesError && workTypes.length === 0;
+  const gateApplies = enforceLocationGate && !workTypesUnavailable;
   const workTypePlaceholder = !customerId
     ? "Pick a customer first"
     : workTypesLoading
@@ -159,7 +168,7 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
     hasZone: value.zoneNumber != null,
   });
 
-  const violations = enforceLocationGate
+  const violations = gateApplies
     ? checkLocationGate(
         {
           workLocationLat: value.workLocation?.lat ?? null,
@@ -235,7 +244,7 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
         </div>
         <h3 className="text-base font-semibold text-gray-900">
           Work Type{" "}
-          {enforceLocationGate ? (
+          {gateApplies ? (
             <span className="text-red-500">*</span>
           ) : (
             <span className="text-xs text-gray-500 font-normal">(optional)</span>
@@ -251,7 +260,7 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
           <SelectValue placeholder={workTypePlaceholder} />
         </SelectTrigger>
         <SelectContent>
-          {!enforceLocationGate && <SelectItem value={NONE_VALUE}>— None —</SelectItem>}
+          {!gateApplies && <SelectItem value={NONE_VALUE}>— None —</SelectItem>}
           {storedWorkTypeMissing && (
             <SelectItem value={value.fieldWorkType!}>
               {value.fieldWorkType} (no longer offered)
@@ -270,21 +279,16 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
         </p>
       )}
       {workTypesUnavailable && (
-        <p
-          className={
-            enforceLocationGate ? "text-xs text-red-600" : "text-xs text-gray-600"
-          }
-          data-testid="text-work-types-unavailable"
-        >
-          No work types are set up for this company yet. An administrator needs to
-          add them before this can be recorded.
+        <p className="text-xs text-gray-600" data-testid="text-work-types-unavailable">
+          No work types are set up for this company yet, so work type is not
+          required here. You can save without one.
         </p>
       )}
       {selectedWorkType?.requiresDetails && (
         <div className="space-y-1">
           <Label htmlFor="field-work-type-details" className="text-xs text-gray-600">
             Work type details{" "}
-            {enforceLocationGate && <span className="text-red-500">*</span>}
+            {gateApplies && <span className="text-red-500">*</span>}
           </Label>
           <Input
             id="field-work-type-details"
@@ -313,7 +317,7 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
         <h3 className="text-base font-semibold text-gray-900">
           {visibility.showZone ? "Controller & Zone" : "Controller"}{" "}
           <span className="text-xs text-gray-500 font-normal">
-            {enforceLocationGate && groupRequired
+            {gateApplies && groupRequired
               ? "(required by work type)"
               : "(optional)"}
           </span>
@@ -330,7 +334,7 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
           <div className="space-y-1">
             <Label className="text-xs text-gray-600">
               Controller{" "}
-              {enforceLocationGate && visibility.controllerRequired && (
+              {gateApplies && visibility.controllerRequired && (
                 <span className="text-red-500">*</span>
               )}
             </Label>
@@ -388,7 +392,7 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
           <div className="space-y-1">
             <Label className="text-xs text-gray-600 flex items-center gap-1">
               <Droplets className="w-3 h-3" /> Zone
-              {enforceLocationGate && visibility.zoneRequired && (
+              {gateApplies && visibility.zoneRequired && (
                 <span className="text-red-500">*</span>
               )}
             </Label>
@@ -445,7 +449,7 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
           )}
         </>
       )}
-      {showStatus && enforceLocationGate && (
+      {showStatus && gateApplies && (
         <WorkLocationGateStatus violations={violations} />
       )}
     </div>
