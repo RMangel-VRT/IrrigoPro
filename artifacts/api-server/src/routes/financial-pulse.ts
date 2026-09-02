@@ -1,10 +1,10 @@
 // Task #688 — Financial Pulse Slice 2.
 //
-// Three read-only endpoints under /api/financial-pulse/* powering the
-// /financial-pulse dashboard for company_admin / billing_manager /
-// super_admin. Field techs and irrigation managers get a hard 403 —
-// these tiles surface money, margin, and per-tech wage info that must
-// not leak to roles whose UI strips pricing.
+// Read-only endpoints under /api/financial-pulse/* powering the
+// /financial-pulse dashboard for super_admin / company_admin /
+// billing_manager / irrigation_manager. Field techs remain excluded and
+// receive a hard 403. By explicit decision, irrigation managers may see
+// the dashboard's margin, parts/labor cost, and per-tech wage data.
 
 import type { Express, Request, RequestHandler } from "express";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -74,6 +74,7 @@ const ALLOWED_ROLES = new Set([
   "super_admin",
   "company_admin",
   "billing_manager",
+  "irrigation_manager",
 ]);
 
 const DEFAULT_FALLBACK_HOURLY_WAGE = 25;
@@ -1316,7 +1317,8 @@ export function registerFinancialPulseRoutes(
   // Profile and Customer Billing. Numbers are computed by reusing the
   // existing By Customer logic filtered to a single id — no parallel
   // math. Role guard matches the rest of FP (super_admin /
-  // company_admin / billing_manager); company scoping happens through
+  // company_admin / billing_manager / irrigation_manager);
+  // company scoping happens through
   // customers.companyId so a non-super-admin cannot pull a customer
   // outside their own tenant.
   app.get(

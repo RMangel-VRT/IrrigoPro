@@ -76,11 +76,27 @@ describe("Task #708 — /api/financial-pulse/customer/:id/summary", () => {
     assert.equal(r.status, 403);
   });
 
-  it("→ 403 for irrigation_manager", async () => {
-    nextResolver = () => [];
+  it("→ 200 for irrigation_manager in the customer's company", async () => {
+    let callCount = 0;
+    nextResolver = () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return [{
+          id: 42,
+          companyId: 10,
+          name: "Acme Co",
+          hiddenFromBilling: false,
+          monthlyBudgetCap: null,
+          annualBudgetCap: null,
+          budgetSoftThresholdPercent: 75,
+          budgetHardThresholdPercent: 100,
+        }];
+      }
+      return [];
+    };
     const { base } = await spin("irrigation_manager", 10);
     const r = await fetch(`${base}${PATH}`);
-    assert.equal(r.status, 403);
+    assert.equal(r.status, 200);
   });
 
   it("→ 404 when the customer id does not exist", async () => {

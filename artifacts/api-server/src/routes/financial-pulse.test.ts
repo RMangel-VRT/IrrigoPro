@@ -49,9 +49,10 @@ describe("Task #688 — financial-pulse role guard", () => {
     const r = resolveFinancialPulseScope("field_tech", 1, undefined);
     assert.equal(r.status, 403);
   });
-  it("denies irrigation_manager (pricing is allowed but financial pulse is not)", () => {
+  it("allows irrigation_manager to view the full financial pulse", () => {
     const r = resolveFinancialPulseScope("irrigation_manager", 1, undefined);
-    assert.equal(r.status, 403);
+    assert.equal(r.status, 200);
+    assert.equal(r.companyId, 1);
   });
   it("denies unauthenticated / unknown role", () => {
     assert.equal(
@@ -1045,9 +1046,10 @@ describe("Task #731 — pulse-summary endpoint role guard", () => {
     const r = resolveFinancialPulseScope("field_tech", 1, undefined);
     assert.equal(r.status, 403);
   });
-  it("denies irrigation_manager", () => {
+  it("allows irrigation_manager scoped to own company", () => {
     const r = resolveFinancialPulseScope("irrigation_manager", 1, undefined);
-    assert.equal(r.status, 403);
+    assert.equal(r.status, 200);
+    if (r.status === 200) assert.equal(r.companyId, 1);
   });
   it("allows billing_manager scoped to own company", () => {
     const r = resolveFinancialPulseScope("billing_manager", 5, undefined);

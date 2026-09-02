@@ -321,7 +321,7 @@ function BillingHeaderVariant({ className }: { className?: string }) {
   const url = "/api/financial-pulse/kpis?period=mtd";
   const { data, isLoading, error, refetch } =
     useFinancialPulseData<KpisResponse>("billing-header", url);
-  // 403 → render nothing (field tech / irrigation manager).
+  // 403 → render nothing for field techs, the only role excluded from FP.
   if (!isLoading && data == null && !error) return null;
 
   // Task #720 — prefer the server's authoritative `collectedMtd` value

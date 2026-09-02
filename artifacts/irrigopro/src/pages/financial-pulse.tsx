@@ -294,6 +294,7 @@ const ALLOWED_ROLES = new Set([
   "super_admin",
   "company_admin",
   "billing_manager",
+  "irrigation_manager",
 ]);
 
 // Task #720 — canonical per-tile captions. Source wording lives in

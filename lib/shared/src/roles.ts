@@ -194,7 +194,10 @@ export const CAN_VIEW_BUDGETS = new Set<Role>([
 
 /**
  * See part costs, margins, labor rates, and Financial Pulse.
- * Mirrors the existing Financial Pulse allowlist exactly.
+ * Financial Pulse intentionally diverges from this capability: irrigation
+ * managers receive its full margin, cost, and wage view by explicit decision.
+ * Keep this membership unchanged until the capability migration has a
+ * separately approved product decision.
  */
 export const CAN_VIEW_COSTS = new Set<Role>([
   "super_admin",

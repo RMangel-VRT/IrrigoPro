@@ -152,6 +152,10 @@ args = "migration-page-post-run-ui"
 task = "workflow.run"
 args = "retired-work-types"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "financial-pulse-manager-access"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -522,6 +526,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/routes/retired-work-type-rule-agreement.test.ts src/routes/field-work-type-routes.test.ts && pnpm --filter @workspace/irrigopro exec vitest run src/components/location/work-location-controls.test.tsx"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "financial-pulse-manager-access"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/routes/financial-pulse-access.test.ts"
 
 [workflows.workflow.metadata]
 isValidation = true

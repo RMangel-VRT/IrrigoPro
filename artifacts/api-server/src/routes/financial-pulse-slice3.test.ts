@@ -85,10 +85,10 @@ describe("Task #692 — Slice 3 role matrix", () => {
       assert.equal(r.status, 403);
     });
 
-    it(`${path} → 403 for irrigation_manager`, async () => {
+    it(`${path} → 200 for irrigation_manager`, async () => {
       const { base } = await spin("irrigation_manager", 10);
       const r = await fetch(`${base}${path}`);
-      assert.equal(r.status, 403);
+      assert.equal(r.status, 200);
     });
 
     it(`${path} → 200 for company_admin`, async () => {
