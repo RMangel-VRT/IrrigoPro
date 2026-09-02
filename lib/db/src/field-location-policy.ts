@@ -88,7 +88,7 @@ export function checkLocationGate(
  * surfaces intentionally ship disabled by using a far-future date.
  */
 export const BILLING_SHEET_LOCATION_GATE_EFFECTIVE_AT = new Date(
-  "2099-01-01T00:00:00.000Z",
+  "2026-09-02T00:00:00.000Z",
 );
 export const WORK_ORDER_LOCATION_GATE_EFFECTIVE_AT = new Date(
   "2099-01-01T00:00:00.000Z",

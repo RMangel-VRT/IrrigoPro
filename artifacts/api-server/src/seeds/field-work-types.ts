@@ -117,6 +117,7 @@ export async function getFieldWorkTypeRule(
     .from(fieldWorkTypes)
     .where(and(
       eq(fieldWorkTypes.code, code.trim()),
+      eq(fieldWorkTypes.active, true),
       ...(companyId == null ? [] : [eq(fieldWorkTypes.companyId, companyId)]),
     ))
     .limit(1);

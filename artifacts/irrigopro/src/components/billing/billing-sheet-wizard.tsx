@@ -56,9 +56,19 @@ import {
 import { WizardSummaryStrip } from "@/components/work-orders/wizard/wo-summary-strip";
 import { WizardHeader } from "@/components/wizard-shared/wizard-header";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, useArrayQuery } from "@/lib/queryClient";
 import { safeGet } from "@/utils/safeStorage";
-import type { Customer, Part, BillingSheet, BillingSheetItem } from "@workspace/db/schema";
+import type {
+  Customer,
+  Part,
+  BillingSheet,
+  BillingSheetItem,
+  FieldWorkType,
+} from "@workspace/db/schema";
+import {
+  BILLING_SHEET_LOCATION_GATE_EFFECTIVE_AT,
+  isLocationGateEnforced,
+} from "@workspace/db/field-location-policy";
 
 type WizardLocationValue = CustomerLocationValue;
 
@@ -143,6 +153,11 @@ const blankLocation = (): WizardLocationValue => ({
   workLocation: null,
   controllerLetter: null,
   zoneNumber: null,
+  fieldWorkType: null,
+  fieldWorkTypeDetails: "",
+  workLocationSource: null,
+  workLocationAccuracyM: null,
+  workLocationGpsError: null,
 });
 
 const blankPartsLabor = (): PartsLaborValue => ({
@@ -918,6 +933,7 @@ function ReviewStep({
   onEditPin,
   onBack,
   onSubmit,
+  workTypeLabel,
 }: {
   customerStep: CustomerStepValue;
   locationStep: WizardLocationValue;
@@ -930,6 +946,7 @@ function ReviewStep({
   onEditPin: () => void;
   onBack: () => void;
   onSubmit: () => void;
+  workTypeLabel: string | null;
 }) {
   const laborRate = customerStep.customer?.laborRate
     ? parseFloat(customerStep.customer.laborRate)
@@ -989,6 +1006,14 @@ function ReviewStep({
             </button>
           </div>
           <p className="text-sm text-gray-700">{locationStep.projectAddress || "—"}</p>
+          {workTypeLabel && (
+            <p className="text-xs text-gray-600">
+              Work type: {workTypeLabel}
+              {locationStep.fieldWorkTypeDetails
+                ? ` — ${locationStep.fieldWorkTypeDetails}`
+                : ""}
+            </p>
+          )}
           {pinDisplay && <p className="text-xs text-gray-500">Pinned: {pinDisplay}</p>}
           {(locationStep.controllerLetter || locationStep.zoneNumber != null) && (
             <p className="text-xs text-gray-500">
@@ -1177,6 +1202,7 @@ export function BillingSheetWizard({
   const [descriptionStep, setDescriptionStep] = useState<DescriptionValue>(blankDescription);
   const [photos, setPhotos] = useState<UploadedFile[]>([]);
   const [discardOpen, setDiscardOpen] = useState(false);
+  const [locationGateComplete, setLocationGateComplete] = useState(false);
   const initialSnapshotRef = useRef<DraftSnapshot | null>(null);
   const hydratedRef = useRef(false);
 
@@ -1214,6 +1240,18 @@ export function BillingSheetWizard({
   const existing = (draftData ?? fetched) as
     | (BillingSheet & { items?: BillingSheetItem[] })
     | undefined;
+  const { data: workTypes = [] } = useArrayQuery<FieldWorkType>({
+    queryKey: ["/api/field-work-types"],
+    enabled: open,
+  });
+  const selectedWorkTypeLabel =
+    workTypes.find((type) => type.code === locationStep.fieldWorkType)?.label ?? null;
+  const enforceBillingLocationGate =
+    isFieldTech &&
+    isLocationGateEnforced(
+      isEdit ? existing?.createdAt ?? null : new Date(),
+      BILLING_SHEET_LOCATION_GATE_EFFECTIVE_AT,
+    );
 
   // Wait for the real customer record before hydrating Step 1 so the wizard
   // mounts the real customer in a single pass — never the synthetic fallback
@@ -1274,6 +1312,17 @@ export function BillingSheetWizard({
       workLocation: wl,
       controllerLetter: existing.controllerLetter ?? null,
       zoneNumber: existing.zoneNumber ?? null,
+      fieldWorkType: existing.fieldWorkType ?? null,
+      fieldWorkTypeDetails: existing.fieldWorkTypeDetails ?? "",
+      workLocationSource:
+        existing.workLocationSource === "gps" || existing.workLocationSource === "manual"
+          ? existing.workLocationSource
+          : null,
+      workLocationAccuracyM:
+        existing.workLocationAccuracyM != null
+          ? parseFloat(String(existing.workLocationAccuracyM))
+          : null,
+      workLocationGpsError: existing.workLocationGpsError ?? null,
     };
     const pl: PartsLaborValue = {
       // Task #396 — hydrate persisted laborMode (default flat) so edits
@@ -1329,6 +1378,9 @@ export function BillingSheetWizard({
         workLocation: null,
         controllerLetter: null,
         zoneNumber: null,
+        workLocationSource: null,
+        workLocationAccuracyM: null,
+        workLocationGpsError: null,
       }));
     }
   };
@@ -1353,6 +1405,9 @@ export function BillingSheetWizard({
       if (!customerStep.customer) throw new Error("Customer required");
       if (!customerStep.workDate) throw new Error("Work date required");
       if (!descriptionStep.workDescription.trim()) throw new Error("Description required");
+      if (enforceBillingLocationGate && !locationGateComplete) {
+        throw new Error("Complete every required work-location detail before saving.");
+      }
 
       // Field tech edit: server enforces status-only patch.
       if (isEdit && isFieldTech) {
@@ -1422,6 +1477,11 @@ export function BillingSheetWizard({
         workLocationAddress: locationStep.workLocation?.address ?? null,
         controllerLetter: locationStep.controllerLetter,
         zoneNumber: locationStep.zoneNumber,
+        fieldWorkType: locationStep.fieldWorkType,
+        fieldWorkTypeDetails: locationStep.fieldWorkTypeDetails.trim() || null,
+        workLocationSource: locationStep.workLocationSource,
+        workLocationAccuracyM: locationStep.workLocationAccuracyM,
+        workLocationGpsError: locationStep.workLocationGpsError,
         workDate: customerStep.workDate,
         technicianName,
         technicianId,
@@ -1490,7 +1550,7 @@ export function BillingSheetWizard({
       !!customerStep.customer &&
       (customerBranches.length === 0 || !!customerStep.branchName) &&
       !!customerStep.workDate,
-    2: true,
+    2: !enforceBillingLocationGate || locationGateComplete,
     3:
       partsLabor.items.length > 0 ||
       (partsLabor.laborMode === "per_part"
@@ -1535,11 +1595,13 @@ export function BillingSheetWizard({
         );
       }
     }
+    if (selectedWorkTypeLabel) parts.push(selectedWorkTypeLabel);
     return parts.length ? parts.join(" · ") : null;
   }, [
     customerStep.customer?.name,
     customerStep.branchName,
     customerStep.workDate,
+    selectedWorkTypeLabel,
   ]);
 
   const stepCtaLabel: Record<Step, string> = {
@@ -1552,6 +1614,11 @@ export function BillingSheetWizard({
 
   const stickyMobileFooter = (
     <div className="sm:hidden sticky bottom-0 -mx-4 px-4 py-2 bg-white border-t z-10 flex flex-col gap-1.5">
+      {step === 2 && enforceBillingLocationGate && !locationGateComplete && (
+        <p className="text-xs text-red-700 text-center">
+          Complete the required location details above to continue.
+        </p>
+      )}
       {step === 3 && !canContinueFrom[3] && (
         <p className="text-xs text-gray-500 text-center">
           Add at least one part or labor entry to continue.
@@ -1681,6 +1748,8 @@ export function BillingSheetWizard({
                 onBack={isEdit ? requestClose : goBack}
                 onContinue={goNext}
                 hideProjectName
+                enforceLocationGate={enforceBillingLocationGate}
+                onGateStateChange={(complete) => setLocationGateComplete(complete)}
               />
             ) : step === 3 ? (
               <PartsLaborStep
@@ -1719,6 +1788,7 @@ export function BillingSheetWizard({
                 onEditPin={() => setStep(2)}
                 onBack={goBack}
                 onSubmit={() => saveMutation.mutate()}
+                workTypeLabel={selectedWorkTypeLabel}
               />
             )}
           </div>

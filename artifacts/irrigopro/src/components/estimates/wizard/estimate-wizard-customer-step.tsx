@@ -36,6 +36,11 @@ export interface CustomerStepValue {
   workLocation: WorkLocation | null;
   controllerLetter: string | null;
   zoneNumber: number | null;
+  fieldWorkType: string | null;
+  fieldWorkTypeDetails: string;
+  workLocationSource: "gps" | "manual" | null;
+  workLocationAccuracyM: number | null;
+  workLocationGpsError: string | null;
 }
 
 interface EstimateWizardCustomerStepProps {
@@ -84,6 +89,9 @@ export function EstimateWizardCustomerStep({
       workLocation: null,
       controllerLetter: null,
       zoneNumber: null,
+      workLocationSource: null,
+      workLocationAccuracyM: null,
+      workLocationGpsError: null,
     });
     setShowCustomerPicker(false);
   };

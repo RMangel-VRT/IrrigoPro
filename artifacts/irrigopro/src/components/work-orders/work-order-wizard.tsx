@@ -67,6 +67,11 @@ interface DraftSnapshot {
   workLocation: WorkLocation | null;
   controllerLetter: string | null;
   zoneNumber: number | null;
+  fieldWorkType: string | null;
+  fieldWorkTypeDetails: string;
+  workLocationSource: "gps" | "manual" | null;
+  workLocationAccuracyM: number | null;
+  workLocationGpsError: string | null;
   priority: string;
   scheduledDate: string;
   assignedTechnicianId: number | null;
@@ -91,6 +96,11 @@ const blankLocation = (): LocationStepValue => ({
   workLocation: null,
   controllerLetter: null,
   zoneNumber: null,
+  fieldWorkType: null,
+  fieldWorkTypeDetails: "",
+  workLocationSource: null,
+  workLocationAccuracyM: null,
+  workLocationGpsError: null,
 });
 const blankDescription = (): DescriptionStepValue => ({ description: "" });
 const blankSchedule = (): ScheduleStepValue => ({
@@ -123,6 +133,11 @@ function snapshot(
     workLocation: ls.workLocation,
     controllerLetter: ls.controllerLetter,
     zoneNumber: ls.zoneNumber,
+    fieldWorkType: ls.fieldWorkType,
+    fieldWorkTypeDetails: ls.fieldWorkTypeDetails,
+    workLocationSource: ls.workLocationSource,
+    workLocationAccuracyM: ls.workLocationAccuracyM,
+    workLocationGpsError: ls.workLocationGpsError,
     priority: ss.priority,
     scheduledDate: ss.scheduledDate,
     assignedTechnicianId: ss.assignedTechnicianId,
@@ -191,6 +206,9 @@ export function WorkOrderWizard({ open, onClose, onCreated, workOrderId }: WorkO
         workLocation: null,
         controllerLetter: null,
         zoneNumber: null,
+        workLocationSource: null,
+        workLocationAccuracyM: null,
+        workLocationGpsError: null,
       }));
     }
   };
@@ -254,6 +272,17 @@ export function WorkOrderWizard({ open, onClose, onCreated, workOrderId }: WorkO
       workLocation: wl,
       controllerLetter: existing.controllerLetter ?? null,
       zoneNumber: existing.zoneNumber ?? null,
+      fieldWorkType: existing.fieldWorkType ?? null,
+      fieldWorkTypeDetails: existing.fieldWorkTypeDetails ?? "",
+      workLocationSource:
+        existing.workLocationSource === "gps" || existing.workLocationSource === "manual"
+          ? existing.workLocationSource
+          : null,
+      workLocationAccuracyM:
+        existing.workLocationAccuracyM != null
+          ? parseFloat(String(existing.workLocationAccuracyM))
+          : null,
+      workLocationGpsError: existing.workLocationGpsError ?? null,
     };
     const d: DescriptionStepValue = { description: existing.description ?? "" };
     const s: ScheduleStepValue = {
@@ -314,6 +343,11 @@ export function WorkOrderWizard({ open, onClose, onCreated, workOrderId }: WorkO
         workLocationAddress: locationStep.workLocation?.address ?? null,
         controllerLetter: locationStep.controllerLetter,
         zoneNumber: locationStep.zoneNumber,
+        fieldWorkType: locationStep.fieldWorkType,
+        fieldWorkTypeDetails: locationStep.fieldWorkTypeDetails.trim() || null,
+        workLocationSource: locationStep.workLocationSource,
+        workLocationAccuracyM: locationStep.workLocationAccuracyM,
+        workLocationGpsError: locationStep.workLocationGpsError,
         priority: scheduleStep.priority,
         scheduledDate: scheduleStep.scheduledDate
           ? new Date(scheduleStep.scheduledDate).toISOString()

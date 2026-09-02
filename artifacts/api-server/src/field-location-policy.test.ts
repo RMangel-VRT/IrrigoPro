@@ -133,9 +133,9 @@ describe("field location policy", () => {
     );
   });
 
-  it("ships both surfaces disabled and evaluates an explicit cutoff independently", () => {
+  it("ships only billing enabled and evaluates an explicit cutoff independently", () => {
     const now = new Date();
-    assert.equal(isLocationGateEnforced(now, BILLING_SHEET_LOCATION_GATE_EFFECTIVE_AT), false);
+    assert.equal(isLocationGateEnforced(now, BILLING_SHEET_LOCATION_GATE_EFFECTIVE_AT), true);
     assert.equal(isLocationGateEnforced(now, WORK_ORDER_LOCATION_GATE_EFFECTIVE_AT), false);
     const cutoff = new Date("2026-09-01T12:00:00.000Z");
     assert.equal(isLocationGateEnforced("2026-09-01T11:59:59.999Z", cutoff), false);

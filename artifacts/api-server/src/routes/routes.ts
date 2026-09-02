@@ -418,6 +418,12 @@ import { registerQbPaymentSyncRoutes } from "./qb-payment-sync";
 import { registerAdminMigrationsRoutes } from "./admin-migrations-routes";
 import { registerFieldWorkTypeRoutes } from "./field-work-type-routes";
 import { registerMissingLocationDataRoute } from "./missing-location-data-route";
+import { getFieldWorkTypeRule } from "../seeds/field-work-types";
+import {
+  getBillingLocationViolations,
+  shouldEnforceBillingLocationCreate,
+  shouldEnforceBillingLocationPatch,
+} from "./billing-sheet-location-gate";
 import { registerWcLaborBackfillRoutes } from "./admin-wc-labor-backfill-routes";
 import { registerInspectionZoneBackfillRoutes } from "./admin-inspection-zone-backfill-routes";
 import { registerCleanupInvoice71256Routes } from "./cleanup-invoice-71256";
@@ -11393,6 +11399,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(400).json({ message: `Customer "${customerForRate.name}" does not have a labor rate configured. Please set a labor rate on the customer record before creating a billing sheet.` });
         return;
       }
+      if (shouldEnforceBillingLocationCreate(creatorRole)) {
+        const locationCompanyId =
+          req.authenticatedUserCompanyId ?? customerForRate.companyId ?? null;
+        const locationRule = await getFieldWorkTypeRule(
+          locationCompanyId,
+          billingSheetData.fieldWorkType,
+        );
+        const locationViolations = getBillingLocationViolations(
+          billingSheetData,
+          locationRule,
+        );
+        if (locationViolations.length > 0) {
+          res.status(400).json({
+            message:
+              "Complete the required work location before submitting this billing sheet.",
+            violations: locationViolations,
+          });
+          return;
+        }
+      }
       const bsAuthorizedLaborRate = parseFloat(customerForRate.laborRate);
 
       // Task #396 — Labor mode normalization. 'flat' uses sheet.totalHours
@@ -11511,6 +11537,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
           billingSheetData.zoneNumber != null && billingSheetData.zoneNumber !== ''
             ? Number(billingSheetData.zoneNumber)
             : null,
+        fieldWorkType: billingSheetData.fieldWorkType?.trim() || null,
+        fieldWorkTypeDetails: billingSheetData.fieldWorkTypeDetails?.trim() || null,
+        workLocationSource:
+          billingSheetData.workLocationSource === "gps" ||
+          billingSheetData.workLocationSource === "manual"
+            ? billingSheetData.workLocationSource
+            : null,
+        workLocationAccuracyM:
+          billingSheetData.workLocationAccuracyM != null &&
+          billingSheetData.workLocationAccuracyM !== ""
+            ? String(billingSheetData.workLocationAccuracyM)
+            : null,
+        workLocationGpsError: billingSheetData.workLocationGpsError?.trim() || null,
         workDate: billingSheetData.workDate, // Let storage handle the conversion
         technicianName: billingSheetData.technicianName,
         technicianId: billingSheetData.technicianId || null,
@@ -11680,6 +11719,39 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Strip these fields unconditionally so no client payload can overwrite them.
       delete billingSheetData.technicianId;
       delete billingSheetData.technicianName;
+      if (
+        existingBsForLockCheck &&
+        shouldEnforceBillingLocationPatch(
+          req.authenticatedUserRole,
+          existingBsForLockCheck.createdAt,
+          billingSheetData,
+        )
+      ) {
+        const mergedLocation = {
+          ...existingBsForLockCheck,
+          ...billingSheetData,
+        };
+        const locationCompanyId =
+          req.authenticatedUserRole === "super_admin"
+            ? existingBsForLockCheck.companyId
+            : req.authenticatedUserCompanyId;
+        const locationRule = await getFieldWorkTypeRule(
+          locationCompanyId ?? null,
+          mergedLocation.fieldWorkType,
+        );
+        const locationViolations = getBillingLocationViolations(
+          mergedLocation,
+          locationRule,
+        );
+        if (locationViolations.length > 0) {
+          res.status(400).json({
+            message:
+              "Complete the required work location before updating this billing sheet.",
+            violations: locationViolations,
+          });
+          return;
+        }
+      }
       // Normalize the optional pin / controller fields so they round-trip
       // through the decimal/integer columns regardless of whether the client
       // sent numbers, strings, or omitted them entirely.
@@ -11706,6 +11778,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
           billingSheetData.zoneNumber == null || billingSheetData.zoneNumber === ''
             ? null
             : Number(billingSheetData.zoneNumber);
+      }
+      if (billingSheetData.fieldWorkType !== undefined) {
+        billingSheetData.fieldWorkType = billingSheetData.fieldWorkType?.trim() || null;
+      }
+      if (billingSheetData.fieldWorkTypeDetails !== undefined) {
+        billingSheetData.fieldWorkTypeDetails =
+          billingSheetData.fieldWorkTypeDetails?.trim() || null;
+      }
+      if (billingSheetData.workLocationSource !== undefined) {
+        billingSheetData.workLocationSource =
+          billingSheetData.workLocationSource === "gps" ||
+          billingSheetData.workLocationSource === "manual"
+            ? billingSheetData.workLocationSource
+            : null;
+      }
+      if (billingSheetData.workLocationAccuracyM !== undefined) {
+        billingSheetData.workLocationAccuracyM =
+          billingSheetData.workLocationAccuracyM == null ||
+          billingSheetData.workLocationAccuracyM === ""
+            ? null
+            : String(billingSheetData.workLocationAccuracyM);
+      }
+      if (billingSheetData.workLocationGpsError !== undefined) {
+        billingSheetData.workLocationGpsError =
+          billingSheetData.workLocationGpsError?.trim() || null;
       }
 
       // Task #207: enforce billing-sheet status enum on PATCH so the legacy
@@ -14255,6 +14352,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Slice 4a: companyId is transitionally nullable in schema.ts; assert it is
       // populated (the migration admin page ensures this at the DB level).
       assertCompanyId(workOrder, `work order ${workOrderId} → create billing sheet`);
+      if (shouldEnforceBillingLocationCreate(creatorRole)) {
+        const locationRule = await getFieldWorkTypeRule(
+          workOrder.companyId,
+          workOrder.fieldWorkType,
+        );
+        const locationViolations = getBillingLocationViolations(
+          workOrder,
+          locationRule,
+        );
+        if (locationViolations.length > 0) {
+          res.status(400).json({
+            message:
+              "Complete the required work location on the work order before creating its billing sheet.",
+            violations: locationViolations,
+          });
+          return;
+        }
+      }
       const newBillingSheet = await storage.createBillingSheet({
         technicianName: techName || workOrder.assignedTechnicianName || "",
         workDescription: workPerformed || "",
@@ -14288,6 +14403,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         workLocationAddress: workOrder.workLocationAddress ?? null,
         controllerLetter: workOrder.controllerLetter ?? null,
         zoneNumber: workOrder.zoneNumber ?? null,
+        fieldWorkType: workOrder.fieldWorkType ?? null,
+        fieldWorkTypeDetails: workOrder.fieldWorkTypeDetails ?? null,
+        workLocationSource: workOrder.workLocationSource ?? null,
+        workLocationAccuracyM: workOrder.workLocationAccuracyM ?? null,
+        workLocationGpsError: workOrder.workLocationGpsError ?? null,
         items: resolvedItems.length > 0 ? resolvedItems : undefined,
       });
       console.log(`[AUDIT] work_order_converted_to_billing_sheet workOrderId=${workOrderId} billingSheetId=${newBillingSheet.id} sourceItemCount=${workOrderSourceItemCount} billingSheetItemsWritten=${resolvedItems.length}`);

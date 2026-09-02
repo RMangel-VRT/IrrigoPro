@@ -233,6 +233,11 @@ interface DraftSnapshot {
   workLocation: { lat: number; lng: number; address?: string } | null;
   controllerLetter: string | null;
   zoneNumber: number | null;
+  fieldWorkType: string | null;
+  fieldWorkTypeDetails: string;
+  workLocationSource: "gps" | "manual" | null;
+  workLocationAccuracyM: number | null;
+  workLocationGpsError: string | null;
 }
 
 // Task #399 — single source of truth for the wizard's labor-rate derivation.
@@ -288,6 +293,11 @@ function snapshot(
     workLocation: cs.workLocation,
     controllerLetter: cs.controllerLetter,
     zoneNumber: cs.zoneNumber,
+    fieldWorkType: cs.fieldWorkType,
+    fieldWorkTypeDetails: cs.fieldWorkTypeDetails,
+    workLocationSource: cs.workLocationSource,
+    workLocationAccuracyM: cs.workLocationAccuracyM,
+    workLocationGpsError: cs.workLocationGpsError,
   };
 }
 
@@ -314,6 +324,11 @@ export function EstimateWizard({ open, onOpenChange, estimateId }: EstimateWizar
     workLocation: null,
     controllerLetter: null,
     zoneNumber: null,
+    fieldWorkType: null,
+    fieldWorkTypeDetails: "",
+    workLocationSource: null,
+    workLocationAccuracyM: null,
+    workLocationGpsError: null,
   });
   const [items, setItems] = useState<WizardLineItem[]>([]);
   const [laborRate, setLaborRate] = useState<number>(45);
@@ -368,6 +383,11 @@ export function EstimateWizard({ open, onOpenChange, estimateId }: EstimateWizar
           workLocation: null,
           controllerLetter: null,
           zoneNumber: null,
+          fieldWorkType: null,
+          fieldWorkTypeDetails: "",
+          workLocationSource: null,
+          workLocationAccuracyM: null,
+          workLocationGpsError: null,
         };
         setCustomerStep(blank);
         setItems([]);
@@ -477,6 +497,11 @@ export function EstimateWizard({ open, onOpenChange, estimateId }: EstimateWizar
       workLocation: wl,
       controllerLetter: existing.controllerLetter ?? null,
       zoneNumber: existing.zoneNumber ?? null,
+      fieldWorkType: null,
+      fieldWorkTypeDetails: "",
+      workLocationSource: null,
+      workLocationAccuracyM: null,
+      workLocationGpsError: null,
     };
     setCustomerStep(cs);
     const loaded: WizardLineItem[] = (existing.items ?? []).map((it: EstimateItem) => {
@@ -1032,6 +1057,11 @@ export function EstimateWizard({ open, onOpenChange, estimateId }: EstimateWizar
                   workLocation: customerStep.workLocation,
                   controllerLetter: customerStep.controllerLetter,
                   zoneNumber: customerStep.zoneNumber,
+                  fieldWorkType: customerStep.fieldWorkType,
+                  fieldWorkTypeDetails: customerStep.fieldWorkTypeDetails,
+                  workLocationSource: customerStep.workLocationSource,
+                  workLocationAccuracyM: customerStep.workLocationAccuracyM,
+                  workLocationGpsError: customerStep.workLocationGpsError,
                 }}
                 onChange={(next: CustomerLocationValue) =>
                   setCustomerStep((prev) => ({
@@ -1044,6 +1074,11 @@ export function EstimateWizard({ open, onOpenChange, estimateId }: EstimateWizar
                     workLocation: next.workLocation,
                     controllerLetter: next.controllerLetter,
                     zoneNumber: next.zoneNumber,
+                    fieldWorkType: next.fieldWorkType,
+                    fieldWorkTypeDetails: next.fieldWorkTypeDetails,
+                    workLocationSource: next.workLocationSource,
+                    workLocationAccuracyM: next.workLocationAccuracyM,
+                    workLocationGpsError: next.workLocationGpsError,
                   }))
                 }
                 onBack={() => setStep(1)}

@@ -20,7 +20,14 @@ export interface LocationPickerProps {
    *  drop. Not used for map centering (centering uses pin → boundary → company
    *  fallback → regional fallback). */
   defaultAddress?: string;
-  onLocationSelect: (location: { lat: number; lng: number; address?: string }) => void;
+  onLocationSelect: (location: {
+    lat: number;
+    lng: number;
+    address?: string;
+    source?: "gps" | "manual";
+    accuracyM?: number | null;
+    gpsError?: string | null;
+  }) => void;
   selectedLocation?: { lat: number; lng: number; address?: string } | null;
   customerBoundary?: PropertyBoundary | null;
   /**
@@ -140,6 +147,7 @@ export function LocationPicker({
   // the async reverse-geocode resolves) so the yellow notice disappears the
   // moment the tech drops a pin, not after parent state propagates.
   const [hasPinDropped, setHasPinDropped] = useState(!!selectedLocation);
+  const gpsFailureRef = useRef<string | null>(null);
 
   const hasBoundary = !!customerBoundary;
 
@@ -248,7 +256,14 @@ export function LocationPicker({
          const address = canUseNetwork()
            ? await reverseGeocode(lat, lng)
            : undefined;
-         onLocationSelect({ lat, lng, ...(address ? { address } : {}) });
+          onLocationSelect({
+            lat,
+            lng,
+            ...(address ? { address } : {}),
+            source: "manual",
+            accuracyM: null,
+            gpsError: gpsFailureRef.current,
+          });
       });
 
       if (selectedLocation) {
@@ -416,6 +431,8 @@ export function LocationPicker({
     setLocationError(null);
 
     if (!('geolocation' in navigator)) {
+      const gpsError = "not_supported";
+      gpsFailureRef.current = gpsError;
       setLocationError("Location is not supported by your browser.");
       setIsLocating(false);
       return;
@@ -436,10 +453,29 @@ export function LocationPicker({
         const address = canUseNetwork()
           ? await reverseGeocode(lat, lng)
           : undefined;
-        onLocationSelect({ lat, lng, ...(address ? { address } : {}) });
+        gpsFailureRef.current = null;
+        onLocationSelect({
+          lat,
+          lng,
+          ...(address ? { address } : {}),
+          source: "gps",
+          accuracyM: Number.isFinite(position.coords.accuracy)
+            ? position.coords.accuracy
+            : null,
+          gpsError: null,
+        });
         setIsLocating(false);
       },
       (error) => {
+        const gpsError =
+          error.code === error.PERMISSION_DENIED
+            ? "permission_denied"
+            : error.code === error.POSITION_UNAVAILABLE
+              ? "position_unavailable"
+              : error.code === error.TIMEOUT
+                ? "timeout"
+                : "unknown";
+        gpsFailureRef.current = gpsError;
         switch (error.code) {
           case error.PERMISSION_DENIED:
             setLocationError(
@@ -489,7 +525,7 @@ export function LocationPicker({
               ) : (
                 <Navigation className="w-4 h-4 mr-2" />
               )}
-              {isLocating ? "Locating..." : "Use My Location"}
+              {isLocating ? "Locating..." : "I’m here"}
             </Button>
             <Button
               type="button"
