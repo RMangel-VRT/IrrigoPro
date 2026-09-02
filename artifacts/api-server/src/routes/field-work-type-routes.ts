@@ -41,7 +41,7 @@ function requireTenant(req: any, res: any): number | null | undefined {
 }
 
 /**
- * Which tenant's active registry the caller is asking about.
+ * Which tenant's registry the caller is asking about.
  *
  * Super Admin has no company of their own, so the unscoped read answers with
  * every tenant's work types. That matters because the location gate fails open
@@ -73,6 +73,19 @@ async function resolveActiveListScope(
     : null;
 }
 
+/**
+ * Whether the caller explicitly asked for the retired rows too.
+ *
+ * Default stays active-only so every existing caller keeps its behaviour. A
+ * caller that has to *render or evaluate* a code already stored on a record —
+ * rather than offer a choice — opts in and filters the active rows itself.
+ */
+function wantsRetired(req: any): boolean {
+  const raw = req.query?.includeRetired;
+  if (raw === true) return true;
+  return ["true", "1", "yes"].includes(String(raw ?? "").trim().toLowerCase());
+}
+
 export function registerFieldWorkTypeRoutes(
   app: Express,
   deps: FieldWorkTypeRouteDeps,
@@ -93,7 +106,7 @@ export function registerFieldWorkTypeRoutes(
       }
       if (companyId === undefined) return;
       try {
-        res.json(await routeStorage.getFieldWorkTypes(companyId, true));
+        res.json(await routeStorage.getFieldWorkTypes(companyId, !wantsRetired(req)));
       } catch (error: any) {
         res.status(500).json({ message: error?.message ?? "Failed to load field work types" });
       }

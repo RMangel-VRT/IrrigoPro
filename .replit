@@ -148,6 +148,10 @@ args = "migration-run-proof"
 task = "workflow.run"
 args = "migration-page-post-run-ui"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "retired-work-types"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -507,6 +511,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/irrigopro exec vitest run src/pages/admin/migrations-post-run.test.tsx src/pages/admin/migrations.test.tsx src/components/admin/migration-runner-mismatch.test.tsx"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "retired-work-types"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/routes/retired-work-type-rule-agreement.test.ts src/routes/field-work-type-routes.test.ts && pnpm --filter @workspace/irrigopro exec vitest run src/components/location/work-location-controls.test.tsx"
 
 [workflows.workflow.metadata]
 isValidation = true

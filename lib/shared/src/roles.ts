@@ -202,10 +202,16 @@ export const CAN_VIEW_COSTS = new Set<Role>([
   "billing_manager",
 ]);
 
-/** Maintain the company-scoped field work type registry. */
+/**
+ * Maintain the field work type registry.
+ *
+ * Work types are a preset list owned by code plus the seed migration, not
+ * per-company vocabulary. A company admin renaming a preset or flipping its
+ * requirement flags is exactly the silent per-company drift that decision rules
+ * out, so the capability is super admin only.
+ */
 export const CAN_MANAGE_FIELD_WORK_TYPES = new Set<Role>([
   "super_admin",
-  "company_admin",
 ]);
 
 /** Read the combined missing-location audit report. */

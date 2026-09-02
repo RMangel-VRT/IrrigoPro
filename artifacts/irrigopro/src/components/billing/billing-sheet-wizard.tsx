@@ -56,14 +56,14 @@ import {
 import { WizardSummaryStrip } from "@/components/work-orders/wizard/wo-summary-strip";
 import { WizardHeader } from "@/components/wizard-shared/wizard-header";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, useArrayQuery } from "@/lib/queryClient";
+import { apiRequest } from "@/lib/queryClient";
+import { useFieldWorkTypeRegistry } from "@/hooks/use-field-work-type-registry";
 import { safeGet } from "@/utils/safeStorage";
 import type {
   Customer,
   Part,
   BillingSheet,
   BillingSheetItem,
-  FieldWorkType,
 } from "@workspace/db/schema";
 import {
   canContinueFromLocationStep,
@@ -1240,12 +1240,15 @@ export function BillingSheetWizard({
   const existing = (draftData ?? fetched) as
     | (BillingSheet & { items?: BillingSheetItem[] })
     | undefined;
-  const { data: workTypes = [] } = useArrayQuery<FieldWorkType>({
-    queryKey: ["/api/field-work-types"],
+  // Same registry read as the location card in step 2 — same query key, so
+  // this shares its cache rather than fetching the table twice — and the same
+  // display-name resolver, so a code that is no longer offered reads as its
+  // real name in the preview and the summary strip instead of disappearing.
+  const { resolveLabel: resolveWorkTypeLabel } = useFieldWorkTypeRegistry({
+    customerId: customerStep.customer?.id ?? null,
     enabled: open,
   });
-  const selectedWorkTypeLabel =
-    workTypes.find((type) => type.code === locationStep.fieldWorkType)?.label ?? null;
+  const selectedWorkTypeLabel = resolveWorkTypeLabel(locationStep.fieldWorkType);
   // No role condition — see billing-sheet-wizard-gate.ts.
   const enforceBillingLocationGate = shouldEnforceWizardLocationGate(
     isEdit ? existing?.createdAt ?? null : new Date(),

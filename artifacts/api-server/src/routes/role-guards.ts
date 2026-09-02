@@ -173,11 +173,17 @@ export const requireQuickBooksAccess: Guard = (req, res, next) => {
   next();
 };
 
-/** Read or update the company-scoped field work type registry. */
+/**
+ * Read or update the field work type registry.
+ *
+ * Presets are owned by code plus the seed migration, so this is super admin
+ * only — see CAN_MANAGE_FIELD_WORK_TYPES.
+ */
 export const requireFieldWorkTypeAdmin: Guard = (req, res, next) => {
   if (!hasCapability(req.authenticatedUserRole, CAN_MANAGE_FIELD_WORK_TYPES)) {
     res.status(403).json({
-      message: "Access denied. Only company administrators can manage field work types.",
+      message:
+        "Access denied. Field work types are a preset list; only a super administrator can manage them.",
     });
     return;
   }

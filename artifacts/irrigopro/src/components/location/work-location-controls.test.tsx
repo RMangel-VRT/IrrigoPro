@@ -40,17 +40,29 @@ type Rule = {
   requiresController: boolean;
   requiresZone: boolean;
   requiresDetails: boolean;
+  active?: boolean;
 };
 
 const WORK_TYPES: Rule[] = [
-  { code: "zone_repair", label: "Zone Repair", requiresController: true, requiresZone: true, requiresDetails: false },
-  { code: "head_replacement", label: "Head Replacement", requiresController: true, requiresZone: true, requiresDetails: false },
-  { code: "valve_repair", label: "Valve Repair", requiresController: true, requiresZone: true, requiresDetails: false },
-  { code: "controller_repair", label: "Controller/Clock Repair", requiresController: true, requiresZone: false, requiresDetails: false },
-  { code: "backflow", label: "Backflow", requiresController: false, requiresZone: false, requiresDetails: false },
-  { code: "mainline_repair", label: "Mainline Repair", requiresController: false, requiresZone: false, requiresDetails: false },
-  { code: "other", label: "Other", requiresController: false, requiresZone: false, requiresDetails: true },
+  { code: "zone_repair", label: "Zone Repair", requiresController: true, requiresZone: true, requiresDetails: false, active: true },
+  { code: "head_replacement", label: "Head Replacement", requiresController: true, requiresZone: true, requiresDetails: false, active: true },
+  { code: "valve_repair", label: "Valve Repair", requiresController: true, requiresZone: true, requiresDetails: false, active: true },
+  { code: "controller_repair", label: "Controller/Clock Repair", requiresController: true, requiresZone: false, requiresDetails: false, active: true },
+  { code: "backflow", label: "Backflow", requiresController: false, requiresZone: false, requiresDetails: false, active: true },
+  { code: "mainline_repair", label: "Mainline Repair", requiresController: false, requiresZone: false, requiresDetails: false, active: true },
+  { code: "other", label: "Other", requiresController: false, requiresZone: false, requiresDetails: true, active: true },
 ];
+
+// A preset that has since been retired. It is still in the registry — records
+// carry its code — but nobody may choose it for new work.
+const RETIRED_ZONE_REPAIR: Rule = {
+  code: "zone_repair",
+  label: "Zone Repair",
+  requiresController: true,
+  requiresZone: true,
+  requiresDetails: false,
+  active: false,
+};
 
 const CONTROLLERS = [
   { controllerLetter: "A", zoneCount: 12 },
@@ -72,6 +84,10 @@ function emptyValue(
   };
 }
 
+function registryKey(customerId: number | null): string {
+  return `/api/field-work-types?customerId=${customerId ?? ""}&includeRetired=true`;
+}
+
 function renderControls(options: {
   value?: Partial<WorkLocationRequirementsValue>;
   workTypes?: Rule[];
@@ -85,8 +101,11 @@ function renderControls(options: {
     },
   });
   // Keyed per customer on purpose — see the Super Admin scoping test below.
+  // The read asks for the full registry (retired rows included) because a
+  // record may already carry a code that is no longer offered; what may be
+  // *chosen* is filtered out of that answer, not out of the request.
   client.setQueryData(
-    [`/api/field-work-types?customerId=${CUSTOMER_ID}`],
+    [registryKey(CUSTOMER_ID)],
     options.workTypes ?? WORK_TYPES,
   );
   client.setQueryData(["/api/properties", CUSTOMER_ID, "controllers"], CONTROLLERS);
@@ -166,8 +185,8 @@ describe("work type picker", () => {
         queries: { retry: false, staleTime: Infinity, refetchOnMount: false },
       },
     });
-    client.setQueryData(["/api/field-work-types"], WORK_TYPES); // another tenant's
-    client.setQueryData([`/api/field-work-types?customerId=${CUSTOMER_ID}`], []);
+    client.setQueryData([registryKey(null)], WORK_TYPES); // another tenant's
+    client.setQueryData([registryKey(CUSTOMER_ID)], []);
     client.setQueryData(["/api/properties", CUSTOMER_ID, "controllers"], CONTROLLERS);
 
     const onGateStateChange = vi.fn();
@@ -200,7 +219,7 @@ describe("work type picker", () => {
     expect(notice.textContent).toMatch(/not required|save without/i);
   });
 
-  it("still renders a stored code that is no longer offered", async () => {
+  it("still renders a stored code the registry has never heard of", async () => {
     renderControls({ value: { fieldWorkType: "retired_code" } });
 
     openSelect("select-work-type");
@@ -209,6 +228,58 @@ describe("work type picker", () => {
         screen.getByRole("option", { name: /retired_code \(no longer offered\)/ }),
       ).toBeInTheDocument();
     });
+  });
+
+  it("names a retired type instead of printing its database code", async () => {
+    // The registry knows the code; only its `active` flag has changed. Showing
+    // `zone_repair` where the seeded label reads "Zone Repair" makes the one
+    // place a retired type appears the one place it is unreadable.
+    renderControls({
+      workTypes: [RETIRED_ZONE_REPAIR, ...WORK_TYPES.filter((t) => t.code !== "zone_repair")],
+      value: { fieldWorkType: "zone_repair" },
+    });
+
+    openSelect("select-work-type");
+    await waitFor(() => {
+      expect(
+        screen.getByRole("option", { name: /^Zone Repair \(no longer offered\)$/ }),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("option", { name: /^zone_repair/ })).not.toBeInTheDocument();
+  });
+
+  it("never offers a retired type for new work", async () => {
+    const active = WORK_TYPES.filter((type) => type.code !== "zone_repair");
+    renderControls({ workTypes: [RETIRED_ZONE_REPAIR, ...active] });
+
+    openSelect("select-work-type");
+    await waitFor(() => {
+      expect(screen.getAllByRole("option").length).toBe(active.length);
+    });
+    // Not present at all: nothing on this record carries the retired code, so
+    // there is no reason to render it.
+    expect(
+      screen.queryByRole("option", { name: /Zone Repair/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("treats a company left holding only retired types as empty", async () => {
+    // Retired rows in the background must not make the registry look
+    // populated: nobody in this company can pick a work type, which is exactly
+    // the fact the server's active-only count fails open on.
+    const onGateStateChange = vi.fn();
+    renderControls({
+      workTypes: [RETIRED_ZONE_REPAIR],
+      value: { workLocation: null, fieldWorkType: null },
+      onGateStateChange,
+    });
+
+    expect(screen.getByTestId("text-work-types-unavailable")).toBeInTheDocument();
+    expect(screen.getByTestId("select-work-type")).toBeDisabled();
+    await waitFor(() => expect(onGateStateChange).toHaveBeenCalled());
+    const [complete, violations] = onGateStateChange.mock.calls.at(-1)!;
+    expect(violations).toEqual([]);
+    expect(complete).toBe(true);
   });
 });
 
@@ -247,6 +318,21 @@ describe("controller & zone visibility", () => {
       expect(screen.queryByTestId("controller-zone-section")).not.toBeInTheDocument();
     },
   );
+
+  it("keeps a retired type's own requirements visible", () => {
+    // Resolving a retired rule demands nothing new — exactly what it demanded
+    // the day the record was saved. Reading the active list here resolved no
+    // rule at all and hid the very fields the record depends on.
+    renderControls({
+      workTypes: [RETIRED_ZONE_REPAIR, ...WORK_TYPES.filter((t) => t.code !== "zone_repair")],
+      value: { fieldWorkType: "zone_repair" },
+    });
+
+    const section = screen.getByTestId("controller-zone-section");
+    expect(within(section).getByTestId("select-controller")).toBeInTheDocument();
+    expect(within(section).getByTestId("select-zone")).toBeInTheDocument();
+    expect(section).toHaveTextContent("(required by work type)");
+  });
 
   it("asks for details without an irrelevant controller & zone card", () => {
     renderControls({ value: { fieldWorkType: "other" } });
@@ -337,7 +423,7 @@ describe("legacy values the controller list disagrees with", () => {
         queries: { retry: false, staleTime: Infinity, refetchOnMount: false },
       },
     });
-    client.setQueryData(["/api/field-work-types"], WORK_TYPES);
+    client.setQueryData([registryKey(options.customerId ?? CUSTOMER_ID)], WORK_TYPES);
     client.setQueryData(
       ["/api/properties", options.customerId ?? CUSTOMER_ID, "controllers"],
       options.controllers,
@@ -447,6 +533,45 @@ describe("gate reporting", () => {
     await waitFor(() => expect(onGateStateChange).toHaveBeenCalled());
     const [complete, violations] = onGateStateChange.mock.calls.at(-1)!;
     expect(violations).toEqual(["pin_missing", "work_type_missing"]);
+    expect(complete).toBe(false);
+  });
+
+  it("passes a ticket saved complete under a since-retired type", async () => {
+    // The ticket was captured correctly and the report agrees it is complete.
+    // Resolving the retired rule is what stops the wizard blocking an edit on
+    // a work type that can no longer be re-selected.
+    const onGateStateChange = vi.fn();
+    renderControls({
+      workTypes: [RETIRED_ZONE_REPAIR, ...WORK_TYPES.filter((t) => t.code !== "zone_repair")],
+      value: {
+        fieldWorkType: "zone_repair",
+        workLocation: { lat: 39.7, lng: -104.9 },
+        controllerLetter: "A",
+        zoneNumber: 3,
+      },
+      onGateStateChange,
+    });
+
+    await waitFor(() => expect(onGateStateChange).toHaveBeenCalled());
+    const [complete, violations] = onGateStateChange.mock.calls.at(-1)!;
+    expect(violations).toEqual([]);
+    expect(complete).toBe(true);
+  });
+
+  it("still enforces a retired type's requirements when they are unmet", async () => {
+    const onGateStateChange = vi.fn();
+    renderControls({
+      workTypes: [RETIRED_ZONE_REPAIR, ...WORK_TYPES.filter((t) => t.code !== "zone_repair")],
+      value: {
+        fieldWorkType: "zone_repair",
+        workLocation: { lat: 39.7, lng: -104.9 },
+      },
+      onGateStateChange,
+    });
+
+    await waitFor(() => expect(onGateStateChange).toHaveBeenCalled());
+    const [complete, violations] = onGateStateChange.mock.calls.at(-1)!;
+    expect(violations).toEqual(["controller_missing", "zone_missing"]);
     expect(complete).toBe(false);
   });
 

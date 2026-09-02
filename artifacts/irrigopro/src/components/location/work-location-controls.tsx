@@ -1,6 +1,5 @@
 import { useEffect, useRef } from "react";
 import { Briefcase, Cpu, Droplets } from "lucide-react";
-import type { FieldWorkType } from "@workspace/db/schema";
 import {
   checkLocationGate,
   clearLocationFieldsForRule,
@@ -9,6 +8,7 @@ import {
   type LocationGateViolation,
 } from "@workspace/db/field-location-policy";
 import { useArrayQuery } from "@/lib/queryClient";
+import { useFieldWorkTypeRegistry } from "@/hooks/use-field-work-type-registry";
 import type { CustomerController } from "@/lib/controller-types";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -110,32 +110,25 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
       enabled: !!customerId,
     });
   const {
-    data: workTypes = [],
+    selectable: selectableWorkTypes,
+    resolveLabel: resolveWorkTypeLabel,
+    resolveRule: resolveWorkTypeRule,
     isLoading: workTypesLoading,
     isError: workTypesError,
-  } = useArrayQuery<FieldWorkType>({
-    // Scoped to the record's customer, not just to the signed-in company: a
-    // Super Admin has no company of their own, so an unscoped read answers
-    // with every tenant's work types and would re-impose a gate the server
-    // has already failed open on for this customer's empty tenant. For every
-    // other role the server ignores the parameter and stays tenant-scoped.
-    queryKey: [`/api/field-work-types?customerId=${customerId ?? ""}`],
-    enabled: !!customerId,
-  });
+  } = useFieldWorkTypeRegistry({ customerId });
 
   const selectedController = controllers.find(
     (controller) => controller.controllerLetter === value.controllerLetter,
   );
   const zoneCount = selectedController?.zoneCount ?? 0;
-  const selectedWorkType = workTypes.find((type) => type.code === value.fieldWorkType);
-  const selectedRule: FieldWorkTypeRule | null = selectedWorkType
-    ? {
-        code: selectedWorkType.code,
-        requiresController: selectedWorkType.requiresController,
-        requiresZone: selectedWorkType.requiresZone,
-        requiresDetails: selectedWorkType.requiresDetails,
-      }
-    : null;
+  // Two questions live a few lines apart here and must not be conflated:
+  // what the user may *choose* (the active list, below) and what the code
+  // already on this record *requires* (the full registry, here). A retired
+  // type resolves the rule it was saved under, matching the server gate and
+  // the Missing Location Data report.
+  const selectedRule: FieldWorkTypeRule | null = resolveWorkTypeRule(
+    value.fieldWorkType,
+  );
 
   // The registry is per-tenant, so "no work types" is a real configuration
   // state, not just a loading frame. Left unsaid it renders an empty menu that
@@ -144,8 +137,14 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
   // empty registry as "the gate does not apply" rather than as a requirement
   // this company has no way to satisfy. The server fails open on exactly the
   // same fact and audits the skip.
+  // Driven by the *selectable* list alone: a company left holding nothing but
+  // retired rows still has no work type anyone can pick, so it is empty here
+  // exactly as the server's active-only count reads it.
   const workTypesUnavailable =
-    !!customerId && !workTypesLoading && !workTypesError && workTypes.length === 0;
+    !!customerId &&
+    !workTypesLoading &&
+    !workTypesError &&
+    selectableWorkTypes.length === 0;
   const gateApplies = enforceLocationGate && !workTypesUnavailable;
   const workTypePlaceholder = !customerId
     ? "Pick a customer first"
@@ -158,10 +157,14 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
           : "Select work type";
   const workTypeDisabled =
     !customerId || workTypesLoading || workTypesError || workTypesUnavailable;
-  // A code stored on the record but missing from the active registry (renamed
-  // or deactivated) must still render, or the trigger goes blank again.
+  // A code stored on the record but no longer offered (renamed or retired)
+  // must still render, or the trigger goes blank again. It is added as an
+  // extra option purely so the record can display itself — never to make a
+  // retired type choosable for new work.
   const storedWorkTypeMissing =
-    !!value.fieldWorkType && !selectedWorkType && !workTypesLoading;
+    !!value.fieldWorkType &&
+    !selectableWorkTypes.some((type) => type.code === value.fieldWorkType) &&
+    !workTypesLoading;
 
   const visibility = resolveLocationFieldVisibility(selectedRule, {
     hasController: !!value.controllerLetter,
@@ -212,19 +215,11 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
   const handleWorkTypeChange = (nextCode: string) => {
     const code = nextCode === NONE_VALUE ? null : nextCode;
     const current = valueRef.current;
-    const nextRule = workTypes.find((type) => type.code === code) ?? null;
     // Values the new rule does not use are dropped here rather than in an
     // effect: clearing must follow an explicit choice by the user, never a
     // mount, so opening a legacy ticket can never quietly erase its data.
     const cleared = clearLocationFieldsForRule(
-      nextRule
-        ? {
-            code: nextRule.code,
-            requiresController: nextRule.requiresController,
-            requiresZone: nextRule.requiresZone,
-            requiresDetails: nextRule.requiresDetails,
-          }
-        : null,
+      resolveWorkTypeRule(code),
       { controllerLetter: current.controllerLetter, zoneNumber: current.zoneNumber },
     );
     onChange({
@@ -263,10 +258,11 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
           {!gateApplies && <SelectItem value={NONE_VALUE}>— None —</SelectItem>}
           {storedWorkTypeMissing && (
             <SelectItem value={value.fieldWorkType!}>
-              {value.fieldWorkType} (no longer offered)
+              {resolveWorkTypeLabel(value.fieldWorkType) ?? value.fieldWorkType}{" "}
+              (no longer offered)
             </SelectItem>
           )}
-          {workTypes.map((type) => (
+          {selectableWorkTypes.map((type) => (
             <SelectItem key={type.code} value={type.code}>
               {type.label}
             </SelectItem>
@@ -284,7 +280,7 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
           required here. You can save without one.
         </p>
       )}
-      {selectedWorkType?.requiresDetails && (
+      {selectedRule?.requiresDetails && (
         <div className="space-y-1">
           <Label htmlFor="field-work-type-details" className="text-xs text-gray-600">
             Work type details{" "}

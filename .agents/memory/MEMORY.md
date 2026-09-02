@@ -43,4 +43,5 @@
 - [Report links across role boundaries](report-links-role-boundaries.md) — a report-read capability must not expose a broader mutable ticket page just to make canonical links work.
 - [A run's own report is not evidence](migration-run-proof.md) — re-read status after commit, flag report-vs-reality mismatch, and invalidate the page's caches; nothing refreshes on its own.
 - [Gates over an empty tenant registry](gate-fail-open-empty-registry.md) — a requirement the tenant cannot satisfy is an outage; fail open on a confirmed-empty count and audit the skip.
+- [Work type selection vs resolution](work-type-selection-vs-resolution.md) — retired presets must still resolve rule+label everywhere; only selection and the fail-open count read active rows.
 - [Radix Select blank trigger](radix-select-sentinel-blank-trigger.md) — a sentinel value with no rendered item shows neither value nor placeholder; unseeded tenant option lists read as "won't open".

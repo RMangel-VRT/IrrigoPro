@@ -123,6 +123,23 @@ export async function countActiveFieldWorkTypes(
   return Number(row?.value ?? 0);
 }
 
+/**
+ * What a stored work type code demands — controller, zone, details.
+ *
+ * Deliberately reads the **full** registry, retired rows included. Selection is
+ * a different question from resolution: a retired type can never be chosen for
+ * new work, so resolving its rule cannot loosen or tighten anything going
+ * forward. It only lets a record that already carries the code be evaluated
+ * against exactly the requirements it was saved under. Filtering to active rows
+ * here made the save-time gate read "no rule" for such a record and reject it
+ * as "work type missing", while the Missing Location Data report — which reads
+ * the full registry — insisted the same ticket was complete. All three
+ * resolvers (report, server gate, client gate) now answer identically.
+ *
+ * The active-only *count* in `countActiveFieldWorkTypes` is unrelated and stays
+ * active-only: "can anyone in this company still pick a work type?" is what the
+ * empty-registry fail-open asks, and retired rows must not answer yes to it.
+ */
 export async function getFieldWorkTypeRule(
   companyId: number | null,
   code: string | null | undefined,
@@ -138,7 +155,6 @@ export async function getFieldWorkTypeRule(
     .from(fieldWorkTypes)
     .where(and(
       eq(fieldWorkTypes.code, code.trim()),
-      eq(fieldWorkTypes.active, true),
       ...(companyId == null ? [] : [eq(fieldWorkTypes.companyId, companyId)]),
     ))
     .limit(1);
