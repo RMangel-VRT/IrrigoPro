@@ -1,0 +1,100 @@
+# Billing PDF Site Panel - Design Context (Locked Decisions)
+
+Family overview. Read this before any slice in the `Billing PDF Site Panel` family.
+Supersedes the header treatment introduced by
+`Billing PDF - Add Location + Clock (Controller) and Zone to Each Ticket.md`.
+
+Slices, in build order:
+
+1. `Billing PDF Site Panel - Slice 1 Reconciliation Pagination Hardening.md`
+2. `Billing PDF Site Panel - Slice 2 Font-Independent Icons.md`
+3. `Billing PDF Site Panel - Slice 3 Canonical Site Panel.md`
+4. `Billing PDF Site Panel - Slice 4 QR Pin Assets.md`
+
+Each slice ships independently and leaves the packet coherent. Do not merge them into
+one task. Slice 3 depends on Slice 2 (it consumes the icon constants). Slice 4 depends
+on Slice 3 (it fills a cell the panel already reserves). Slices 1 and 2 depend on
+nothing and can run in either order.
+
+---
+
+## Locked decisions
+
+Decided by Randy, 2026-09-01, reviewing the invoice #57482 packet. These are settled.
+A slice that reaches a fork already answered here follows the answer; it does not
+re-litigate and does not substitute an alternative it considers better.
+
+1. **Placement (decided).** The site block moves **out of the colored header band**
+   into its **own full-width panel directly below the header**, above WORK PERFORMED.
+   The band returns to identity only: logo, ticket number + invoice number, then
+   date / technician / hours. Nothing else lives in the band.
+2. **Highlighting (decided).** The panel carries a left accent bar in the ticket's own
+   `JOB_TYPE_COLORS` value, so each ticket's site reads as a distinct, deliberate
+   element. Randy's requirement was that it be "aesthetically highlighted for each
+   ticket" — the per-type accent is how that is satisfied. Not a floating card, not a
+   drop shadow, not a second colored band.
+3. **Map treatment (decided).** Coordinates text **plus** one "Open in Maps" link
+   **plus** a QR code encoding that same URL. **No** tile provider, **no** API key,
+   **no** embedded map image, **no** network call during PDF rendering. A proposal to
+   render a static map thumbnail was considered and rejected.
+4. **Scope (decided).** The invoice packet only: work order, billing sheet, and
+   wet-check billing ticket pages, plus the reconciliation summary page. The estimate
+   PDF and the wet check results report keep their current layout.
+5. **Rule 1 (multi-tenancy) applies.** Every value feeding the panel already arrives
+   company-scoped through the existing PDF view model. No slice in this family adds a
+   query, and no slice widens an existing one. The QR encodes only coordinates already
+   present on the ticket row.
+6. **Rule 4 (field capture) applies.** These slices render what exists and omit what
+   does not. Missing controller/zone is a field-capture problem, not a PDF problem. No
+   slice here invents a value, substitutes a placeholder, writes "N/A", or backfills.
+   Slice 3 adds a counter so the gap is measurable.
+7. **No emoji entities in PDF output.** See Slice 2. This is now a standing constraint
+   on this renderer, not a one-time cleanup.
+
+---
+
+## Out of scope for the whole family
+
+- Estimate PDF (`estimate-pdf-html.ts`) and the wet check results report.
+- Controllers, `irrigation_zones`, and the `/site-maps` feature. These slices **read**
+  `controllerLetter` and `zoneNumber` off the ticket row and touch nothing else.
+- New coordinate capture, controller/zone persistence, source-data repair, production
+  backfills, or migrations of any kind.
+- Invoice calculations, ticket financial content, the parts tables, photo handling, the
+  cover page, and branding outside the panel.
+- Regeneration policy for already-archived PDFs. Existing archived files are left alone.
+
+---
+
+## Shared context every slice needs
+
+**The renderer.** Invoice PDFs are HTML rendered by headless Chromium
+(`chromium-resolver.ts`). Layout is CSS in the `pdfStyles` template function in
+`pdf-helpers.ts`, which destructures brand colors as `{ navy, brown, green, black, gray }`
+and imports `JOB_TYPE_COLORS` (keys `workOrder`, `billingSheet`, `wetCheck`) from
+`@workspace/shared`.
+
+**The three ticket builders.** `ticketPageWO`, `ticketPageBS`, and `ticketPageWCB` in
+`pdf-helpers.ts` are **synchronous string functions**. Anything requiring async work —
+photo data URIs today, QR data URIs in Slice 4 — is resolved upstream in
+`pdf-generator.ts` and passed in as an already-resolved value. Do not make a ticket
+builder async.
+
+**The site metadata contract.** `pdf-site-metadata.ts` exports `buildPdfSiteMetadata`
+and `pdfControllerZoneText`. Both are already used by the invoice ticket builders and
+by `estimate-pdf-html.ts`. **No slice in this family changes their signatures or
+behavior.** Address precedence, escaping, controller/zone summarization, and clean
+omission of absent values are existing, tested behavior — the panel consumes that
+contract exactly as the header did. If a slice appears to need a change there, stop and
+raise it rather than editing it.
+
+**The snapshot.** `artifacts/api-server/src/__snapshots__/pdf-ticket-parity.test.ts.snap`
+holds committed ticket HTML. Slices 2, 3, and 4 all change rendered markup and will
+break it. Each slice updates the snapshot **as a reviewed diff** — read what changed and
+confirm it is only the intended markup. Do not regenerate it blind with `-u` as the
+first move.
+
+**Known drift.** The deployed billing-sheet header renders a
+`Pin <lat>, <lng> · Open in Maps` line that does **not** appear in `ticketPageBS` in the
+working checkout. Something else emits it. Slice 3 owns finding and consolidating it.
+Do not leave a second pin renderer in the codebase.

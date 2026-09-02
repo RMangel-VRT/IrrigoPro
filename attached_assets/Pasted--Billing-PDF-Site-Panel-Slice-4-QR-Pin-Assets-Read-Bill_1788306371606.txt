@@ -1,0 +1,176 @@
+# Billing PDF Site Panel - Slice 4 QR Pin Assets
+
+Read `Billing PDF Site Panel - Design Context (Locked Decisions).md` first.
+
+**Depends on:** Slice 3. The panel already reserves `ticket-site-qr`; this slice fills
+it. Do not start before Slice 3 has shipped and been reviewed.
+
+---
+
+## Why
+
+An invoice packet is frequently printed or forwarded as a PDF to a board member who is
+not the person who can click a link. A printed "Open in Maps" link is dead text. A QR
+gets a phone to the exact dropped pin from a paper page.
+
+**Decided:** QR generated locally, no map tiles, no API key, no network call during
+render. This was chosen over a static map thumbnail specifically to avoid a render-time
+external dependency in a code path that must never fail.
+
+---
+
+## The constraint that shapes the whole slice
+
+`ticketPageWO`, `ticketPageBS` and `ticketPageWCB` are **synchronous string functions**.
+QR generation is async. Therefore the QR data URI is resolved **upstream** in
+`pdf-generator.ts` and passed into the builder as an already-resolved string — exactly
+the pattern `photoDataUris` already uses.
+
+Do not make a ticket builder async. Do not call a promise-returning function inside a
+template literal. Do not reach for a sync QR library to dodge the pattern; the async
+resolution point is the correct architecture here and it already exists for photos.
+
+---
+
+## Files
+
+- `artifacts/api-server/package.json` — add `qrcode` and `@types/qrcode`
+- `pnpm-lock.yaml` — regenerated
+- `artifacts/api-server/src/pdf-generator.ts` — resolve QR data URIs
+- `artifacts/api-server/src/pdf-helpers.ts` — render the QR cell, add CSS
+- `artifacts/api-server/src/pdf-site-panel.test.ts` — extend
+- `artifacts/api-server/src/__snapshots__/pdf-ticket-parity.test.ts.snap` — reviewed update
+
+---
+
+## Concrete changes
+
+### a. Dependency
+
+Add `qrcode` (pure JS, no native build, no network) and `@types/qrcode` to
+`artifacts/api-server/package.json`. Install with pnpm so `pnpm-lock.yaml` regenerates
+in the same commit.
+
+### b. Resolve upstream
+
+In `pdf-generator.ts`, where ticket rows are prepared and photo data URIs are already
+being resolved, add QR resolution for every row that has a valid pin. Use the **same**
+map URL expression Slice 3 built for the link — extract it to a small shared helper if it
+is not already one, so the link and the QR cannot drift apart:
+
+```ts
+const qrDataUri = await QRCode.toDataURL(mapUrl, {
+  margin: 0,
+  width: 148,
+  errorCorrectionLevel: 'M',
+});
+```
+
+Parameter rationale, so these are not casually changed:
+
+- `margin: 0` — the panel supplies its own spacing; the library's default quiet zone
+  would shrink the modules and hurt scannability at 74px.
+- `width: 148` — rendered at 74 CSS px, so 2x for print. A 74px-wide QR generated at
+  74px prints soft at 200+ DPI.
+- `errorCorrectionLevel: 'M'` — a coordinate URL is short; M gives comfortable damage
+  tolerance for a folded or scuffed printed page without inflating module count.
+
+Resolve QRs for the packet **concurrently** (`Promise.all` over the rows that have pins),
+not sequentially in the row loop. A 15-page packet should not serialize 14 QR
+generations.
+
+### c. Failure must never be fatal
+
+Wrap each generation in try/catch. On failure: log at warn level with the invoice number
+and ticket reference, pass `null`, and continue. The panel then renders coordinates and
+the "Open in Maps" link with no QR cell — which is exactly the Slice 3 state, already
+tested.
+
+A QR failure must never fail the PDF, never produce a broken-image placeholder, and never
+substitute a text stand-in.
+
+### d. Render the cell
+
+In `ticketSitePanel`, render `ticket-site-qr` only when `opts.qrDataUri` is a non-empty
+string:
+
+```html
+<div class="ticket-site-qr">
+  <img src="{qrDataUri}" alt="" class="ticket-site-qr-img">
+  <div class="ticket-site-qr-caption">Scan for pin</div>
+</div>
+```
+
+`alt=""` — the QR is decorative relative to the coordinates and link, which carry the
+same information as text directly above it.
+
+CSS:
+
+```css
+.ticket-site-qr { text-align: center; flex-shrink: 0; }
+
+.ticket-site-qr-img {
+  width: 74px;
+  height: 74px;
+  display: block;
+  image-rendering: pixelated;
+}
+
+.ticket-site-qr-caption {
+  font-size: 8px;
+  color: #6b7280;
+  margin-top: 2px;
+  letter-spacing: 0.3px;
+}
+```
+
+`image-rendering: pixelated` keeps module edges crisp when Chromium scales the 148px
+source down to 74px. Without it, smoothing blurs module boundaries and low-end phone
+scanners start failing on the printed page.
+
+`flex-shrink: 0` pairs with the `min-width: 0` Slice 3 put on `.ticket-site-main`: a long
+address wraps rather than squeezing the QR below scannable size.
+
+### e. Do not change the panel's data rules
+
+Coords, link and QR all appear together or not at all. Slice 3 already gates on both lat
+and lng being present and finite; this slice adds no second gate and no separate QR
+condition beyond generation having succeeded.
+
+---
+
+## Tests
+
+Extend `pdf-site-panel.test.ts`:
+
+1. `qrDataUri` provided: `ticket-site-qr` renders with the data URI as the `img` `src`.
+2. `qrDataUri` null or empty string: no `ticket-site-qr` element, and coords plus link
+   still render.
+3. No pin at all: no QR cell regardless of what `qrDataUri` holds.
+4. The QR encodes the same URL as the link — decode the generated data URI in the test
+   (or assert both were built from the same URL expression) and assert equality with the
+   `href`. This is the assertion that catches drift between the two.
+
+New coverage in a generator-level test:
+
+5. `QRCode.toDataURL` stubbed to reject for one row: PDF generation completes, the
+   affected ticket renders coords and link without a QR, other tickets in the same
+   packet still render their QRs, and a warn-level log names the invoice and ticket.
+6. QR resolution is concurrent, not serial — assert generation was invoked for all
+   pinned rows before any awaited completion, or assert via a timing/ordering stub.
+
+Update the snapshot as a reviewed diff: the expected change is one QR block added per
+pinned ticket page and nothing else.
+
+## Acceptance checklist
+
+- [ ] Regenerate invoice #57482. Pinned tickets show a QR beside the site details.
+- [ ] Scan the QR with a phone. It opens the same location the "Open in Maps" link does.
+- [ ] Print a page and scan from paper. It still resolves.
+- [ ] A ticket without a pin shows no QR, no caption, no reserved empty space.
+- [ ] A long address wraps; it never squeezes the QR below 74px.
+- [ ] Forced QR failure: PDF still generates, coords and link intact, warning logged, no
+      broken-image icon.
+- [ ] No network request is made during PDF rendering. Verify, do not assume.
+- [ ] `pnpm-lock.yaml` is committed with the dependency change.
+- [ ] Snapshot diff read line by line and contains only the added QR blocks.

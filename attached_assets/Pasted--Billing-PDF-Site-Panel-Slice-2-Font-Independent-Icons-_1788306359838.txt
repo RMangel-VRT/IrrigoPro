@@ -1,0 +1,139 @@
+# Billing PDF Site Panel - Slice 2 Font-Independent Icons
+
+Read `Billing PDF Site Panel - Design Context (Locked Decisions).md` first.
+
+**Depends on:** nothing. **Slice 3 depends on this** — the panel consumes the icon
+constants this slice introduces. Ship it before Slice 3.
+
+---
+
+## The defect
+
+Every ticket page in every invoice packet renders an empty rectangle where an icon
+should be. On invoice #57482 the work order header reads
+`▯ C/O Advance HOA Management Denver CO 80237` and the billing sheet header reads
+`▯ East 119th Place, Thornton, ...`.
+
+## Root cause
+
+The ticket builders prefix header lines with emoji HTML entities:
+
+- `&#128205;` (round pushpin) before the location, in `ticketPageWO`, `ticketPageBS`
+  and `ticketPageWCB`
+- `&#127970;` (office building) before the branch, in all three
+- `&#128336;` (clock face one oclock) before the controller/zone text, in
+  `ticketPageWO` and `ticketPageBS`
+
+`pdfStyles` sets:
+
+```css
+font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+             'Helvetica Neue', Arial, sans-serif;
+```
+
+There is no emoji family in that stack, and the headless Chromium image that renders
+these PDFs has no emoji font installed. Every one of these codepoints falls through to
+the missing-glyph box. This is not a viewer artifact and not intermittent — it is every
+packet, every ticket, every time.
+
+**Adding an emoji font to the stack is not the fix.** It would make output depend on
+what is installed in a container we do not control, and would silently regress the next
+time that image changes. Inline SVG needs no font.
+
+---
+
+## Files
+
+- `artifacts/api-server/src/pdf-helpers.ts` — icon constants, the three ticket builders,
+  `pdfStyles`
+- `artifacts/api-server/src/__snapshots__/pdf-ticket-parity.test.ts.snap` — reviewed
+  update
+- `artifacts/api-server/src/pdf-ticket-parity.test.ts` — new assertion
+
+## Concrete changes
+
+**a. Add three icon constants** near the top of `pdf-helpers.ts`, beside the existing
+shared constants:
+
+```ts
+const ICON_PIN = `<svg class="tk-icon" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M12 2a7 7 0 0 0-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg>`;
+const ICON_BRANCH = `<svg class="tk-icon" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M3 21V7l7-4 7 4v3h4v11h-6v-5h-3v5H3zm4-6h2v-2H7v2zm0-4h2V9H7v2zm4 4h2v-2h-2v2zm0-4h2V9h-2v2z"/></svg>`;
+const ICON_CLOCK = `<svg class="tk-icon" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 10.6V6h-2v7.4l5 3 1-1.7-4-2.1z"/></svg>`;
+```
+
+Three requirements on these, whatever the exact path data:
+
+- `fill="currentColor"` so each icon inherits the color of its context. Slice 3 places
+  them on a light panel where they must read as dark; today they sit on a colored band
+  where they must read as light. `currentColor` makes both work with no second variant.
+- No `<style>`, no CSS classes referenced from inside the SVG, no external `<use>`.
+  Self-contained markup only.
+- `aria-hidden="true"` — the adjacent text already carries the meaning.
+
+**b. Add one CSS rule** to `pdfStyles`:
+
+```css
+.tk-icon {
+  display: inline-block;
+  vertical-align: -2px;
+  margin-right: 5px;
+  flex-shrink: 0;
+}
+```
+
+`vertical-align: -2px` optically centers a 12px icon against 11-13px text; without it
+the icon sits on the baseline and reads as too high. `flex-shrink: 0` matters because
+Slice 3 puts these inside flex rows.
+
+**c. Replace every emoji entity in ticket output.** In `ticketPageWO`, `ticketPageBS`
+and `ticketPageWCB`, swap `&#128205;` for `${ICON_PIN}`, `&#127970;` for
+`${ICON_BRANCH}`, and `&#128336;` for `${ICON_CLOCK}`. This slice does **not** move any
+markup — the lines stay exactly where they are in the header band. Only the glyph
+changes. Moving them is Slice 3's job, and keeping the two changes separate is what
+makes the snapshot diff readable.
+
+**d. Sweep the whole file, not just the three call sites.** Grep `pdf-helpers.ts` for
+`&#1` and inspect every hit. Known additional entities:
+
+- `&#9888;` (warning sign) in the photo-failure warnings, in all three builders
+- `&#9432;` (circled information source) in the stale-labor note in
+  `partsBlockForWetCheckBS`
+
+Both are outside the Basic Multilingual Plane's well-covered range and are **likely**
+boxing too, but unlike the three above this has not been visually confirmed. Render a
+packet that triggers each — a ticket with an unloadable photo, and a wet-check billing
+sheet with `zonesHaveStaleLaborData` true — and look. If they box, replace them with
+`ICON_WARNING` and `ICON_INFO` built the same way. If they render, leave them and note
+in the PR that they were checked.
+
+**e. Do not touch `estimate-pdf-html.ts` or the wet check report.** Out of family scope.
+If they carry the same bug, that is a separate ticket.
+
+---
+
+## Tests
+
+1. In `pdf-ticket-parity.test.ts`, add `renders no emoji entities in ticket output`:
+   render one ticket of each of the three types and assert the combined HTML contains
+   none of `&#128205;`, `&#127970;`, `&#128336;`. Assert on the **entity strings**, not
+   the decoded characters — the entity is what the code emits.
+2. Add `renders an inline icon beside the location`: assert each ticket type's output
+   contains `class="tk-icon"` at least once.
+3. Assert `pdfStyles` output contains a `.tk-icon` rule.
+4. Update `__snapshots__/pdf-ticket-parity.test.ts.snap`. **Review the diff before
+   accepting it.** The only changes should be entity-to-SVG swaps on the location,
+   branch and controller/zone lines. If the diff touches financial rows, parts tables,
+   photo markup, or anything structural, something else changed and the snapshot must
+   not be accepted.
+
+## Acceptance checklist
+
+- [ ] Regenerate invoice #57482. No empty boxes anywhere in the packet.
+- [ ] Pin, branch and clock render as recognizable icons on all three ticket types.
+- [ ] Icons are legible against the colored band — the light-on-dark case works via
+      `currentColor` with no second icon variant.
+- [ ] The warning and info entities were rendered and visually checked; the PR states
+      the result either way.
+- [ ] No markup moved in this slice. Positions are identical to before; only glyphs
+      changed.
+- [ ] The snapshot diff was read line by line and contains only the intended swaps.

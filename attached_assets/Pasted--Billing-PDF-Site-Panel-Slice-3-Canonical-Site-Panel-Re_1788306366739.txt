@@ -1,0 +1,281 @@
+# Billing PDF Site Panel - Slice 3 Canonical Site Panel
+
+Read `Billing PDF Site Panel - Design Context (Locked Decisions).md` first.
+
+**Depends on:** Slice 2 (consumes `ICON_PIN`, `ICON_BRANCH`, `ICON_CLOCK` and `.tk-icon`).
+**Slice 4 depends on this** — it fills a cell this slice already reserves.
+
+This is the slice Randy asked for. It is the largest of the four. Do not fold Slice 4
+into it; the panel must ship and be reviewable without a QR code present.
+
+---
+
+## The defect
+
+All three ticket builders emit the site information inside the colored identity band as
+three sibling divs:
+
+```html
+<div class="ticket-header-line3">{icon} {location}</div>
+<div class="ticket-header-branch">{icon} Branch: {branch}</div>
+<div class="ticket-header-branch">{icon} {controller/zone text}</div>
+```
+
+styled as:
+
+```css
+.ticket-header-line3 { font-size: 11px; color: rgba(255,255,255,0.75); line-height: 1.3; }
+.ticket-header-branch { font-size: 11px; font-weight: 600; color: rgba(255,255,255,0.95); }
+```
+
+Three problems compound. The address renders at 11px and 75% white on a saturated navy
+or brown ground — the least legible text on the page. Branch and controller/zone share a
+single class, so two semantically different facts look identical and the reader gets no
+hierarchy. And the whole block sits below the date/tech/hours line, reading as trailing
+header metadata rather than as the site the charge applies to.
+
+For a property manager approving a charge, the address is the most operationally useful
+fact on the page. It is currently the hardest thing on it to read.
+
+---
+
+## Files
+
+- `artifacts/api-server/src/pdf-helpers.ts` — new shared renderer, three builders,
+  `pdfStyles`
+- `artifacts/api-server/src/pdf-generator.ts` — pass through lat/lng and the
+  missing-metadata counter
+- `artifacts/api-server/src/pdf-ticket-parity.test.ts` and its snapshot
+- `artifacts/api-server/src/pdf-helpers-wcb.test.ts`
+- `artifacts/api-server/src/pdf-site-panel.test.ts` (new)
+
+`pdf-site-metadata.ts` is **read but not modified**. See Design Context.
+
+---
+
+## Concrete changes
+
+### a. One renderer, three call sites
+
+Add a single exported function to `pdf-helpers.ts`:
+
+```ts
+export function ticketSitePanel(
+  site: PdfSiteMetadata,
+  jobType: JobTypeKey,
+  opts?: {
+    lat?: string | number | null;
+    lng?: string | number | null;
+    qrDataUri?: string | null;   // always undefined until Slice 4
+    locationNotes?: string | null;
+  },
+): string
+```
+
+All three builders call it and **delete** their `ticket-header-line3` and both
+`ticket-header-branch` divs. The header band is then exactly `logo`,
+`ticket-header-line1`, `ticket-header-line2` and nothing else.
+
+This is the one canonical site renderer in the invoice packet. No builder keeps a
+private copy, and no builder adds a field the others do not get. Where the three
+builders differ today they must stop differing: `ticketPageWO` appends `wo.locationNotes`
+to the location with an em dash and the other two do not; `ticketPageWCB` never renders
+controller/zone at all even though the other two do. Both differences are unintentional.
+Route `locationNotes` through `opts` for all three, and render controller/zone for all
+three via `pdfControllerZoneText(site)`.
+
+`ticketSitePanel` returns `''` when there is nothing to show — no location, no branch, no
+controller/zone text, no pin. An empty tinted rectangle is worse than no panel.
+
+### b. Panel markup
+
+```html
+<div class="ticket-site ticket-site-{wo|bs|wcb}">
+  <div class="ticket-site-main">
+    <div class="ticket-site-label">SITE</div>
+    <div class="ticket-site-address">{ICON_PIN} {location}</div>
+    <div class="ticket-site-meta">
+      <span class="ticket-site-chip">{ICON_BRANCH} Branch: {branch}</span>
+      <span class="ticket-site-chip">{ICON_CLOCK} {controller/zone text}</span>
+      <span class="ticket-site-coords">{lat}, {lng}</span>
+    </div>
+    <div class="ticket-site-link"><a href="{mapUrl}">Open in Maps</a></div>
+  </div>
+  <div class="ticket-site-qr"><!-- Slice 4 --></div>
+</div>
+```
+
+Every chip renders only when its own value exists. `ticket-site-meta` is omitted
+entirely when all three of its children are absent, so it never collapses to an empty
+flex row with residual gap. `ticket-site-qr` is omitted in this slice; Slice 4 adds it.
+
+Escaping: pass values through the same escaping the header used. `locationNotes` is
+free text and must be escaped.
+
+Coordinate normalization: format both to six decimal places, matching
+`estimate-pdf-html.ts` (`parseFloat(String(lat)).toFixed(6)`). Render the pin only when
+**both** lat and lng are present and parse to finite numbers — a row with one of the two
+renders no coords, no link, no QR.
+
+Map URL: `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`, built once and
+used by both the link and (in Slice 4) the QR. One expression, one source of truth — the
+QR and the link must never be able to disagree.
+
+### c. Panel CSS
+
+Add to `pdfStyles`:
+
+```css
+.ticket-site {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 10px 14px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-top: none;
+  border-left: 4px solid ${navy};
+  page-break-inside: avoid;
+  break-inside: avoid;
+  page-break-after: avoid;
+  break-after: avoid;
+}
+
+.ticket-site-main { flex: 1; min-width: 0; }
+
+.ticket-site-label {
+  font-size: 8px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: ${navy};
+  margin-bottom: 3px;
+}
+
+.ticket-site-address {
+  font-size: 13px;
+  font-weight: 700;
+  color: ${black};
+  line-height: 1.35;
+}
+
+.ticket-site-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+}
+
+.ticket-site-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: #374151;
+  background: #eef2f7;
+  border-radius: 3px;
+  padding: 2px 7px;
+}
+
+.ticket-site-coords {
+  font-size: 10px;
+  color: #6b7280;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.ticket-site-link { margin-top: 4px; font-size: 10px; }
+.ticket-site-link a { color: ${navy}; text-decoration: underline; }
+
+.ticket-site-wo { border-left-color: ${JOB_TYPE_COLORS.workOrder}; }
+.ticket-site-bs { border-left-color: ${JOB_TYPE_COLORS.billingSheet}; }
+.ticket-site-wcb { border-left-color: ${JOB_TYPE_COLORS.wetCheck}; }
+.ticket-site-wo .ticket-site-label { color: ${JOB_TYPE_COLORS.workOrder}; }
+.ticket-site-bs .ticket-site-label { color: ${JOB_TYPE_COLORS.billingSheet}; }
+.ticket-site-wcb .ticket-site-label { color: ${JOB_TYPE_COLORS.wetCheck}; }
+```
+
+Notes on specific values, so they are not "improved" arbitrarily:
+
+- `border-top: none` plus the existing `.ticket-header` bottom border makes the panel
+  read as a continuation of the band rather than a detached card. This is decision 2.
+- The address at **13px/700/`${black}`** against the old **11px/`rgba(255,255,255,0.75)`**
+  is the entire point of the slice. Do not reduce it.
+- `.ticket-header` already carries `break-after: avoid`; the panel's
+  `break-inside: avoid` completes the pairing so header and panel cannot separate.
+  `break-after: avoid` on the panel additionally keeps WORK PERFORMED's first line with
+  it where possible.
+- `min-width: 0` on `.ticket-site-main` prevents a long unbroken address from forcing
+  the QR cell off the page in Slice 4.
+
+### d. Consolidate the drifted pin renderer
+
+The deployed billing-sheet header shows `Pin <lat>, <lng> · Open in Maps` that is not in
+`ticketPageBS` in the checkout. Find what emits it — grep the api-server source for
+`Open in Maps`, `maps/search`, and `Pin ` — and remove it in favor of the panel. Ending
+this slice with two pin renderers in the tree is a failure of the slice, not a follow-up.
+
+### e. Observability for missing controller/zone
+
+Neither ticket sampled from #57482 rendered a controller/zone line, because
+`controllerLetter` / `zoneNumber` were null on those rows. Per Rule 4 that belongs to
+field capture, not here.
+
+In `pdf-generator.ts`, while assembling ticket pages, count rows where
+`pdfControllerZoneText(site)` is empty and log once per packet at info level:
+
+```
+[pdf] invoice {invoiceNumber}: {n}/{total} ticket rows missing controller/zone
+```
+
+One line per packet, not per row. This makes the gap measurable without changing any
+rendering behavior. Do not add a warning banner to the PDF.
+
+---
+
+## Tests
+
+New `pdf-site-panel.test.ts`:
+
+1. Renders for each of `wo` / `bs` / `wcb` with the correct `ticket-site-{type}` class.
+2. Full data: address, both chips, coords and link all present.
+3. No branch: branch chip absent, controller/zone chip still present.
+4. No controller/zone: that chip absent, branch chip still present.
+5. Neither branch nor controller/zone: `ticket-site-meta` absent entirely when there are
+   also no coords.
+6. No pin: no coords, no link, no `ticket-site-qr`.
+7. Only one of lat/lng present: treated as no pin.
+8. Nothing at all: returns `''`.
+9. `locationNotes` present: appended and escaped.
+10. Coordinates formatted to six decimals.
+11. Link URL matches the `maps/search/?api=1&query=` form exactly.
+
+Extend `pdf-ticket-parity.test.ts`:
+
+12. No ticket output contains `ticket-header-line3` or `ticket-header-branch`.
+13. Each ticket page contains exactly **one** `ticket-site` block.
+14. All three ticket types render controller/zone when the data is present — this is the
+    `ticketPageWCB` gap closing.
+15. `pdfStyles` contains the break declarations on `.ticket-site`.
+
+Extend `pdf-helpers-wcb.test.ts` for the wet-check builder's panel specifically.
+
+Update `__snapshots__/pdf-ticket-parity.test.ts.snap` as a reviewed diff: the expected
+change is removal of three header divs and addition of one panel block per ticket page.
+Anything beyond that means something unintended moved.
+
+## Acceptance checklist
+
+- [ ] Header band on all three ticket types shows only logo, ID line, date/tech/hours.
+- [ ] Panel sits flush beneath the band, full width, left accent in the ticket's job-type
+      color, address at 13px full-contrast.
+- [ ] Branch and controller/zone read as separate chips, not identical stacked lines.
+- [ ] Controller/zone now renders on wet-check billing tickets too.
+- [ ] `locationNotes` renders consistently across all three types.
+- [ ] Header and panel never separate across a page break, on any ticket.
+- [ ] A ticket with no site data renders no panel and no gap where one would be.
+- [ ] Exactly one pin renderer exists in the codebase after this slice.
+- [ ] The packet log line reports the missing controller/zone count for #57482.
+- [ ] `pdf-site-metadata.ts` is unchanged.
+- [ ] Snapshot diff read line by line and contains only the intended structural change.

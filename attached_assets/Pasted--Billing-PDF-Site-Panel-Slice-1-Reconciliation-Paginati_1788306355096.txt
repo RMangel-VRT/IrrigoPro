@@ -1,0 +1,120 @@
+# Billing PDF Site Panel - Slice 1 Reconciliation Pagination Hardening
+
+Read `Billing PDF Site Panel - Design Context (Locked Decisions).md` first.
+
+**Depends on:** nothing. Ship this first — it is CSS only and fixes a visible defect in
+every multi-page invoice today.
+
+---
+
+## The defect
+
+On invoice #57482, the reconciliation summary totals card splits across a page break.
+"Total Labor" and "Total Parts" render at the bottom of page 2 inside a rounded box
+whose bottom border is clipped mid-stroke; "Invoice Total" then renders at the top of
+page 3 inside a **second** fragment of the same box, with its own top border. The
+reader sees two half-drawn boxes and a total detached from its components.
+
+## Root cause
+
+`.recon-totals-box` in `pdfStyles` (`pdf-helpers.ts`, around line 1960) is:
+
+```css
+.recon-totals-box {
+  border: 2px solid ${navy};
+  border-radius: 8px;
+  padding: 18px 22px;
+  background: ${gray};
+  max-width: 360px;
+  margin-left: auto;
+}
+```
+
+It has no break control at all. Chromium is free to fragment it, and a fragmented
+element with a border and radius paints a border on **each** fragment — which is why
+the artifact reads as two boxes rather than one box with a seam.
+
+`reconciliationPage` has two code paths (the branch-grouped variant around line 909 and
+the flat variant around line 1040). **Both emit the same `.recon-totals-box` markup**,
+so a single CSS rule fixes both. Do not fix one path in JS.
+
+Two adjacent elements have the same exposure and are fixed in the same pass:
+`.recon-grand-total` (the GRAND TOTAL table row, which carries its own heavy borders)
+and ordinary `.recon-table tbody tr` rows.
+
+---
+
+## Files
+
+- `artifacts/api-server/src/pdf-helpers.ts` — the reconciliation block of `pdfStyles`
+  only. No JS in this slice.
+
+## Concrete changes
+
+**a. Keep the totals box whole.** Add to `.recon-totals-box`:
+
+```css
+page-break-inside: avoid;
+break-inside: avoid;
+```
+
+Both spellings. Chromium honors the modern `break-inside`, but the legacy
+`page-break-inside` is what the rest of this stylesheet uses and consistency here
+matters more than brevity.
+
+**b. Prefer the box to follow its table, but never at the cost of splitting.** Also add:
+
+```css
+page-break-before: avoid;
+break-before: avoid;
+```
+
+Read these together with (a): `break-before: avoid` expresses "stay with the table",
+`break-inside: avoid` expresses "but if you cannot, move whole." `break-inside` wins
+when they conflict, which is the behavior we want — a totals card alone at the top of
+the next page is acceptable; a split one is not.
+
+**c. Do not split a table row from its own borders.** Add the same
+`page-break-inside: avoid; break-inside: avoid;` pair to:
+
+- `.recon-grand-total`
+- `.recon-table tbody tr`
+
+**d. Do not add `break-after: avoid` to `.recon-table`.** The table can legitimately be
+long enough to span pages; forcing it to stay with the box would push a multi-page
+table onto a fresh page for no benefit. Rows staying intact is sufficient.
+
+**e. Leave `.recon-page` alone.** Its existing `page-break-before: always` is correct
+and unrelated.
+
+---
+
+## Tests
+
+Add to a reconciliation-focused test file (create
+`artifacts/api-server/src/pdf-recon-pagination.test.ts` if no natural home exists):
+
+1. `emits break-inside guard on the totals box` — call the style builder and assert the
+   generated CSS string contains a `.recon-totals-box` rule whose body includes both
+   `break-inside: avoid` and `page-break-inside: avoid`.
+2. `emits break-inside guard on grand total and body rows` — same assertion for
+   `.recon-grand-total` and `.recon-table tbody tr`.
+3. `both reconciliation variants emit the same totals box class` — render a view model
+   that exercises the branch-grouped path and one that exercises the flat path; assert
+   each output contains exactly one `recon-totals-box` and that the three rows
+   (`Total Labor`, `Total Parts`, `Invoice Total`) all appear inside it.
+
+These are string assertions, not visual ones — they lock the declarations in so a later
+refactor of `pdfStyles` cannot silently drop them. The visual confirmation is the
+acceptance check below.
+
+## Acceptance checklist
+
+- [ ] Regenerate invoice #57482. "Total Labor", "Total Parts" and "Invoice Total" appear
+      together inside one intact bordered box on a single page.
+- [ ] No clipped, doubled, or half-drawn box border anywhere in the packet.
+- [ ] The GRAND TOTAL row of the reconciliation table is never split across pages.
+- [ ] A reconciliation table long enough to span pages still spans pages normally — this
+      slice does not push it onto a fresh page.
+- [ ] Both reconciliation variants verified, not just the one #57482 happens to use.
+- [ ] No JS changed in this slice; the diff is CSS declarations only.

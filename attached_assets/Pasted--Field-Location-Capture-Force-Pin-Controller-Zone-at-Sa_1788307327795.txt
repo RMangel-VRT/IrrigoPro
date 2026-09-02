@@ -1,0 +1,363 @@
+# Field Location Capture — Force Pin + Controller/Zone at Save (Work Orders & Billing Sheets)
+
+**Source:** Conversation 2026-09-01 — Randy: "We have a number of ways to capture location data in the field and I want them to be forced to be captured in our flow."
+**Severity:** P1 (the office cannot answer for work it never saw when the ticket has no pin and no zone).
+**Rule basis:** Rule 4 — Capture in the Field, Answer in the Office. Rule 1 (tenancy) and Rule 3 (one canonical component) apply throughout.
+**Prerequisite slices:** `Unified Location Selector - Slice 1108` (shipped — `CustomerLocationStep` / `CustomerLocationPicker` are the canonical components this spec extends).
+
+---
+
+## Why
+
+Location is the one fact the office cannot reconstruct. A billing sheet that says "replaced a head" with no pin and no zone is unanswerable three weeks later when the customer calls. Today nothing forces it:
+
+- **`work-order-wizard.tsx:435-443`** — `canContinueFrom` is `{ 1: <customer checks>, 2: true, 3: <description>, 4: true, 5: true }`. Step 2 is the location step. It is gated by a literal `true` and can never block.
+- **`billing-sheet-wizard.tsx:1488-1493`** — identical shape. Step 2 is titled **"Work Location & Site"** (`STEP_TITLES`, :87-93) and is likewise `2: true`.
+- **`customer-location-step.tsx:285-345`** — both the Controller and the Zone `<Select>` render an explicit `__none__` option. "No controller" is a valid, unremarkable answer that produces no warning and no record of a decision.
+- **`work-order-completion.tsx`** — the tech's screen. It wires `CustomerLocationPicker` (`:752`), which is **pin only**. There is no controller field and no zone field anywhere on the completion sheet. The one person standing in front of the valve box has nowhere to record which zone it is. This is not only a missing gate; the fields do not exist on that surface.
+
+The capture mechanisms, by contrast, already work. `work-order-completion.tsx:166-229` has an **"I'm Here"** button that reads `navigator.geolocation.getCurrentPosition` with `enableHighAccuracy: true`, applies an optimistic update, saves through `updatePinMutation` (`PATCH /api/work-orders/:id`, :157) and offers an Undo toast. `handleLocationSelect` (:236) does the same for a manual map drop. Both paths save the pin the instant they are tapped, independently of the completion submit — which is why the submit has never checked for one.
+
+So this work is: add the missing fields, add a requirement matrix, and enforce it at capture time on the field surfaces.
+
+---
+
+## Decisions locked (Randy, 2026-09-01)
+
+| Decision | Value |
+|---|---|
+| Location pin | **Always required.** No skip, no deferral, no reason-code escape. |
+| Controller / zone | **Required by default**, released only by an explicit Work Type selection. |
+| Where the gate lives | **Field surfaces**: work order completion and the billing sheet wizard — "essentially every opportunity in the field to capture this data." |
+| Work Type field | **New field.** Not reusing an existing job/service classification. |
+| What satisfies the pin | **Either method** — device GPS or manual map drop. Store which produced it. |
+| GPS unavailable | **Force a manual map drop**, and flag the pin low-confidence when GPS was attempted and failed. No completion without a pin. |
+| Granularity | **One controller/zone per ticket.** Per-line-item is explicitly out of scope. |
+| Legacy tickets | **Grandfathered.** They save as-is and surface on a new office report. |
+
+### The requirement matrix
+
+| Work Type | Pin | Controller | Zone | Details |
+|---|---|---|---|---|
+| Zone Repair | required | required | required | — |
+| Head Replacement | required | required | required | — |
+| Valve Repair | required | required | required | — |
+| Backflow | required | required | required | — *(see Open Items)* |
+| Controller/Clock Repair | required | **required** | not required | — |
+| Mainline Repair | required | not required | not required | — |
+| Other | required | not required | not required | **required** |
+
+Controller/Clock Repair keeps the controller requirement — a clock repair happens at a specific clock — and drops only the zone. Mainline Repair and Other release both. Other additionally demands a written description, because "Other" with no explanation is exactly the unanswerable record this rule exists to prevent.
+
+### Scope guard — which surfaces enforce
+
+Enforcement is **opt-in per surface**, driven by a prop, not baked into the shared component. Turning it on globally would block the office from creating a work order for work that has not happened yet.
+
+- **Enforces:** `work-order-completion.tsx` (Slice 3), `billing-sheet-wizard.tsx` (Slice 2).
+- **Does not enforce, unchanged by decision:** `work-order-wizard.tsx` (office creation — the office often does not know the zone yet), `estimate-wizard-customer-step.tsx`. Both keep the same `CustomerLocationStep` with `enforce` defaulting to `false`, so their behavior is byte-for-byte what it is today. The Work Type select is still *shown* on these surfaces so the office can pre-fill it, but nothing blocks.
+- **Not touched:** wet-check finding capture. Findings are structurally keyed to a controller/zone record already; there is no gap to close there. Site maps are off limits per standing rule.
+
+### Naming collision — read this before writing the migration
+
+`work_orders` **already has a `work_type` column** (`schema.ts:693`): `text("work_type").notNull().default("estimate_based")`, values `estimate_based | direct_billing | maintenance`. That is a billing-origin classification and has nothing to do with the trade work performed. **Do not overload it and do not rename it.**
+
+The new column is **`field_work_type`** on both tables, labeled **"Work Type"** in the UI. `billing_sheets` has no `work_type` column today, so it takes `field_work_type` too and the two tables stay symmetrical.
+
+---
+
+## Slice 1 — Data layer, company-scoped work-type registry, shared requirement matrix
+
+### Files
+- `lib/db/src/schema/schema.ts` (`billingSheets` :235-260, `workOrders` :679-745)
+- `lib/db/src/` — new pure module (see below)
+- `artifacts/api-server/src/migrations/` — new backfill migration
+- `artifacts/api-server/src/routes/routes.ts` — new registry endpoints
+
+### Schema changes
+
+Add to **both** `billing_sheets` (after `zoneNumber`, :246) and `work_orders` (after `zoneNumber`, :739):
+
+```ts
+// Field Location Capture — what kind of work this ticket is, which drives
+// whether controller/zone are required. Nullable: legacy rows predate the gate.
+fieldWorkType: text("field_work_type"),
+fieldWorkTypeDetails: text("field_work_type_details"),
+// Pin provenance — how the coordinates were obtained, so the office can
+// judge how much to trust them.
+workLocationSource: text("work_location_source"),          // 'gps' | 'manual'
+workLocationAccuracyM: decimal("work_location_accuracy_m", { precision: 6, scale: 1 }),
+workLocationGpsError: text("work_location_gps_error"),      // null unless GPS was tried and failed
+```
+
+All six are nullable. Nothing is backfilled — legacy rows stay null and are grandfathered (Slice 4 chases them).
+
+New table, **company-scoped per Rule 1**:
+
+```ts
+export const fieldWorkTypes = pgTable("field_work_types", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").references(() => companies.id).notNull(),
+  code: text("code").notNull(),
+  label: text("label").notNull(),
+  requiresController: boolean("requires_controller").notNull().default(true),
+  requiresZone: boolean("requires_zone").notNull().default(true),
+  requiresDetails: boolean("requires_details").notNull().default(false),
+  sortOrder: integer("sort_order").notNull().default(0),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  uniqCompanyCode: uniqueIndex("uniq_field_work_type_company_code").on(table.companyId, table.code),
+  byCompany: index("idx_field_work_types_company").on(table.companyId),
+}));
+```
+
+Uniqueness is **per-tenant** on `(companyId, code)` so two companies can both define `other` without collision — Rule 1's per-tenant uniqueness requirement.
+
+### Seed
+
+Seed the seven rows above for every existing company via a **preview-gated admin migration** on the Super Admin migrations page (not a CLI script — Randy runs it himself; see Rule 2). The same seed runs on company creation so a second company starts with the list rather than an empty dropdown. Companies may deactivate or relabel rows later; they may not delete a row that a ticket references (set `active = false` instead — deactivated types still render on existing tickets, but do not appear in the picker).
+
+`mainline_repair` and `other` seed with `requiresController: false, requiresZone: false`; `other` additionally `requiresDetails: true`; `controller_repair` seeds `requiresController: true, requiresZone: false`. Everything else seeds all-required.
+
+### Shared requirement matrix — one function, both sides of the wire
+
+New pure module exported from the package the client already imports (`@workspace/db` — the same package `customer-location-step.tsx:29` pulls `Customer` from). Replit confirms the exact export path; the requirement is that **client and server import the identical function**, never two copies of the logic.
+
+```ts
+export type FieldWorkTypeRule = {
+  code: string;
+  requiresController: boolean;
+  requiresZone: boolean;
+  requiresDetails: boolean;
+};
+
+export type LocationGateViolation =
+  | "pin_missing"
+  | "work_type_missing"
+  | "controller_missing"
+  | "zone_missing"
+  | "details_missing";
+
+export function checkLocationGate(
+  input: {
+    workLocationLat: string | number | null;
+    workLocationLng: string | number | null;
+    fieldWorkType: string | null;
+    fieldWorkTypeDetails: string | null;
+    controllerLetter: string | null;
+    zoneNumber: number | null;
+  },
+  rule: FieldWorkTypeRule | null,
+): LocationGateViolation[];
+
+/** Tickets created before this instant are grandfathered — see Slice 4. */
+export const LOCATION_GATE_EFFECTIVE_AT: Date;
+export function isLocationGateEnforced(createdAt: Date | string | null): boolean;
+
+/** 'low' when the pin was dropped by hand after a GPS attempt failed. */
+export function deriveLocationConfidence(input: {
+  workLocationSource: string | null;
+  workLocationGpsError: string | null;
+}): "high" | "low" | "unknown";
+```
+
+`checkLocationGate` returns an **array**, not a boolean, so the UI can name every missing thing at once instead of revealing them one at a time. Coordinate presence is checked as "both lat and lng parse to finite numbers" — `workLocationAddress` is irrelevant and must not be required, because a tech pinning by GPS in a canyon with no data has no reverse-geocoded address and must still be able to finish.
+
+Confidence is **derived, never stored** — two columns already carry the facts, and a third stored enum would drift from them (Rule 6: no shadow value that a projection honors independently of the source).
+
+### Endpoints
+
+- `GET /api/field-work-types` — active rows for `req.authenticatedUserCompanyId`, ordered by `sortOrder`. Never reads a company from the body or query string.
+- `GET /api/admin/field-work-types` + `PATCH /api/admin/field-work-types/:id` — company admin edits labels, ordering, active flag, and the three requirement booleans. Mutation verifies the row's `companyId` matches the caller and returns **404** on mismatch (Rule 1: never 403, never leak existence).
+
+### Acceptance for Slice 1
+Schema pushes clean; the migration is visible and runnable from Super Admin with a preview count; a fresh company gets seven seeded types; `GET /api/field-work-types` returns only the caller's company's rows; a user in company A `PATCH`ing company B's type id gets 404. `checkLocationGate` is unit-tested against all seven seeded types. **No UI behavior changes in this slice** — the app is fully coherent with the columns present and nothing enforcing yet.
+
+---
+
+## Slice 2 — Billing Sheet Wizard: Work Type on Step 2, and a real gate
+
+### Files
+- `artifacts/irrigopro/src/components/location/customer-location-step.tsx` (props :48-64, controller select :285-320, zone select :322-345)
+- `artifacts/irrigopro/src/components/billing/billing-sheet-wizard.tsx` (`canContinueFrom` :1488, step 2 render :1677, save payload :1420-1424)
+- `artifacts/api-server/src/routes/routes.ts` (`POST /api/billing-sheets` :11317, `PATCH /api/billing-sheets/:id` :11634)
+
+### `CustomerLocationStep` changes
+
+Extend `CustomerLocationValue` with `fieldWorkType: string | null` and `fieldWorkTypeDetails: string`. Extend `Props` with:
+
+```ts
+/** When true, Continue is blocked until checkLocationGate passes. Default false. */
+enforce?: boolean;
+```
+
+Render a **Work Type** select above the Controller select, sourced from `GET /api/field-work-types`. When the selected type has `requiresDetails`, render a required "Details" textarea directly beneath it.
+
+The `__none__` options on Controller and Zone (`:285-345`) become conditional. When `enforce` is true and the selected rule requires that field, the `__none__` item is not rendered at all — there is no "no controller" answer to pick. When `enforce` is false, or the rule releases the field, `__none__` renders exactly as it does today. Existing behavior is preserved for the ungated surfaces.
+
+Add a gate-state strip at the bottom of the step, mirroring the pattern established in `Wet Check - Force Complete-or-Flag at Finding Save`: red while violations remain, naming each one in plain language ("Drop a pin", "Pick a work type", "Pick the controller", "Pick the zone", "Describe the work"), green once clear. Continue is disabled while red. **Never a silent disabled button** — the tech must be able to read why.
+
+Changing the Work Type to one that releases the controller/zone does **not** clear an already-picked controller or zone. If the tech knows it, keep it. Changing to a type that requires them keeps whatever was already selected and simply re-evaluates.
+
+### Wizard changes
+
+Replace `canContinueFrom[2]` (`:1490`, currently `2: true`):
+
+```ts
+2: !enforceLocationGate || checkLocationGate({
+     workLocationLat: locationStep.workLocation?.lat ?? null,
+     workLocationLng: locationStep.workLocation?.lng ?? null,
+     fieldWorkType: locationStep.fieldWorkType,
+     fieldWorkTypeDetails: locationStep.fieldWorkTypeDetails,
+     controllerLetter: locationStep.controllerLetter,
+     zoneNumber: locationStep.zoneNumber,
+   }, selectedRule).length === 0,
+```
+
+`enforceLocationGate` is `isLocationGateEnforced(existing?.createdAt ?? new Date())` — a new sheet always enforces; editing a grandfathered sheet does not block (Slice 4 chases it instead).
+
+Note the existing precedent at `:1555` — step 3 already renders an inline explanation when `!canContinueFrom[3]`. Add the same for step 2 so the desktop footer and the sticky mobile footer (`:1574`) both explain themselves.
+
+The save payload (`:1420-1424`) already sends `workLocationLat/Lng/Address`, `controllerLetter`, `zoneNumber`. Add `fieldWorkType`, `fieldWorkTypeDetails`, `workLocationSource`, `workLocationAccuracyM`, `workLocationGpsError`. Rehydration on edit (`:1274-1276`) picks up the new fields the same way.
+
+The header context line and the step-2 summary chip (`:993-999`) currently render "Controller X · Zone N" only when one is present. Extend it to lead with the Work Type label, so the review step shows the full decision.
+
+### Server enforcement
+
+Both `POST /api/billing-sheets` (:11317) and `PATCH /api/billing-sheets/:id` (:11634) run `checkLocationGate` and return **400** with an instructional message listing every violation, not just the first. Tenancy is unchanged — `POST` continues to derive `companyId` from `req.authenticatedUserCompanyId`, `PATCH` keeps `requireSameCompanyAsBillingSheet` and `requireBillingSheetUpdateAccess`.
+
+Two guard scopes matter, and getting this wrong will break the office:
+
+1. **`PATCH` enforces only when the patch touches location fields, or when the sheet was created after `LOCATION_GATE_EFFECTIVE_AT`.** The billing workspace, Command Center inline edit, rate-mode and labor-hours endpoints all `PATCH` this record with bodies that carry no location keys. Those must pass through untouched. A blanket check here would lock the office out of every legacy sheet.
+2. **Enforcement is skipped for grandfathered rows** — `isLocationGateEnforced(sheet.createdAt)`.
+
+The work-type rule is loaded from `field_work_types` scoped to the caller's company. A `fieldWorkType` code that does not exist in the caller's company → 400, never a silent pass.
+
+### Acceptance for Slice 2
+A new billing sheet cannot leave step 2 without a pin and a work type, and without controller/zone unless the type releases them; "Other" additionally demands details. Editing a pre-cutoff sheet is unblocked. `POST` with a missing pin returns 400 listing the violations. A `PATCH` from the billing workspace carrying only `laborHours` succeeds. Work order wizard and estimate wizard behavior is **unchanged** — verify by walking both, not by compiling.
+
+---
+
+## Slice 3 — Work Order Completion: add the fields, then gate the submit
+
+This is the slice that matters most. It is also the largest, because the controller and zone inputs do not exist on this screen at all.
+
+### Files
+- `artifacts/irrigopro/src/components/work-orders/work-order-completion.tsx` (`handleImHere` :166-229, `handleLocationSelect` :236-260, `updatePinMutation` :156-164, `CustomerLocationPicker` :752-810, submit button :1147-1153)
+- `artifacts/irrigopro/src/components/location/` — new `controller-zone-fields.tsx`
+- `artifacts/irrigopro/src/components/location/customer-location-step.tsx` (consumes the extracted component)
+- `artifacts/api-server/src/routes/routes.ts` (`POST /api/work-orders/complete` :9545, `POST /api/work-orders/:id/complete` :10037, `PATCH /api/work-orders/:id` :13023)
+- `artifacts/irrigopro/src/lib/offline/api.ts`
+
+### Extract the controller/zone block — one canonical component (Rule 3)
+
+Pull the Work Type / Controller / Zone group out of `customer-location-step.tsx:285-345` into `components/location/controller-zone-fields.tsx`, taking `customerId`, `value`, `onChange`, and `enforce`. It owns the controllers query (`/api/properties/:customerId/controllers`), the auto-clear effects when a selected controller disappears (`:134-142`) or a zone number exceeds the new controller's `zoneCount` (`:145-150`), and the `__none__` conditional logic from Slice 2.
+
+`CustomerLocationStep` then renders it instead of its own copy. **Do not leave the old inline block behind** — two components rendering the same three fields is precisely the divergence Rule 3 forbids.
+
+### Completion screen changes
+
+Render `ControllerZoneFields` with `enforce` directly beneath the existing `CustomerLocationPicker` card (`:752`), inside the same card so pin and zone read as one act of locating the work. These fields save through the **same** `updatePinMutation` path as the pin — extend its payload type and its optimistic `applyOptimisticPin` cache patch to carry `fieldWorkType`, `fieldWorkTypeDetails`, `controllerLetter`, `zoneNumber`. It already targets `PATCH /api/work-orders/:id` (:158), which already accepts `controllerLetter` and `zoneNumber`; only the client payload and the optimistic patch need widening.
+
+Pin provenance:
+
+- **`handleImHere`** (:166) — on success, send `workLocationSource: "gps"` and `workLocationAccuracyM: pos.coords.accuracy`, and clear `workLocationGpsError`. On the error callback (:222), do **not** just toast and return: set component state `gpsError` to `err.message`, and change the toast to point at the map — *"Couldn't get your location. Drop the pin on the map instead."*
+- **`handleLocationSelect`** (:236) — send `workLocationSource: "manual"`, `workLocationAccuracyM: null`, and `workLocationGpsError: gpsError` (the stored failure, or null if GPS was never attempted). That is what makes the pin low-confidence: a hand-drop that followed a real GPS failure is recorded as such, and `deriveLocationConfidence` reads it back for the office. A hand-drop with no failed attempt stays high-confidence — the tech chose the map deliberately.
+
+Gate the submit. The button at `:1147` is currently disabled only by `isSubmitting || isBranchCheckPending`. Add the violations from `checkLocationGate` run against `livePin` plus the new fields, and render the same red/green strip above the button naming what is missing. Keep the existing disabled conditions.
+
+Grandfathering applies here too: `isLocationGateEnforced(workOrder.createdAt)`. A work order created before the cutoff completes as it does today and lands on the Slice 4 report.
+
+### Offline
+
+The offline queue replays completion writes. Two requirements, both learned from the Force Complete-or-Flag slice:
+
+1. A **400 on a completion replay is terminal, not retryable** — surfaced to the tech as a per-item actionable error ("this work order needs a pin before it can be submitted"), never a silent retry loop, and never a wedge that blocks the rest of the queue. Confirm the existing per-item error path treats 4xx as terminal; add the user-visible state if it does not.
+2. The pin requirement **must be satisfiable with no network**. `navigator.geolocation` works offline; reverse geocoding and map tiles do not. The gate checks coordinates only, never `workLocationAddress`. Verify "I'm Here" alone clears the pin violation with the network off, and that the map's absence of tiles does not prevent a manual drop on a cached tile layer.
+
+### Server enforcement
+
+Guard **both** completion endpoints — `POST /api/work-orders/complete` (:9545) and `POST /api/work-orders/:id/complete` (:10037). Both exist; both are reachable; guarding one and not the other leaves the hole open. (Do not assume either is dead — verify before labeling.) Each loads the work order, resolves its company-scoped work-type rule, runs `checkLocationGate`, and returns 400 listing every violation when `isLocationGateEnforced(workOrder.createdAt)`.
+
+`PATCH /api/work-orders/:id` (:13023) is **not** gated — it is the pin-save path itself and must accept partial location updates freely, including the intermediate state where a pin exists but the zone does not.
+
+### Acceptance for Slice 3
+A field tech on a post-cutoff work order cannot reach the review step without a pin and a work type, and without controller/zone unless the type releases them. "I'm Here" alone satisfies the pin. Denying location permission produces a message that points at the map, and the subsequent hand-drop is stored with the GPS error recorded. Both completion endpoints 400 on a pinless post-cutoff work order. A pre-cutoff work order completes unchanged. Proof per Rule 7: screenshot of the gated completion sheet on a phone viewport, plus the passing tests.
+
+---
+
+## Slice 4 — Missing Location Data report (the office tripwire)
+
+Grandfathering is only defensible if someone can see what was grandfathered. Per Rule 4, downstream guards are demoted to **audited tripwires**, not silent absorption.
+
+### Files
+- `artifacts/irrigopro/src/pages/missing-location-report.tsx` (new)
+- `artifacts/irrigopro/src/components/layout/nav-config.ts` (`baseReportItems` :64-88)
+- `artifacts/irrigopro/src/App.tsx` (route)
+- `artifacts/api-server/src/routes/routes.ts` (new report endpoint)
+
+Model it on the two existing reports — `pages/work-orders-missing-photos-report.tsx` and `pages/missing-photos-report.tsx` — which are **not** duplicates of each other: one covers work orders, one covers billing sheets, and both are wired in `baseReportItems` (:66, :72). This report covers both ticket types in **one** page with a type filter rather than two near-identical pages, because the office chases a location gap as a single task and Rule 3 prefers one canonical screen.
+
+Route `/reports/missing-location`, nav leaf **"Missing Location Data"** added to `baseReportItems` so both the Reports group and `billingManagerReportsGroup` pick it up automatically.
+
+Rows: any work order or billing sheet in the caller's company where `checkLocationGate` returns violations, **or** where `deriveLocationConfidence` returns `"low"`. Columns: ticket number (deep-linked), customer and branch, technician, work date, a chip per violation, and a pin-confidence badge. Filters: ticket type, technician, date range, and a "low-confidence pins only" toggle — those are not missing, just weaker, and the office should be able to look at them separately.
+
+**No bulk edit and no inline fix.** Every row links to its ticket and the fix happens there, through the ticket's own canonical path (Rule 6 — edit at the source; and the customer/ticket edit-in-one-place rule). Adding a location editor here would be a second place to edit the same data.
+
+The endpoint scopes by `req.authenticatedUserCompanyId` and never accepts a company from the client. `super_admin` (`companyId = null`) may query across tenants; every other role sees their own company only.
+
+### Acceptance for Slice 4
+The report is reachable from the Reports nav group for company admin, billing manager and bookkeeper; a pre-cutoff work order with no pin appears; completing a post-cutoff ticket correctly never adds a row; a low-confidence pin appears under the toggle and not in the missing list; company A cannot see company B rows by id or by association (404).
+
+---
+
+## Tests
+
+**Requirement matrix (`checkLocationGate`)** — all seven seeded types: zone/head/valve/backflow demand controller and zone; controller_repair demands controller and not zone; mainline_repair and other demand neither; other demands details; every type demands the pin. Lat present with lng null → `pin_missing`. Lat/lng as decimal strings from the DB → parsed, not rejected. A `fieldWorkType` code absent from the company's registry → treated as unknown, gate fails.
+
+**Billing sheet wizard** — Continue disabled on step 2 until the gate clears; each violation named in the strip; `__none__` absent from Controller when the rule requires it and present when it does not; switching from Zone Repair to Mainline Repair unblocks Continue without clearing an already-picked zone; editing a pre-cutoff sheet never blocks.
+
+**Billing sheet server** — `POST` with no pin → 400 listing violations; `POST` with `other` and no details → 400; `PATCH` carrying only `laborHours` on a legacy sheet → 200; `PATCH` carrying location fields on a post-cutoff sheet with a missing zone → 400; `PATCH` referencing another company's `fieldWorkType` id → 404.
+
+**Work order completion** — submit disabled until the gate clears; "I'm Here" alone clears `pin_missing`; GPS denial sets the error state and the subsequent map drop persists `workLocationSource: "manual"` with `workLocationGpsError` populated; a deliberate map drop with no GPS attempt stores a null error and derives high confidence; pre-cutoff work order completes unchanged.
+
+**Work order server** — both `/api/work-orders/complete` and `/api/work-orders/:id/complete` 400 on a pinless post-cutoff work order; `PATCH /api/work-orders/:id` still accepts a pin-only payload with no zone.
+
+**Offline** — a queued completion that 400s surfaces a per-item actionable error and does not block later queue items; with the network off, "I'm Here" satisfies the pin and the completion queues successfully.
+
+**Regressions that must be proven unchanged** — work order creation wizard step 2 still continues with nothing filled in; estimate wizard customer step unchanged; `Unified Location Selector` behavior (map always mounts, `FALLBACK_CENTER` last resort, Reset to Property/Address button) unchanged; the extracted `ControllerZoneFields` renders identically inside `CustomerLocationStep` to what it replaced.
+
+**Tenancy (Rule 1, required)** — a user in company A cannot list, read, edit or report on company B's field work types or missing-location rows, by id or association, and gets 404; `super_admin` can across tenants; no company-agnostic query exists in the registry, gate, or report paths.
+
+---
+
+## Out of scope
+
+- **Per-line-item controller/zone.** Decided: one per ticket. `work_order_items` and `estimate_items` already carry `controllerLetter`/`zoneNumber` (`schema.ts:832-833`, `:587-588`) for inspection lineage; this spec does not touch them.
+- **Work order creation wizard and estimate wizard enforcement.** Unchanged by decision.
+- **Backfilling legacy tickets.** Grandfathered; Slice 4 is the chase mechanism.
+- **Wet-check finding capture**, site maps, `irrigation_controllers` / `irrigation_zones` — off limits.
+- **The Expo mobile app** (`artifacts/irrigopro-mobile`).
+
+---
+
+## Open items for Randy
+
+1. **Backflow.** Spec'd above as requiring controller *and* zone. Backflow devices normally sit on the mainline at the point of connection, upstream of the valves, so a zone number may not exist for them. If that is right, Backflow should seed like Controller/Clock Repair — controller required, zone not. Say the word and it is a one-line seed change.
+2. **Work order creation wizard.** Left ungated per the decision. Worth confirming that a tech creating a work order in the field from scratch is not a path you want gated — the gate would then catch it at completion instead, one step later.
+3. **Column name.** `field_work_type`, not `work_type`, because `work_orders.work_type` is already taken by the billing-origin classification. UI label stays "Work Type."
+
+---
+
+## Relevant files
+
+- `artifacts/irrigopro/src/components/location/customer-location-step.tsx` (canonical shared step; controller select :285-320, zone select :322-345, props :48-64)
+- `artifacts/irrigopro/src/components/location/customer-location-picker.tsx` (pin-only wrapper used by completion)
+- `artifacts/irrigopro/src/components/work-orders/work-order-completion.tsx` (`handleImHere` :166, `handleLocationSelect` :236, `updatePinMutation` :156, picker :752, submit :1147)
+- `artifacts/irrigopro/src/components/billing/billing-sheet-wizard.tsx` (`STEP_TITLES` :87, `canContinueFrom` :1488, step-2 render :1677, payload :1420, rehydrate :1274)
+- `artifacts/irrigopro/src/components/work-orders/work-order-wizard.tsx` (`canContinueFrom` :435 — reference only, stays ungated)
+- `artifacts/irrigopro/src/components/layout/nav-config.ts` (`baseReportItems` :64-88)
+- `artifacts/irrigopro/src/pages/work-orders-missing-photos-report.tsx`, `pages/missing-photos-report.tsx` (report pattern to mirror)
+- `artifacts/api-server/src/routes/routes.ts` (WO complete :9545 and :10037, WO patch :13023, BS create :11317, BS patch :11634)
+- `lib/db/src/schema/schema.ts` (`billingSheets` :235, `workOrders` :679, `workOrders.workType` :693 — the name already in use)
+- Prior specs: `Unified Location Selector - Slice 1108.md`, `Location Selector Map Improvements - Slice 1108b.md`, `Wet Check - Force Complete-or-Flag at Finding Save (Close the Needs-Review Fallback).md` (the Rule 4 pattern this follows), `Billing PDF - Add Location + Clock (Controller) and Zone to Each Ticket.md` (the downstream consumer of this data)

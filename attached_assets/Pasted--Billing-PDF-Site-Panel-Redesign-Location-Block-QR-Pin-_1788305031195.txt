@@ -1,0 +1,239 @@
+# Billing PDF - Site Panel Redesign (Location Block, QR Pin, Page-Break Fixes)
+
+Slice family: Billing PDF. Supersedes the header treatment introduced by
+`Billing PDF - Add Location + Clock (Controller) and Zone to Each Ticket.md`.
+
+---
+
+## Design Context (locked decisions)
+
+Decided by Randy, 2026-09-01, from a review of invoice #57482:
+
+1. **Placement (decided).** The site block moves **out of the colored header band**
+   into its **own full-width panel directly below the header**, above WORK PERFORMED.
+   The header returns to identity only: logo, ticket number + invoice number, date /
+   technician / hours.
+2. **Highlighting (decided).** The panel is tinted in the ticket's own job-type color
+   with a left accent bar, so each ticket's location reads as a distinct, deliberate
+   element rather than a footnote in the band.
+3. **Map treatment (decided).** Coordinates text **plus** an "Open in Maps" link
+   **plus** a QR code encoding the same map URL. No tile provider, no API key, no
+   network call at render time.
+4. **Scope (decided).** Invoice packet ticket pages only: work orders, billing sheets,
+   and wet-check billing tickets. Plus the reconciliation summary page-break fix.
+5. **Out of scope (decided).** The estimate PDF (`estimate-pdf-html.ts`) and the wet
+   check results report keep their current layout this slice. Controllers,
+   `irrigation_zones`, and the `/site-maps` feature are **not touched** — this slice
+   only reads `controllerLetter` and `zoneNumber` off the ticket row.
+6. **Rule 1 (multi-tenancy) applies.** Every read that feeds the panel is already
+   company-scoped through the existing PDF view model. No new query is introduced that
+   could cross a company boundary; the QR encodes only coordinates already on the row.
+
+---
+
+## Problem
+
+Three defects, all visible in the invoice #57482 packet.
+
+**1. The site block is buried.** `ticketPageWO`, `ticketPageBS`, and `ticketPageWCB`
+in `pdf-helpers.ts` all emit `ticket-header-line3` (location), `ticket-header-branch`
+(branch), and a second `ticket-header-branch` (controller / zone) *inside* the colored
+band. `.ticket-header-line3` is 11px at `rgba(255,255,255,0.75)` on a saturated navy or
+brown ground. The address is the single most operationally useful fact on the page for
+a property manager approving the charge, and it is the least legible thing in the
+header. Three sibling `<div>`s of near-identical weight also give the reader no
+hierarchy between address, branch, and controller/zone.
+
+**2. Icon glyphs render as empty boxes.** The header lines are prefixed with emoji
+entities — `&#128205;` (pin), `&#127970;` (branch), `&#128336;` (clock). The `body`
+font stack in `pdfStyles` is
+`-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif`
+with no emoji fallback, and the headless Chromium that renders the PDF has no emoji
+font installed. Every one of these renders as a tofu box. Confirmed on both sampled
+pages.
+
+**3. The reconciliation totals box splits across a page break.** `.recon-totals-box`
+(defined around line 1960 of `pdf-helpers.ts`) has `border`, `border-radius`, `padding`
+and `max-width` but **no** `break-inside: avoid`. On invoice #57482 the box begins on
+page 2, renders "Total Labor" and "Total Parts", is clipped mid-border, and the
+"Invoice Total" row orphans onto page 3 inside a second fragment of the same rounded
+box. Both `reconciliationPage` code paths (the branch-grouped variant and the flat
+variant) emit the same box, so both are affected.
+
+**Note on drift.** The deployed billing-sheet header shows a
+`Pin 39.911567, -104.942794 · Open in Maps` line that does **not** appear in
+`ticketPageBS` in the working checkout. Whatever renders that line today is the code
+this slice consolidates — do not leave a second pin renderer behind.
+
+---
+
+## Slice 1 — Ticket Site Panel
+
+### Files
+
+- `artifacts/api-server/src/pdf-helpers.ts` (ticket page builders, `pdfStyles`)
+- `artifacts/api-server/src/pdf-site-metadata.ts` (extend the metadata shape)
+- `artifacts/api-server/src/pdf-generator.ts` (resolve QR data URIs before render)
+- `artifacts/api-server/package.json` (add `qrcode`)
+
+### Concrete changes
+
+**a. One shared builder, three call sites.** Add a single exported function to
+`pdf-helpers.ts`:
+
+```ts
+export function ticketSitePanel(
+  site: PdfSiteMetadata,
+  jobType: JobTypeKey,
+  opts: { lat?: string | number | null; lng?: string | number | null;
+          qrDataUri?: string | null; locationNotes?: string | null },
+): string
+```
+
+It returns `''` when there is nothing to show (no location, no branch, no
+controller/zone, no pin). All three builders — `ticketPageWO`, `ticketPageBS`,
+`ticketPageWCB` — call it and drop their `ticket-header-line3` / `ticket-header-branch`
+divs entirely. The header keeps only `ticket-header-line1` and `ticket-header-line2`.
+This is the one canonical site renderer; no builder keeps a private copy.
+
+**b. Panel structure.**
+
+```html
+<div class="ticket-site ticket-site-{wo|bs|wcb}">
+  <div class="ticket-site-main">
+    <div class="ticket-site-label">SITE</div>
+    <div class="ticket-site-address">{location}</div>
+    <div class="ticket-site-meta">
+      <span class="ticket-site-chip">Branch: {branch}</span>
+      <span class="ticket-site-chip">Controller {letter} &middot; Zone {n}</span>
+      <span class="ticket-site-coords">{lat}, {lng}</span>
+    </div>
+    <div class="ticket-site-link"><a href="{mapUrl}">Open in Maps</a></div>
+  </div>
+  <div class="ticket-site-qr"><img src="{qrDataUri}"><div>Scan for pin</div></div>
+</div>
+```
+
+Chips render only when their data exists. When the pin is absent the QR cell and the
+coords/link lines are omitted and `ticket-site-main` takes the full width — no empty
+placeholder, no "N/A".
+
+**c. Panel CSS.** Add to `pdfStyles`, using the existing `JOB_TYPE_COLORS` and
+`{ navy, brown, green, black, gray }` brand colors:
+
+- `.ticket-site` — `display: flex; justify-content: space-between; gap: 14px;`
+  `padding: 10px 14px;` `background: #f8fafc;` `border: 1px solid #e5e7eb;`
+  `border-top: none;` `border-left: 4px solid` the job-type color, so the panel reads
+  as a continuation of the band above it rather than a floating card.
+- `.ticket-site` also gets `page-break-inside: avoid; break-inside: avoid;` and
+  `break-after: avoid; page-break-after: avoid;`. The header already carries
+  `break-after: avoid`, so header and panel stay welded together at the top of a page.
+- `.ticket-site-label` — 8px, 700, `letter-spacing: 1px`, colored by job type,
+  matching the existing `.ticket-section-label` idiom.
+- `.ticket-site-address` — **13px, weight 700, `${black}`**. This is the promotion:
+  the address goes from 11px at 75% white to full-contrast body-weight text.
+- `.ticket-site-chip` — 10px, 600, `#374151`, on `#eef2f7`, `border-radius: 3px`,
+  `padding: 2px 7px`. Chips separate branch from controller/zone visually, which the
+  three stacked divs never did.
+- `.ticket-site-coords` — 10px, `#6b7280`, monospace.
+- `.ticket-site-qr img` — `width: 74px; height: 74px; display: block;` with a 8px
+  caption beneath.
+- Per-type accents: `.ticket-site-wo`, `.ticket-site-bs`, `.ticket-site-wcb` set
+  `border-left-color` and `.ticket-site-label` color from
+  `JOB_TYPE_COLORS.workOrder`, `.billingSheet`, `.wetCheck` respectively.
+
+**d. Kill the tofu.** Replace every emoji entity in the ticket pages with inline SVG.
+Add three tiny inline-SVG constants to `pdf-helpers.ts` (`ICON_PIN`, `ICON_BRANCH`,
+`ICON_CLOCK`), each a 12x12 `<svg>` with `fill="currentColor"`, rendered inline before
+its label. Inline SVG needs no font and renders identically in headless Chromium.
+Sweep the whole file: `&#128205;`, `&#127970;`, `&#128336;` must not survive anywhere
+in a ticket page. Leave `&#9888;` and `&#9432;` in the warning strings alone unless the
+same sweep shows them boxing too — if it does, replace them the same way.
+
+**e. QR generation.** Add `qrcode` to `artifacts/api-server/package.json`. The ticket
+page builders are synchronous string functions, so the QR must be resolved **upstream**,
+exactly like `photoDataUris` already is. In `pdf-generator.ts`, before assembling
+ticket pages, map each ticket row that has `workLocationLat` and `workLocationLng` to
+
+```ts
+await QRCode.toDataURL(`https://www.google.com/maps/search/?api=1&query=${lat},${lng}`,
+  { margin: 0, width: 148, errorCorrectionLevel: 'M' })
+```
+
+and pass the result into the builder. A QR failure must **never** fail the PDF: wrap in
+try/catch, log, pass `null`, and the panel degrades to coords + link. Do not fetch
+anything over the network for the map.
+
+**f. Missing controller / zone is data, not layout.** Neither sampled ticket rendered a
+controller/zone line, because `controllerLetter` / `zoneNumber` were null on those rows.
+Per Rule 4, field capture is where that gets fixed — not here. This slice renders what
+exists and omits what does not. **Add a counter** to the PDF generation log recording
+how many ticket rows in the packet had no controller/zone, so the gap is measurable
+rather than invisible.
+
+### Tests
+
+- `pdf-site-panel.test.ts` (new): panel renders for WO / BS / WCB with correct
+  job-type class; omits QR cell and coords when lat/lng are null; omits branch chip
+  when branch is null; omits controller/zone chip when either field is null; returns
+  `''` when the whole site block is empty.
+- Extend `pdf-ticket-parity.test.ts`: assert the rendered ticket HTML contains **no**
+  `ticket-header-line3` and **no** `ticket-header-branch`, and contains exactly **one**
+  `ticket-site` block per ticket page.
+- New assertion, any suite: the full rendered invoice HTML contains none of
+  `&#128205;`, `&#127970;`, `&#128336;`.
+- QR failure path: stub `QRCode.toDataURL` to reject; assert the PDF still generates
+  and the panel renders with coords and link.
+
+### Acceptance checklist
+
+- [ ] Header band on all three ticket types shows only logo, ID line, date/tech/hours.
+- [ ] Site panel sits directly beneath the band, full width, left accent in the ticket's
+      job-type color, address at full contrast.
+- [ ] Branch and controller/zone read as separate chips.
+- [ ] QR renders and resolves to the same pin as the "Open in Maps" link.
+- [ ] No empty boxes anywhere in the packet.
+- [ ] Header and panel never separate across a page break.
+- [ ] A ticket with no address, no branch, no controller/zone and no pin renders no
+      panel at all and no empty space where one would be.
+
+---
+
+## Slice 2 — Reconciliation Summary Page-Break Hardening
+
+### Files
+
+- `artifacts/api-server/src/pdf-helpers.ts` (`pdfStyles`, reconciliation CSS block)
+
+### Concrete changes
+
+**a. Keep the totals box whole.** Add to `.recon-totals-box`:
+
+```css
+page-break-inside: avoid;
+break-inside: avoid;
+```
+
+This fixes both `reconciliationPage` variants at once, since both emit the same class.
+
+**b. Keep the grand-total row with its table.** Add `page-break-inside: avoid;
+break-inside: avoid;` to `.recon-grand-total` and to `.recon-table tbody tr`, so a
+subtotal or grand-total row cannot be split from its own borders.
+
+**c. Do not let the box orphan from the table.** Add `break-before: avoid;
+page-break-before: avoid;` to `.recon-totals-box` so the box prefers to follow the
+table it summarizes; when it cannot fit, it moves to the next page **whole**.
+
+### Tests
+
+- Render a fixture invoice sized to place the totals box near a page boundary; assert
+  the generated CSS contains `break-inside: avoid` within the `.recon-totals-box` rule.
+- Visual check on invoice #57482: the totals box and "Invoice Total" appear together on
+  one page.
+
+### Acceptance checklist
+
+- [ ] "Total Labor", "Total Parts" and "Invoice Total" always render inside one intact
+      bordered box on a single page.
+- [ ] No clipped or doubled box border at any page boundary.
+- [ ] The reconciliation table's grand-total row is never split.
