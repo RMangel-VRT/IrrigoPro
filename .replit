@@ -136,6 +136,10 @@ args = "pdf-site-metadata"
 task = "workflow.run"
 args = "offline-connection-recovery"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "work-location-controls"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -462,6 +466,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/irrigopro exec vitest run src/lib/offline/connection-recovery.test.ts src/lib/offline/connection-recovery-retry-budget.test.ts src/lib/offline/engine.test.ts src/pages/wet-checks/photo-capture-button.test.tsx"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "work-location-controls"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/irrigopro exec vitest run src/components/location/work-location-controls.test.tsx && pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/field-location-policy.test.ts"
 
 [workflows.workflow.metadata]
 isValidation = true

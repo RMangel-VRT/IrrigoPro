@@ -84,6 +84,68 @@ export function checkLocationGate(
 }
 
 /**
+ * Which location fields a surface should actually show for the selected work
+ * type, and which of those are required.
+ *
+ * Presentation and validation must agree: a field the user cannot see must
+ * never be able to block a save, and a field the rule does not use must not
+ * be offered as an "optional" extra. Deriving both from this one function is
+ * what keeps the billing sheet wizard and work-order completion identical.
+ *
+ * `hasController` / `hasZone` describe values already stored on the record.
+ * They exist purely as a legacy escape hatch: a ticket saved before the work
+ * type registry existed can carry a controller with no work type at all, and
+ * silently hiding a stored value would make it uneditable and invisible.
+ * Nothing is ever hidden while it still holds data.
+ */
+export type LocationFieldVisibility = {
+  showControllerZoneGroup: boolean;
+  showController: boolean;
+  showZone: boolean;
+  controllerRequired: boolean;
+  zoneRequired: boolean;
+};
+
+export function resolveLocationFieldVisibility(
+  rule: FieldWorkTypeRule | null | undefined,
+  stored: { hasController?: boolean; hasZone?: boolean } = {},
+): LocationFieldVisibility {
+  const requiresController = rule?.requiresController === true;
+  const requiresZone = rule?.requiresZone === true;
+  // A zone is always picked underneath a controller, so a rule that wants a
+  // zone implies the controller picker even if it does not require the
+  // controller value in its own right.
+  const showController =
+    requiresController || requiresZone || stored.hasController === true;
+  const showZone = requiresZone || stored.hasZone === true;
+  return {
+    showControllerZoneGroup: showController || showZone,
+    showController,
+    showZone,
+    controllerRequired: requiresController,
+    zoneRequired: requiresZone,
+  };
+}
+
+/**
+ * Drop controller/zone values the newly selected work type does not use.
+ *
+ * Returned as an explicit patch rather than applied in the UI so the billing
+ * sheet wizard (local state) and work-order completion (optimistic PATCH)
+ * clear exactly the same fields.
+ */
+export function clearLocationFieldsForRule(
+  rule: FieldWorkTypeRule | null | undefined,
+  current: { controllerLetter: string | null; zoneNumber: number | null },
+): { controllerLetter: string | null; zoneNumber: number | null } {
+  const { showController, showZone } = resolveLocationFieldVisibility(rule);
+  return {
+    controllerLetter: showController ? current.controllerLetter : null,
+    zoneNumber: showZone ? current.zoneNumber : null,
+  };
+}
+
+/**
  * Tickets created before this instant are grandfathered. Both rollout
  * surfaces intentionally ship disabled by using a far-future date.
  */

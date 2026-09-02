@@ -3,6 +3,9 @@ import { Briefcase, Cpu, Droplets } from "lucide-react";
 import type { FieldWorkType } from "@workspace/db/schema";
 import {
   checkLocationGate,
+  clearLocationFieldsForRule,
+  resolveLocationFieldVisibility,
+  type FieldWorkTypeRule,
   type LocationGateViolation,
 } from "@workspace/db/field-location-policy";
 import { useArrayQuery } from "@/lib/queryClient";
@@ -45,6 +48,15 @@ export const LOCATION_GATE_VIOLATION_LABELS: Record<LocationGateViolation, strin
   zone_missing: "Choose the zone.",
   details_missing: "Add details for this work type.",
 };
+
+/**
+ * Radix treats only `""` and `undefined` as "nothing selected". Passing a
+ * sentinel such as `__none__` while the matching `SelectItem` is not rendered
+ * leaves the trigger blank — no value AND no placeholder — which reads as a
+ * dead control. Every select here therefore uses `""` for the empty state and
+ * keeps the sentinel for the optional "— None —" item only.
+ */
+const NONE_VALUE = "__none__";
 
 export function WorkLocationGateStatus({
   violations,
@@ -97,17 +109,56 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
       queryKey: ["/api/properties", customerId, "controllers"],
       enabled: !!customerId,
     });
-  const { data: workTypes = [], isLoading: workTypesLoading } =
-    useArrayQuery<FieldWorkType>({
-      queryKey: ["/api/field-work-types"],
-      enabled: !!customerId,
-    });
+  const {
+    data: workTypes = [],
+    isLoading: workTypesLoading,
+    isError: workTypesError,
+  } = useArrayQuery<FieldWorkType>({
+    queryKey: ["/api/field-work-types"],
+    enabled: !!customerId,
+  });
 
   const selectedController = controllers.find(
     (controller) => controller.controllerLetter === value.controllerLetter,
   );
   const zoneCount = selectedController?.zoneCount ?? 0;
   const selectedWorkType = workTypes.find((type) => type.code === value.fieldWorkType);
+  const selectedRule: FieldWorkTypeRule | null = selectedWorkType
+    ? {
+        code: selectedWorkType.code,
+        requiresController: selectedWorkType.requiresController,
+        requiresZone: selectedWorkType.requiresZone,
+        requiresDetails: selectedWorkType.requiresDetails,
+      }
+    : null;
+
+  // The registry is per-tenant, so "no work types" is a real configuration
+  // state, not just a loading frame. Left unsaid it renders an empty menu that
+  // simply does not appear to open — and, once the gate is live, an
+  // unsatisfiable requirement. Say it out loud instead.
+  const workTypesUnavailable =
+    !!customerId && !workTypesLoading && !workTypesError && workTypes.length === 0;
+  const workTypePlaceholder = !customerId
+    ? "Pick a customer first"
+    : workTypesLoading
+      ? "Loading work types…"
+      : workTypesError
+        ? "Could not load work types"
+        : workTypesUnavailable
+          ? "No work types configured"
+          : "Select work type";
+  const workTypeDisabled =
+    !customerId || workTypesLoading || workTypesError || workTypesUnavailable;
+  // A code stored on the record but missing from the active registry (renamed
+  // or deactivated) must still render, or the trigger goes blank again.
+  const storedWorkTypeMissing =
+    !!value.fieldWorkType && !selectedWorkType && !workTypesLoading;
+
+  const visibility = resolveLocationFieldVisibility(selectedRule, {
+    hasController: !!value.controllerLetter,
+    hasZone: value.zoneNumber != null,
+  });
+
   const violations = enforceLocationGate
     ? checkLocationGate(
         {
@@ -118,14 +169,7 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
           controllerLetter: value.controllerLetter,
           zoneNumber: value.zoneNumber,
         },
-        selectedWorkType
-          ? {
-              code: selectedWorkType.code,
-              requiresController: selectedWorkType.requiresController,
-              requiresZone: selectedWorkType.requiresZone,
-              requiresDetails: selectedWorkType.requiresDetails,
-            }
-          : null,
+        selectedRule,
       )
     : [];
 
@@ -133,26 +177,58 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
     onGateStateChangeRef.current?.(violations.length === 0, violations);
   }, [violations.join("|")]);
 
+  // Switching to a different customer invalidates a controller picked for the
+  // previous one. That is the only automatic clear here, and it is keyed off
+  // an explicit user action rather than off the fetched list disagreeing with
+  // the stored value: `useArrayQuery` reports a failed or forbidden controller
+  // fetch as an empty array, and work-order completion persists every onChange
+  // immediately, so reconciling against list contents would silently delete a
+  // legacy controller the moment the request failed. Values that no longer
+  // match the list are surfaced as explicit "no longer on file" options below.
+  const previousCustomerIdRef = useRef(customerId);
   useEffect(() => {
-    if (controllersLoading || !value.controllerLetter) return;
-    if (!controllers.some((controller) => controller.controllerLetter === value.controllerLetter)) {
-      onChange({
-        ...valueRef.current,
-        controllerLetter: null,
-        zoneNumber: null,
-      });
-    }
-  }, [controllers, controllersLoading, onChange, value.controllerLetter]);
+    const previous = previousCustomerIdRef.current;
+    previousCustomerIdRef.current = customerId;
+    if (previous == null || previous === customerId) return;
+    const current = valueRef.current;
+    if (current.controllerLetter == null && current.zoneNumber == null) return;
+    onChange({ ...current, controllerLetter: null, zoneNumber: null });
+  }, [customerId, onChange]);
 
-  useEffect(() => {
-    if (value.zoneNumber == null || !selectedController) return;
-    if (value.zoneNumber > zoneCount) {
-      onChange({ ...valueRef.current, zoneNumber: null });
-    }
-  }, [onChange, selectedController, value.zoneNumber, zoneCount]);
+  const storedControllerMissing =
+    !!value.controllerLetter && !selectedController && !controllersLoading;
+  const storedZoneOutOfRange =
+    value.zoneNumber != null && (!selectedController || value.zoneNumber > zoneCount);
+
+  const handleWorkTypeChange = (nextCode: string) => {
+    const code = nextCode === NONE_VALUE ? null : nextCode;
+    const current = valueRef.current;
+    const nextRule = workTypes.find((type) => type.code === code) ?? null;
+    // Values the new rule does not use are dropped here rather than in an
+    // effect: clearing must follow an explicit choice by the user, never a
+    // mount, so opening a legacy ticket can never quietly erase its data.
+    const cleared = clearLocationFieldsForRule(
+      nextRule
+        ? {
+            code: nextRule.code,
+            requiresController: nextRule.requiresController,
+            requiresZone: nextRule.requiresZone,
+            requiresDetails: nextRule.requiresDetails,
+          }
+        : null,
+      { controllerLetter: current.controllerLetter, zoneNumber: current.zoneNumber },
+    );
+    onChange({
+      ...current,
+      fieldWorkType: code,
+      fieldWorkTypeDetails:
+        code === current.fieldWorkType ? current.fieldWorkTypeDetails : "",
+      ...cleared,
+    });
+  };
 
   const workTypeContent = (
-    <div className="space-y-3">
+    <div className="space-y-3" data-testid="work-type-section">
       <div className="flex items-center gap-2">
         <div className="bg-blue-50 p-2 rounded-md">
           <Briefcase className="w-4 h-4 text-blue-600" />
@@ -167,26 +243,20 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
         </h3>
       </div>
       <Select
-        value={value.fieldWorkType ?? "__none__"}
-        onValueChange={(workType) =>
-          onChange({
-            ...valueRef.current,
-            fieldWorkType: workType === "__none__" ? null : workType,
-            fieldWorkTypeDetails:
-              workType === valueRef.current.fieldWorkType
-                ? valueRef.current.fieldWorkTypeDetails
-                : "",
-          })
-        }
-        disabled={workTypesLoading}
+        value={value.fieldWorkType ?? ""}
+        onValueChange={handleWorkTypeChange}
+        disabled={workTypeDisabled}
       >
-        <SelectTrigger>
-          <SelectValue
-            placeholder={workTypesLoading ? "Loading work types…" : "Select work type"}
-          />
+        <SelectTrigger data-testid="select-work-type">
+          <SelectValue placeholder={workTypePlaceholder} />
         </SelectTrigger>
         <SelectContent>
-          {!enforceLocationGate && <SelectItem value="__none__">— None —</SelectItem>}
+          {!enforceLocationGate && <SelectItem value={NONE_VALUE}>— None —</SelectItem>}
+          {storedWorkTypeMissing && (
+            <SelectItem value={value.fieldWorkType!}>
+              {value.fieldWorkType} (no longer offered)
+            </SelectItem>
+          )}
           {workTypes.map((type) => (
             <SelectItem key={type.code} value={type.code}>
               {type.label}
@@ -194,6 +264,22 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
           ))}
         </SelectContent>
       </Select>
+      {workTypesError && (
+        <p className="text-xs text-red-600" data-testid="text-work-types-error">
+          Work types could not be loaded. Check your connection and try again.
+        </p>
+      )}
+      {workTypesUnavailable && (
+        <p
+          className={
+            enforceLocationGate ? "text-xs text-red-600" : "text-xs text-gray-600"
+          }
+          data-testid="text-work-types-unavailable"
+        >
+          No work types are set up for this company yet. An administrator needs to
+          add them before this can be recorded.
+        </p>
+      )}
       {selectedWorkType?.requiresDetails && (
         <div className="space-y-1">
           <Label htmlFor="field-work-type-details" className="text-xs text-gray-600">
@@ -202,6 +288,7 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
           </Label>
           <Input
             id="field-work-type-details"
+            data-testid="input-work-type-details"
             value={value.fieldWorkTypeDetails}
             onChange={(event) =>
               onChange({
@@ -216,102 +303,129 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
     </div>
   );
 
+  const groupRequired = visibility.controllerRequired || visibility.zoneRequired;
   const controllerContent = (
-    <div className="space-y-3">
+    <div className="space-y-3" data-testid="controller-zone-section">
       <div className="flex items-center gap-2">
         <div className="bg-blue-50 p-2 rounded-md">
           <Cpu className="w-4 h-4 text-blue-600" />
         </div>
         <h3 className="text-base font-semibold text-gray-900">
-          Controller &amp; Zone{" "}
+          {visibility.showZone ? "Controller & Zone" : "Controller"}{" "}
           <span className="text-xs text-gray-500 font-normal">
-            {enforceLocationGate &&
-            (selectedWorkType?.requiresController || selectedWorkType?.requiresZone)
+            {enforceLocationGate && groupRequired
               ? "(required by work type)"
               : "(optional)"}
           </span>
         </h3>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div className="space-y-1">
-          <Label className="text-xs text-gray-600">
-            Controller{" "}
-            {enforceLocationGate && selectedWorkType?.requiresController && (
-              <span className="text-red-500">*</span>
-            )}
-          </Label>
-          <Select
-            value={value.controllerLetter ?? "__none__"}
-            onValueChange={(letter) =>
-              onChange({
-                ...valueRef.current,
-                controllerLetter: letter === "__none__" ? null : letter,
-                zoneNumber: null,
-              })
-            }
-            disabled={controllersLoading || controllers.length === 0}
-          >
-            <SelectTrigger>
-              <SelectValue
-                placeholder={
-                  controllersLoading
-                    ? "Loading controllers…"
-                    : controllers.length === 0
-                      ? "No controllers on file"
-                      : "Select controller"
-                }
-              />
-            </SelectTrigger>
-            <SelectContent>
-              {(!enforceLocationGate || !selectedWorkType?.requiresController) && (
-                <SelectItem value="__none__">— None —</SelectItem>
+      <div
+        className={
+          visibility.showController && visibility.showZone
+            ? "grid grid-cols-1 sm:grid-cols-2 gap-3"
+            : "grid grid-cols-1 gap-3"
+        }
+      >
+        {visibility.showController && (
+          <div className="space-y-1">
+            <Label className="text-xs text-gray-600">
+              Controller{" "}
+              {enforceLocationGate && visibility.controllerRequired && (
+                <span className="text-red-500">*</span>
               )}
-              {controllers.map((controller) => (
-                <SelectItem
-                  key={controller.controllerLetter}
-                  value={controller.controllerLetter}
-                >
-                  Controller {controller.controllerLetter}{" "}
-                  <span className="text-gray-500">({controller.zoneCount} zones)</span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1">
-          <Label className="text-xs text-gray-600 flex items-center gap-1">
-            <Droplets className="w-3 h-3" /> Zone
-            {enforceLocationGate && selectedWorkType?.requiresZone && (
-              <span className="text-red-500">*</span>
+            </Label>
+            <Select
+              value={value.controllerLetter ?? ""}
+              onValueChange={(letter) =>
+                onChange({
+                  ...valueRef.current,
+                  controllerLetter: letter === NONE_VALUE ? null : letter,
+                  zoneNumber: null,
+                })
+              }
+              disabled={controllersLoading || controllers.length === 0}
+            >
+              <SelectTrigger data-testid="select-controller">
+                <SelectValue
+                  placeholder={
+                    controllersLoading
+                      ? "Loading controllers…"
+                      : controllers.length === 0
+                        ? "No controllers on file"
+                        : "Select controller"
+                  }
+                />
+              </SelectTrigger>
+              <SelectContent>
+                {!visibility.controllerRequired && (
+                  <SelectItem value={NONE_VALUE}>— None —</SelectItem>
+                )}
+                {storedControllerMissing && (
+                  <SelectItem value={value.controllerLetter!}>
+                    Controller {value.controllerLetter}{" "}
+                    <span className="text-gray-500">(no longer on file)</span>
+                  </SelectItem>
+                )}
+                {controllers.map((controller) => (
+                  <SelectItem
+                    key={controller.controllerLetter}
+                    value={controller.controllerLetter}
+                  >
+                    Controller {controller.controllerLetter}{" "}
+                    <span className="text-gray-500">({controller.zoneCount} zones)</span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {visibility.zoneRequired && !visibility.controllerRequired && (
+              <p className="text-xs text-gray-500">
+                Needed to pick the zone.
+              </p>
             )}
-          </Label>
-          <Select
-            value={value.zoneNumber == null ? "__none__" : String(value.zoneNumber)}
-            onValueChange={(zone) =>
-              onChange({
-                ...valueRef.current,
-                zoneNumber: zone === "__none__" ? null : Number(zone),
-              })
-            }
-            disabled={!selectedController || zoneCount === 0}
-          >
-            <SelectTrigger>
-              <SelectValue
-                placeholder={!selectedController ? "Pick a controller first" : "Select zone"}
-              />
-            </SelectTrigger>
-            <SelectContent>
-              {(!enforceLocationGate || !selectedWorkType?.requiresZone) && (
-                <SelectItem value="__none__">— None —</SelectItem>
+          </div>
+        )}
+        {visibility.showZone && (
+          <div className="space-y-1">
+            <Label className="text-xs text-gray-600 flex items-center gap-1">
+              <Droplets className="w-3 h-3" /> Zone
+              {enforceLocationGate && visibility.zoneRequired && (
+                <span className="text-red-500">*</span>
               )}
-              {Array.from({ length: zoneCount }, (_, index) => index + 1).map((zone) => (
-                <SelectItem key={zone} value={String(zone)}>
-                  Zone {zone}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+            </Label>
+            <Select
+              value={value.zoneNumber == null ? "" : String(value.zoneNumber)}
+              onValueChange={(zone) =>
+                onChange({
+                  ...valueRef.current,
+                  zoneNumber: zone === NONE_VALUE ? null : Number(zone),
+                })
+              }
+              disabled={!selectedController || zoneCount === 0}
+            >
+              <SelectTrigger data-testid="select-zone">
+                <SelectValue
+                  placeholder={!selectedController ? "Pick a controller first" : "Select zone"}
+                />
+              </SelectTrigger>
+              <SelectContent>
+                {!visibility.zoneRequired && (
+                  <SelectItem value={NONE_VALUE}>— None —</SelectItem>
+                )}
+                {storedZoneOutOfRange && (
+                  <SelectItem value={String(value.zoneNumber)}>
+                    Zone {value.zoneNumber}{" "}
+                    <span className="text-gray-500">(not on this controller)</span>
+                  </SelectItem>
+                )}
+                {Array.from({ length: zoneCount }, (_, index) => index + 1).map((zone) => (
+                  <SelectItem key={zone} value={String(zone)}>
+                    Zone {zone}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -321,12 +435,14 @@ export function WorkLocationControls<T extends WorkLocationRequirementsValue>({
       {grouped ? (
         <>
           {workTypeContent}
-          {controllerContent}
+          {visibility.showControllerZoneGroup && controllerContent}
         </>
       ) : (
         <>
           <div className="rounded-lg border p-4">{workTypeContent}</div>
-          <div className="rounded-lg border p-4">{controllerContent}</div>
+          {visibility.showControllerZoneGroup && (
+            <div className="rounded-lg border p-4">{controllerContent}</div>
+          )}
         </>
       )}
       {showStatus && enforceLocationGate && (

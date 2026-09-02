@@ -1,0 +1,385 @@
+/**
+ * work-location-controls.test.tsx
+ *
+ * The shared work-location card behind Billing Sheet Step 2 and Work Order
+ * completion. Two field reports drive this suite:
+ *
+ *  1. "The Work Type dropdown doesn't expand." The control fed Radix a
+ *     `__none__` sentinel while deliberately not rendering the matching item
+ *     under an enforced gate, so the trigger rendered blank — no value and no
+ *     placeholder — and a company with an unseeded work-type registry opened
+ *     a menu with nothing in it. Both now say what is going on.
+ *  2. "Controller and Zone should be mandatory depending on the work type,
+ *     and otherwise shouldn't show up at all." The card used to render the
+ *     pair unconditionally and only toggle an asterisk.
+ *
+ * The visibility matrix is asserted through the component rather than the
+ * pure helper alone, because the regression that shipped was presentational:
+ * the policy was already correct.
+ */
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+
+import {
+  WorkLocationControls,
+  type WorkLocationRequirementsValue,
+} from "./work-location-controls";
+
+// Radix drives open/close off pointer capture, which jsdom does not implement.
+const proto = Element.prototype as any;
+proto.hasPointerCapture ??= () => false;
+proto.setPointerCapture ??= () => {};
+proto.releasePointerCapture ??= () => {};
+proto.scrollIntoView ??= () => {};
+
+type Rule = {
+  code: string;
+  label: string;
+  requiresController: boolean;
+  requiresZone: boolean;
+  requiresDetails: boolean;
+};
+
+const WORK_TYPES: Rule[] = [
+  { code: "zone_repair", label: "Zone Repair", requiresController: true, requiresZone: true, requiresDetails: false },
+  { code: "head_replacement", label: "Head Replacement", requiresController: true, requiresZone: true, requiresDetails: false },
+  { code: "valve_repair", label: "Valve Repair", requiresController: true, requiresZone: true, requiresDetails: false },
+  { code: "controller_repair", label: "Controller Repair", requiresController: true, requiresZone: false, requiresDetails: false },
+  { code: "backflow", label: "Backflow", requiresController: false, requiresZone: false, requiresDetails: false },
+  { code: "mainline_repair", label: "Mainline Repair", requiresController: false, requiresZone: false, requiresDetails: false },
+  { code: "other", label: "Other", requiresController: false, requiresZone: false, requiresDetails: true },
+];
+
+const CONTROLLERS = [
+  { controllerLetter: "A", zoneCount: 12 },
+  { controllerLetter: "B", zoneCount: 6 },
+];
+
+const CUSTOMER_ID = 7;
+
+function emptyValue(
+  overrides: Partial<WorkLocationRequirementsValue> = {},
+): WorkLocationRequirementsValue {
+  return {
+    workLocation: null,
+    controllerLetter: null,
+    zoneNumber: null,
+    fieldWorkType: null,
+    fieldWorkTypeDetails: "",
+    ...overrides,
+  };
+}
+
+function renderControls(options: {
+  value?: Partial<WorkLocationRequirementsValue>;
+  workTypes?: Rule[];
+  enforce?: boolean;
+  onChange?: (next: WorkLocationRequirementsValue) => void;
+  onGateStateChange?: (complete: boolean, violations: string[]) => void;
+}) {
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, staleTime: Infinity, refetchOnMount: false },
+    },
+  });
+  client.setQueryData(["/api/field-work-types"], options.workTypes ?? WORK_TYPES);
+  client.setQueryData(["/api/properties", CUSTOMER_ID, "controllers"], CONTROLLERS);
+
+  const onChange = options.onChange ?? vi.fn();
+  const view = render(
+    <QueryClientProvider client={client}>
+      <WorkLocationControls
+        customerId={CUSTOMER_ID}
+        value={emptyValue(options.value)}
+        onChange={onChange}
+        enforceLocationGate={options.enforce ?? true}
+        onGateStateChange={options.onGateStateChange as any}
+      />
+    </QueryClientProvider>,
+  );
+  return { ...view, onChange };
+}
+
+function openSelect(testId: string) {
+  fireEvent.pointerDown(screen.getByTestId(testId), {
+    button: 0,
+    ctrlKey: false,
+    pointerType: "mouse",
+  });
+}
+
+describe("work type picker", () => {
+  it("shows the placeholder instead of a blank trigger when nothing is selected", () => {
+    renderControls({});
+    // The bug: Radix only treats "" / undefined as "no value", so the
+    // sentinel left the trigger showing neither a value nor the placeholder.
+    expect(screen.getByTestId("select-work-type")).toHaveTextContent(
+      "Select work type",
+    );
+  });
+
+  it("opens with every active work type and reports the chosen code", async () => {
+    const onChange = vi.fn();
+    renderControls({ onChange });
+
+    openSelect("select-work-type");
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("option").length).toBe(WORK_TYPES.length);
+    });
+    for (const type of WORK_TYPES) {
+      expect(screen.getByRole("option", { name: type.label })).toBeInTheDocument();
+    }
+
+    fireEvent.click(screen.getByRole("option", { name: "Valve Repair" }));
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+    expect(onChange.mock.calls.at(-1)![0]).toMatchObject({
+      fieldWorkType: "valve_repair",
+    });
+  });
+
+  it("names the problem when the company has no work types configured", () => {
+    renderControls({ workTypes: [] });
+
+    expect(screen.getByTestId("text-work-types-unavailable")).toBeInTheDocument();
+    expect(screen.getByTestId("select-work-type")).toHaveTextContent(
+      "No work types configured",
+    );
+    expect(screen.getByTestId("select-work-type")).toBeDisabled();
+  });
+
+  it("still renders a stored code that is no longer offered", async () => {
+    renderControls({ value: { fieldWorkType: "retired_code" } });
+
+    openSelect("select-work-type");
+    await waitFor(() => {
+      expect(
+        screen.getByRole("option", { name: /retired_code \(no longer offered\)/ }),
+      ).toBeInTheDocument();
+    });
+  });
+});
+
+describe("controller & zone visibility", () => {
+  it("hides the group entirely until a work type is chosen", () => {
+    renderControls({});
+    expect(screen.queryByTestId("controller-zone-section")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["zone_repair"],
+    ["head_replacement"],
+    ["valve_repair"],
+  ])("shows both fields, required, for %s", (code) => {
+    renderControls({ value: { fieldWorkType: code } });
+
+    const section = screen.getByTestId("controller-zone-section");
+    expect(within(section).getByTestId("select-controller")).toBeInTheDocument();
+    expect(within(section).getByTestId("select-zone")).toBeInTheDocument();
+    expect(section).toHaveTextContent("(required by work type)");
+  });
+
+  it("shows only the controller for a controller-only rule", () => {
+    renderControls({ value: { fieldWorkType: "controller_repair" } });
+
+    const section = screen.getByTestId("controller-zone-section");
+    expect(within(section).getByTestId("select-controller")).toBeInTheDocument();
+    expect(within(section).queryByTestId("select-zone")).not.toBeInTheDocument();
+    expect(section).toHaveTextContent("(required by work type)");
+  });
+
+  it.each([["backflow"], ["mainline_repair"]])(
+    "hides the whole group for %s",
+    (code) => {
+      renderControls({ value: { fieldWorkType: code } });
+      expect(screen.queryByTestId("controller-zone-section")).not.toBeInTheDocument();
+    },
+  );
+
+  it("asks for details without an irrelevant controller & zone card", () => {
+    renderControls({ value: { fieldWorkType: "other" } });
+
+    expect(screen.getByTestId("input-work-type-details")).toBeInTheDocument();
+    expect(screen.queryByTestId("controller-zone-section")).not.toBeInTheDocument();
+  });
+
+  it("applies the same rules when the gate is not enforced", () => {
+    renderControls({ value: { fieldWorkType: "backflow" }, enforce: false });
+    expect(screen.queryByTestId("controller-zone-section")).not.toBeInTheDocument();
+  });
+
+  it("keeps a legacy stored controller visible even with no work type", () => {
+    renderControls({ value: { controllerLetter: "A", zoneNumber: 3 } });
+
+    const section = screen.getByTestId("controller-zone-section");
+    expect(within(section).getByTestId("select-controller")).toBeInTheDocument();
+    expect(within(section).getByTestId("select-zone")).toBeInTheDocument();
+    // Nothing the rule does not require may be presented as mandatory.
+    expect(section).toHaveTextContent("(optional)");
+  });
+});
+
+describe("clearing stale values when the work type changes", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  async function switchTo(label: string, from: Partial<WorkLocationRequirementsValue>) {
+    const onChange = vi.fn();
+    renderControls({
+      value: { fieldWorkType: "zone_repair", controllerLetter: "A", zoneNumber: 3, ...from },
+      onChange,
+    });
+    openSelect("select-work-type");
+    await waitFor(() => expect(screen.getAllByRole("option").length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("option", { name: label }));
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+    return onChange.mock.calls.at(-1)![0] as WorkLocationRequirementsValue;
+  }
+
+  it("drops both values when the new rule needs neither", async () => {
+    const next = await switchTo("Backflow", {});
+    expect(next).toMatchObject({
+      fieldWorkType: "backflow",
+      controllerLetter: null,
+      zoneNumber: null,
+    });
+  });
+
+  it("keeps the controller but drops the zone for a controller-only rule", async () => {
+    const next = await switchTo("Controller Repair", {});
+    expect(next).toMatchObject({
+      fieldWorkType: "controller_repair",
+      controllerLetter: "A",
+      zoneNumber: null,
+    });
+  });
+
+  it("keeps both when the new rule still needs both", async () => {
+    const next = await switchTo("Head Replacement", {});
+    expect(next).toMatchObject({
+      fieldWorkType: "head_replacement",
+      controllerLetter: "A",
+      zoneNumber: 3,
+    });
+  });
+
+  it("does not clear anything on mount", () => {
+    const onChange = vi.fn();
+    renderControls({
+      value: { fieldWorkType: "backflow", controllerLetter: "A", zoneNumber: 3 },
+      onChange,
+    });
+    // A legacy record whose stored values disagree with its rule must be left
+    // alone; work-order completion persists every onChange immediately.
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("legacy values the controller list disagrees with", () => {
+  function renderWithControllers(options: {
+    controllers: { controllerLetter: string; zoneCount: number }[];
+    value: Partial<WorkLocationRequirementsValue>;
+    customerId?: number;
+  }) {
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, staleTime: Infinity, refetchOnMount: false },
+      },
+    });
+    client.setQueryData(["/api/field-work-types"], WORK_TYPES);
+    client.setQueryData(
+      ["/api/properties", options.customerId ?? CUSTOMER_ID, "controllers"],
+      options.controllers,
+    );
+    const onChange = vi.fn();
+    const ui = (customerId: number) => (
+      <QueryClientProvider client={client}>
+        <WorkLocationControls
+          customerId={customerId}
+          value={emptyValue(options.value)}
+          onChange={onChange}
+          enforceLocationGate
+        />
+      </QueryClientProvider>
+    );
+    const view = render(ui(options.customerId ?? CUSTOMER_ID));
+    return { onChange, rerenderWithCustomer: (id: number) => view.rerender(ui(id)) };
+  }
+
+  it("never erases a stored controller just because the fetch came back empty", () => {
+    // useArrayQuery reports a failed or forbidden controller fetch as [], and
+    // work-order completion persists every onChange straight to the server.
+    const { onChange } = renderWithControllers({
+      controllers: [],
+      value: { fieldWorkType: "zone_repair", controllerLetter: "C", zoneNumber: 4 },
+    });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.getByTestId("select-controller")).toHaveTextContent(
+      "Controller C (no longer on file)",
+    );
+  });
+
+  it("keeps a zone the selected controller no longer has", () => {
+    const { onChange } = renderWithControllers({
+      controllers: CONTROLLERS,
+      value: { fieldWorkType: "zone_repair", controllerLetter: "B", zoneNumber: 9 },
+    });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.getByTestId("select-zone")).toHaveTextContent(
+      "Zone 9 (not on this controller)",
+    );
+  });
+
+  it("does clear when the user switches to a different customer", async () => {
+    const { onChange, rerenderWithCustomer } = renderWithControllers({
+      controllers: CONTROLLERS,
+      value: { fieldWorkType: "zone_repair", controllerLetter: "A", zoneNumber: 3 },
+    });
+    expect(onChange).not.toHaveBeenCalled();
+
+    rerenderWithCustomer(CUSTOMER_ID + 1);
+
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+    expect(onChange.mock.calls.at(-1)![0]).toMatchObject({
+      controllerLetter: null,
+      zoneNumber: null,
+    });
+  });
+});
+
+describe("gate reporting", () => {
+  it("does not demand a hidden field", async () => {
+    const onGateStateChange = vi.fn();
+    renderControls({
+      value: {
+        fieldWorkType: "backflow",
+        workLocation: { lat: 39.7, lng: -104.9 },
+      },
+      onGateStateChange,
+    });
+
+    await waitFor(() => expect(onGateStateChange).toHaveBeenCalled());
+    const [complete, violations] = onGateStateChange.mock.calls.at(-1)!;
+    expect(violations).toEqual([]);
+    expect(complete).toBe(true);
+  });
+
+  it("still blocks on a visible required field", async () => {
+    const onGateStateChange = vi.fn();
+    renderControls({
+      value: {
+        fieldWorkType: "zone_repair",
+        workLocation: { lat: 39.7, lng: -104.9 },
+      },
+      onGateStateChange,
+    });
+
+    await waitFor(() => expect(onGateStateChange).toHaveBeenCalled());
+    const [complete, violations] = onGateStateChange.mock.calls.at(-1)!;
+    expect(violations).toEqual(["controller_missing", "zone_missing"]);
+    expect(complete).toBe(false);
+  });
+});

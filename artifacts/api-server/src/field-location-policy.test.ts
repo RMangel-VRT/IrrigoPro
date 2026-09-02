@@ -4,8 +4,10 @@ import {
   BILLING_SHEET_LOCATION_GATE_EFFECTIVE_AT,
   WORK_ORDER_LOCATION_GATE_EFFECTIVE_AT,
   checkLocationGate,
+  clearLocationFieldsForRule,
   deriveLocationConfidence,
   isLocationGateEnforced,
+  resolveLocationFieldVisibility,
 } from "@workspace/db";
 import { FIELD_WORK_TYPE_SEEDS } from "./seeds/field-work-types";
 
@@ -131,6 +133,111 @@ describe("field location policy", () => {
       deriveLocationConfidence({ workLocationSource: null, workLocationGpsError: null }),
       "unknown",
     );
+  });
+
+  it("never requires a zone without its controller", () => {
+    // A zone is only ever chosen underneath a controller, so the inverse
+    // combination is not expressible in the field UI. The admin PATCH route
+    // refuses it; these defaults must not smuggle it in.
+    for (const rule of FIELD_WORK_TYPE_SEEDS) {
+      if (rule.requiresZone) assert.equal(rule.requiresController, true, rule.code);
+    }
+  });
+
+  it("shows exactly the fields each seeded rule actually uses", () => {
+    const shape = FIELD_WORK_TYPE_SEEDS.map((rule) => {
+      const v = resolveLocationFieldVisibility(rule);
+      return [rule.code, v.showController, v.showZone, v.showControllerZoneGroup];
+    });
+    assert.deepEqual(shape, [
+      ["zone_repair", true, true, true],
+      ["head_replacement", true, true, true],
+      ["valve_repair", true, true, true],
+      ["controller_repair", true, false, true],
+      ["backflow", false, false, false],
+      ["mainline_repair", false, false, false],
+      ["other", false, false, false],
+    ]);
+  });
+
+  it("never hides a field the gate would still demand", () => {
+    // The presentation layer and the validator read the same rule, so a
+    // required-but-invisible field would be an unfixable block.
+    for (const rule of FIELD_WORK_TYPE_SEEDS) {
+      const v = resolveLocationFieldVisibility(rule);
+      const violations = checkLocationGate({ ...emptyInput, fieldWorkType: rule.code }, rule);
+      if (violations.includes("controller_missing")) assert.equal(v.showController, true);
+      if (violations.includes("zone_missing")) assert.equal(v.showZone, true);
+      assert.equal(v.controllerRequired, violations.includes("controller_missing"));
+      assert.equal(v.zoneRequired, violations.includes("zone_missing"));
+    }
+  });
+
+  it("keeps a stored value visible even when its rule does not use it", () => {
+    // Legacy tickets predate the registry; hiding stored data would make it
+    // uneditable and invisible rather than merely optional.
+    const backflow = FIELD_WORK_TYPE_SEEDS.find((r) => r.code === "backflow")!;
+    const v = resolveLocationFieldVisibility(backflow, { hasController: true, hasZone: true });
+    assert.equal(v.showController, true);
+    assert.equal(v.showZone, true);
+    assert.equal(v.controllerRequired, false);
+    assert.equal(v.zoneRequired, false);
+
+    const orphan = resolveLocationFieldVisibility(null, { hasController: true });
+    assert.equal(orphan.showControllerZoneGroup, true);
+  });
+
+  it("hides everything until a work type is chosen", () => {
+    const v = resolveLocationFieldVisibility(null);
+    assert.deepEqual(v, {
+      showControllerZoneGroup: false,
+      showController: false,
+      showZone: false,
+      controllerRequired: false,
+      zoneRequired: false,
+    });
+  });
+
+  it("drops only the values the newly chosen rule stops using", () => {
+    const current = { controllerLetter: "A", zoneNumber: 3 };
+    const byCode = (code: string) => FIELD_WORK_TYPE_SEEDS.find((r) => r.code === code)!;
+
+    assert.deepEqual(clearLocationFieldsForRule(byCode("head_replacement"), current), {
+      controllerLetter: "A",
+      zoneNumber: 3,
+    });
+    assert.deepEqual(clearLocationFieldsForRule(byCode("controller_repair"), current), {
+      controllerLetter: "A",
+      zoneNumber: null,
+    });
+    assert.deepEqual(clearLocationFieldsForRule(byCode("backflow"), current), {
+      controllerLetter: null,
+      zoneNumber: null,
+    });
+    assert.deepEqual(clearLocationFieldsForRule(null, current), {
+      controllerLetter: null,
+      zoneNumber: null,
+    });
+  });
+
+  it("leaves nothing behind that the new rule would then reject", () => {
+    // Clearing must be sufficient on its own: whatever survives the switch
+    // has to satisfy the gate for the rule that caused the switch.
+    for (const rule of FIELD_WORK_TYPE_SEEDS) {
+      const cleared = clearLocationFieldsForRule(rule, { controllerLetter: "A", zoneNumber: 3 });
+      const violations = checkLocationGate(
+        {
+          ...emptyInput,
+          workLocationLat: 39.7,
+          workLocationLng: -104.9,
+          fieldWorkType: rule.code,
+          fieldWorkTypeDetails: rule.requiresDetails ? "notes" : null,
+          ...cleared,
+        },
+        rule,
+      );
+      assert.deepEqual(violations, [], `${rule.code} should be satisfiable after clearing`);
+    }
   });
 
   it("ships only billing enabled and evaluates an explicit cutoff independently", () => {

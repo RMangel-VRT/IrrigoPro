@@ -93,6 +93,31 @@ export function registerFieldWorkTypeRoutes(
         return;
       }
       try {
+        // A zone is always chosen underneath a controller, on every surface
+        // that captures one. Allowing "requires a zone but not its
+        // controller" would let a tenant configure a requirement the field
+        // UI cannot express, so the combination is refused at the boundary
+        // rather than papered over downstream.
+        if (
+          parsed.data.requiresZone !== undefined ||
+          parsed.data.requiresController !== undefined
+        ) {
+          const current = await routeStorage.getFieldWorkTypeById(id, companyId);
+          if (!current) {
+            res.status(404).json({ message: "Field work type not found" });
+            return;
+          }
+          const requiresZone = parsed.data.requiresZone ?? current.requiresZone;
+          const requiresController =
+            parsed.data.requiresController ?? current.requiresController;
+          if (requiresZone && !requiresController) {
+            res.status(400).json({
+              message:
+                "A work type that requires a zone must also require its controller.",
+            });
+            return;
+          }
+        }
         const updated = await routeStorage.updateFieldWorkType(id, companyId, parsed.data);
         // Deliberately 404 for a foreign tenant: existence must not be disclosed.
         if (!updated) {
