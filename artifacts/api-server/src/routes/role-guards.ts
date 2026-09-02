@@ -26,6 +26,7 @@ import {
   CAN_VIEW_REMINDER_HISTORY,
   CAN_MANAGE_QUICKBOOKS,
   CAN_MANAGE_FIELD_WORK_TYPES,
+  CAN_READ_LOCATION_REPORT,
 } from "@workspace/shared";
 
 // ── header auth (dev only) ───────────────────────────────────────────────────
@@ -177,6 +178,17 @@ export const requireFieldWorkTypeAdmin: Guard = (req, res, next) => {
   if (!hasCapability(req.authenticatedUserRole, CAN_MANAGE_FIELD_WORK_TYPES)) {
     res.status(403).json({
       message: "Access denied. Only company administrators can manage field work types.",
+    });
+    return;
+  }
+  next();
+};
+
+/** Read the company-scoped missing-location audit report. */
+export const requireLocationReportRead: Guard = (req, res, next) => {
+  if (!hasCapability(req.authenticatedUserRole, CAN_READ_LOCATION_REPORT)) {
+    res.status(403).json({
+      message: "Access denied. You do not have permission to read this report.",
     });
     return;
   }

@@ -10,7 +10,11 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { hasCapability, CAN_READ_INVOICES } from "@workspace/shared";
+import {
+  hasCapability,
+  CAN_READ_INVOICES,
+  CAN_READ_LOCATION_REPORT,
+} from "@workspace/shared";
 import {
   billingManagerNav,
   bookkeeperNav,
@@ -183,12 +187,12 @@ describe("bookkeeperNav — grouped sidebar (Task #1914)", () => {
     walk(bookkeeperNav.items);
   });
 
-  it("reaches exactly the routes it reached before the restructure", () => {
-    // Task #1886's route set, unchanged. Grouping is presentation, not access.
+  it("reaches its authorized routes", () => {
     expect(collectAllLeafPaths(bookkeeperNav.items).sort()).toEqual([
       "/customers",
       "/invoices",
       "/quickbooks",
+      "/reports/missing-location-data",
     ]);
   });
 
@@ -216,9 +220,33 @@ describe("bookkeeperNav — grouped sidebar (Task #1914)", () => {
       "group Invoices (open)",
       "  leaf /invoices [overdueInvoices]",
       "leaf /customers",
+      "group Reports",
+      "  leaf /reports/missing-location-data",
       "group Settings",
       "  leaf /quickbooks",
     ]);
+  });
+});
+
+describe("Missing Location Data report navigation", () => {
+  const reportPath = "/reports/missing-location-data";
+  const configs = {
+    super_admin: superAdminNav,
+    company_admin: companyAdminNav,
+    billing_manager: billingManagerNav,
+    irrigation_manager: managerNav,
+    bookkeeper: bookkeeperNav,
+  } as const;
+
+  for (const [role, config] of Object.entries(configs)) {
+    it(`keeps ${role} navigation aligned with the report-read capability`, () => {
+      expect(hasCapability(role, CAN_READ_LOCATION_REPORT)).toBe(true);
+      expect(collectAllLeafPaths(config.items)).toContain(reportPath);
+    });
+  }
+
+  it("does not grant the report to field technicians", () => {
+    expect(hasCapability("field_tech", CAN_READ_LOCATION_REPORT)).toBe(false);
   });
 });
 
@@ -298,6 +326,7 @@ describe("no other role's nav structure moved (Task #1914)", () => {
       "    leaf /billing-sheets/missing-photos",
       "    leaf /billing-sheets/zero-price-audit",
       "    leaf /billing-sheets/labor-rate-audit",
+      "    leaf /reports/missing-location-data",
       "group Operations",
       "  leaf /work-orders",
       "  leaf /estimates/pending-approval [estimatesPendingApproval]",
@@ -337,6 +366,7 @@ describe("no other role's nav structure moved (Task #1914)", () => {
       "    leaf /billing-sheets/missing-photos",
       "    leaf /billing-sheets/zero-price-audit",
       "    leaf /billing-sheets/labor-rate-audit",
+      "    leaf /reports/missing-location-data",
       "    leaf /admin/wet-check-reconciliation",
       "group Parts",
       "  leaf /parts",
@@ -362,6 +392,8 @@ describe("no other role's nav structure moved (Task #1914)", () => {
       "  leaf /switch-user",
       "group Wet Check",
       "  leaf /wet-checks",
+      "group Reports",
+      "  leaf /reports/missing-location-data",
       "group System",
       "  leaf /admin/controllers",
       "  leaf /financial-pulse",
@@ -377,6 +409,8 @@ describe("no other role's nav structure moved (Task #1914)", () => {
   it("managerNav", () => {
     expect(shape(managerNav.items)).toEqual([
       "leaf /manager-workspace",
+      "group Reports",
+      "  leaf /reports/missing-location-data",
       "group Wet Check",
       "  leaf /wet-checks",
       "group Operations (open)",

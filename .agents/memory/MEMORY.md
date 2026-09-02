@@ -39,3 +39,4 @@
 - [Billing PDFs use no emoji entities](billing-pdf-no-emoji-entities.md) — use inline currentColor SVG for every icon, including conditional warnings, even when local Chromium renders the glyph.
 - [Chromium PDF atomic cards](chromium-pdf-atomic-cards.md) — break-inside alone may still fragment bordered blocks; use an atomic inline-block and verify the rasterized page boundary.
 - [Offline ordering dependencies](offline-ordering-dependencies.md) — serialize list+enqueue; reconnects must join existing chains, and terminal/cancelled ordering parents must release dependents.
+- [Report links across role boundaries](report-links-role-boundaries.md) — a report-read capability must not expose a broader mutable ticket page just to make canonical links work.

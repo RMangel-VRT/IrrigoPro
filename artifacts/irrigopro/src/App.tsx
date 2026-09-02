@@ -42,6 +42,8 @@ const FinancialPulsePage = lazyPage(() => import("@/pages/financial-pulse"));
 const SuperAdminAppHealthPage = lazyPage(() => import("@/pages/super-admin-app-health"));
 const SuperAdminLoosePhotosPage = lazyPage(() => import("@/pages/super-admin-loose-photos"));
 const LaborRateAuditPage = lazyPage(() => import("@/pages/labor-rate-audit"));
+const MissingLocationDataReportPage = lazyPage(() => import("@/pages/missing-location-data-report"));
+const MissingLocationTicketDetail = lazyPage(() => import("@/pages/missing-location-ticket-detail"));
 const CustomerBilling = lazyPage(() => import("@/pages/customer-billing"));
 const QuickBooksPage = lazyPage(() => import("@/pages/quickbooks"));
 const AdminControllers = lazyPage(() => import("@/pages/admin-controllers"));
@@ -312,6 +314,7 @@ function Router() {
                   <Route path="/billing-sheets/missing-photos" component={MissingPhotosReport} />
                   <Route path="/billing-sheets/zero-price-audit" component={BillingZeroPriceAuditPage} />
                   <Route path="/billing-sheets/labor-rate-audit" component={LaborRateAuditPage} />
+                  <Route path="/reports/missing-location-data" component={MissingLocationDataReportPage} />
                   <Route path="/billing-sheets" component={BillingSheets} />
                   <Route path="/wet-check-billings" component={RedirectToWetChecksApproved} />
                   <Route path="/admin/issue-types" component={AdminIssueTypesPage} />
@@ -355,9 +358,10 @@ function Router() {
 
   // Task #1886 — Bookkeeper: invoice visibility and QuickBooks custody, nothing
   // else. Shares the DesktopShell component with the billing manager but gets
-  // its own nav config and its own (much shorter) route list — no Financial
-  // Pulse, Manager Workspace, Billing Sheets, Wet Checks, Work Orders, or
-  // Estimates Pending Approval. Landing route is the invoice list.
+  // its own nav config and its own (much shorter) route list. Work Orders and
+  // Billing Sheets are deep-link targets for the read-only location report;
+  // they remain absent from navigation and their mutation controls stay
+  // role-gated. Landing route is the invoice list.
   if (user.role === "bookkeeper") {
     return (
       <TooltipProvider>
@@ -368,6 +372,13 @@ function Router() {
                 <Switch>
                   <Route path="/" component={InvoicesPage} />
                   <Route path="/invoices" component={InvoicesPage} />
+                  <Route path="/reports/missing-location-data" component={MissingLocationDataReportPage} />
+                  <Route path="/work-orders">
+                    {() => <MissingLocationTicketDetail ticketType="work_order" />}
+                  </Route>
+                  <Route path="/billing-sheets">
+                    {() => <MissingLocationTicketDetail ticketType="billing_sheet" />}
+                  </Route>
                   <Route path="/customers" component={Customers} />
                   <Route path="/customers/:id/profile" component={CustomerProfile} />
                   <Route path="/quickbooks" component={QuickBooksPage} />
@@ -412,6 +423,7 @@ function Router() {
                   <Route path="/billing-sheets/missing-photos" component={MissingPhotosReport} />
                   <Route path="/billing-sheets/zero-price-audit" component={BillingZeroPriceAuditPage} />
                   <Route path="/billing-sheets/labor-rate-audit" component={LaborRateAuditPage} />
+                  <Route path="/reports/missing-location-data" component={MissingLocationDataReportPage} />
                   <Route path="/billing-sheets" component={BillingSheets} />
                   <Route path="/wet-check-billings" component={RedirectToWetChecksApproved} />
                   <Route path="/manager/wet-checks" component={RedirectToWetChecks} />
@@ -431,6 +443,7 @@ function Router() {
                   <Route path="/estimates/pending-approval" component={EstimatesPendingApproval} />
                   <Route path="/quickbooks" component={QuickBooksPage} />
                   <Route path="/invoices" component={InvoicesPage} />
+                  <Route path="/reports/missing-location-data" component={MissingLocationDataReportPage} />
                   <Route path="/admin/issue-types" component={AdminIssueTypesPage} />
                   <Route path="/switch-user" component={SwitchUser} />
                   <Route path="/user-profile" component={UserProfile} />
@@ -479,6 +492,8 @@ function Router() {
                   <Route path="/wet-checks/:id/summary" component={WetCheckInspectionSummaryPage} />
                   <Route path="/wet-checks/:id" component={WetChecksRoutingPage} />
                   <Route path="/wet-check-billings" component={RedirectToWetChecksApproved} />
+                  <Route path="/work-orders" component={WorkOrders} />
+                  <Route path="/billing-sheets" component={BillingSheets} />
                   <Route path="/customers" component={Customers} />
                   <Route path="/customers/:id/profile" component={CustomerProfile} />
                   <Route path="/customers/:customerId/site-maps" component={CustomerSiteMapsPage} />
@@ -491,6 +506,7 @@ function Router() {
                   <Route path="/admin/migrations" component={AdminMigrationsPage} />
                   <Route path="/admin/wc-labor-backfill" component={AdminWcLaborBackfillPage} />
                   <Route path="/admin/wet-check-reconciliation" component={WetCheckReconciliationPage} />
+                  <Route path="/reports/missing-location-data" component={MissingLocationDataReportPage} />
                   <Route path="/quickbooks" component={QuickBooksPage} />
                   <Route path="/admin/issue-types" component={AdminIssueTypesPage} />
                   <Route path="/financial-pulse" component={FinancialPulsePage} />

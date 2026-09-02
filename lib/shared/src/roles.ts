@@ -208,6 +208,15 @@ export const CAN_MANAGE_FIELD_WORK_TYPES = new Set<Role>([
   "company_admin",
 ]);
 
+/** Read the combined missing-location audit report. */
+export const CAN_READ_LOCATION_REPORT = new Set<Role>([
+  "super_admin",
+  "company_admin",
+  "billing_manager",
+  "irrigation_manager",
+  "bookkeeper",
+]);
+
 // ─── UI landing defaults ────────────────────────────────────────────────────
 //
 // Task #1890 — which roles land on a non-default *view* is a presentation

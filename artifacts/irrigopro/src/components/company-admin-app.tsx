@@ -58,6 +58,7 @@ import ManagerWetCheckDetailPage from "@/pages/wet-checks/ManagerWetCheckDetailP
 import CombinedReviewPage from "@/pages/wet-checks/CombinedReviewPage";
 import BillingZeroPriceAuditPage from "@/pages/billing-zero-price-audit";
 import LaborRateAuditPage from "@/pages/labor-rate-audit";
+import MissingLocationDataReportPage from "@/pages/missing-location-data-report";
 import MissingPhotosReport from "@/pages/missing-photos-report";
 import WorkOrdersMissingPhotosReport from "@/pages/work-orders-missing-photos-report";
 import PartsSettings from "@/pages/parts-settings";
@@ -198,6 +199,7 @@ export default function CompanyAdminApp({ user }: CompanyAdminAppProps) {
           <Route path="/billing-sheets/missing-photos" component={MissingPhotosReport} />
           <Route path="/billing-sheets/zero-price-audit" component={BillingZeroPriceAuditPage} />
           <Route path="/billing-sheets/labor-rate-audit" component={LaborRateAuditPage} />
+          <Route path="/reports/missing-location-data" component={MissingLocationDataReportPage} />
           <Route path="/billing-sheets" component={BillingSheets} />
           <Route path="/wet-check-billings" component={RedirectToWetChecksApproved} />
           <Route path="/manager/wet-checks" component={RedirectToWetChecks} />

@@ -86,7 +86,27 @@ const baseReportItems: NavItem[] = [
     path: "/billing-sheets/labor-rate-audit",
     icon: ShieldCheck,
   },
+  {
+    type: "leaf",
+    label: "Missing Location Data",
+    path: "/reports/missing-location-data",
+    icon: ShieldCheck,
+  },
 ];
+
+export const locationReportGroup: NavGroup = {
+  type: "group",
+  label: "Reports",
+  icon: BarChart3,
+  items: [
+    {
+      type: "leaf",
+      label: "Missing Location Data",
+      path: "/reports/missing-location-data",
+      icon: ShieldCheck,
+    },
+  ],
+};
 
 export const reportsGroup: NavGroup = {
   type: "group",
@@ -221,6 +241,7 @@ export const bookkeeperNav: NavConfig = {
       ],
     },
     { type: "leaf", label: "Customers", path: "/customers", icon: Users },
+    locationReportGroup,
     {
       type: "group",
       label: "Settings",
@@ -235,6 +256,7 @@ export const bookkeeperNav: NavConfig = {
 export const managerNav: NavConfig = {
   items: [
     { type: "leaf", label: "Manager Workspace", path: "/manager-workspace", icon: ClipboardCheck },
+    locationReportGroup,
     wetCheckGroup,
     {
       type: "group",
@@ -278,6 +300,7 @@ export const superAdminNav: NavConfig = {
       ],
     },
     wetCheckGroup,
+    locationReportGroup,
     {
       type: "group",
       label: "System",
