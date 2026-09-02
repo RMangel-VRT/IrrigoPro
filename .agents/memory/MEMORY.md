@@ -1,3 +1,4 @@
+// hint: Logic changed on both sides. Requires understanding intent of each change.
 - [Testable route extraction pattern](route-extraction-pattern.md) — extract inline handlers to separate modules for storage-spy tests; never mirror handler logic in tests.
 - [offline-photo-FK-anchor](offline-photo-FK-anchor.md) — queuePhotoUpload body must include zoneRecordId/findingId; absence causes every photo to land loose.
 - [Finding-create photo linking](finding-photo-linking.md) — every finding-create path (FindingSheet + ZoneScreen CustomFindingEditor) must re-link pre-uploaded photos or they land loose (findingId=NULL).
@@ -40,5 +41,6 @@
 - [Chromium PDF atomic cards](chromium-pdf-atomic-cards.md) — break-inside alone may still fragment bordered blocks; use an atomic inline-block and verify the rasterized page boundary.
 - [Offline ordering dependencies](offline-ordering-dependencies.md) — serialize list+enqueue; reconnects must join existing chains, and terminal/cancelled ordering parents must release dependents.
 - [Report links across role boundaries](report-links-role-boundaries.md) — a report-read capability must not expose a broader mutable ticket page just to make canonical links work.
+- [A run's own report is not evidence](migration-run-proof.md) — re-read status after commit, flag report-vs-reality mismatch, and invalidate the page's caches; nothing refreshes on its own.
 - [Gates over an empty tenant registry](gate-fail-open-empty-registry.md) — a requirement the tenant cannot satisfy is an outage; fail open on a confirmed-empty count and audit the skip.
 - [Radix Select blank trigger](radix-select-sentinel-blank-trigger.md) — a sentinel value with no rendered item shows neither value nor placeholder; unseeded tenant option lists read as "won't open".

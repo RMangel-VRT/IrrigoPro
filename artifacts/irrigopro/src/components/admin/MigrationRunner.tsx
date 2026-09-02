@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { CheckCircle, XCircle, Loader2, Clock } from "lucide-react";
+import { AlertTriangle, CheckCircle, XCircle, Loader2, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { apiRequest } from "@/lib/queryClient";
 import type { MigrationProgress, MigrationStepResult } from "@/types/migrations";
@@ -47,7 +47,12 @@ export function MigrationRunner({ migrationId, acknowledged, onComplete }: Migra
             "GET",
           ) as MigrationProgress;
           setProgress(prog);
-          if (prog.state === "succeeded" || prog.state === "failed" || prog.state === "aborted") {
+          if (
+            prog.state === "succeeded" ||
+            prog.state === "failed" ||
+            prog.state === "aborted" ||
+            prog.state === "mismatched"
+          ) {
             stopPolling();
             onComplete?.(prog);
           }
@@ -118,9 +123,45 @@ export function MigrationRunner({ migrationId, acknowledged, onComplete }: Migra
           </div>
 
           {progress.state === "succeeded" && (
-            <div className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg text-green-700 text-sm font-medium">
+            <div
+              className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg text-green-700 text-sm font-medium"
+              data-testid="migration-success-banner"
+            >
               <CheckCircle className="w-4 h-4" />
               Migration completed successfully
+              {progress.postRun && (
+                <span className="font-normal text-xs opacity-80">
+                  (re-read after the run:{" "}
+                  {progress.postRun.status.state.replace(/_/g, " ")})
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Task #1982 — the run said success, the database disagrees. This
+              replaces the green banner outright: it is the signature of a run
+              reporting writes that are not there. */}
+          {progress.state === "mismatched" && (
+            <div
+              className="flex items-start gap-2 p-3 bg-amber-50 border-2 border-amber-500 rounded-lg text-amber-900 text-sm"
+              data-testid="migration-mismatch-banner"
+            >
+              <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5 text-amber-600" />
+              <div className="space-y-1">
+                <p className="font-semibold uppercase tracking-wide text-xs text-amber-700">
+                  Reported success — but the database says otherwise
+                </p>
+                <p>{progress.mismatch?.summary ?? "The post-run re-read does not confirm this migration completed."}</p>
+                {progress.mismatch?.details && (
+                  <p className="text-xs">{progress.mismatch.details}</p>
+                )}
+                {progress.postRun && (
+                  <p className="text-xs opacity-80">
+                    Re-read at {new Date(progress.postRun.checkedAt).toLocaleTimeString()} — status:{" "}
+                    {progress.postRun.status.state.replace(/_/g, " ")}
+                  </p>
+                )}
+              </div>
             </div>
           )}
 

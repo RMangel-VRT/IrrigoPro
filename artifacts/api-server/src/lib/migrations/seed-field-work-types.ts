@@ -124,9 +124,63 @@ async function preview(): Promise<MigrationPreview> {
   };
 }
 
-async function run(
+/**
+ * Seams for the reporting-contract tests. The default implementations are the
+ * real database; a test supplies fakes so "the insert throws" and "the writes
+ * are committed" can both be exercised without a database.
+ */
+export type SeedFieldWorkTypesRunDeps = {
+  /** Runs `body` in a transaction; a throw rolls back everything inside it. */
+  withTransaction<T>(body: (tx: SeedTransaction) => Promise<T>): Promise<T>;
+  /** Companies to seed, read inside the transaction. */
+  listCompanyIds(tx: SeedTransaction): Promise<number[]>;
+  /** Inserts the missing defaults for one company; returns rows inserted. */
+  seedCompany(tx: SeedTransaction, companyId: number): Promise<number>;
+  /** Writes the completion marker — inside the same transaction as the seeds. */
+  writeMarker(tx: SeedTransaction, completedAt: string): Promise<void>;
+  /** Re-reads the seed state after the transaction commits. */
+  loadStateAfterCommit(): Promise<SeedState>;
+};
+
+// Whatever the transaction handle is; the deps decide how to use it.
+type SeedTransaction = any;
+
+function defaultRunDeps(): SeedFieldWorkTypesRunDeps {
+  return {
+    withTransaction: (body) => db.transaction((tx) => body(tx)),
+    listCompanyIds: async (tx) => {
+      const rows = await tx.select({ id: companies.id }).from(companies);
+      return rows.map((row: { id: number }) => row.id);
+    },
+    seedCompany: (tx, companyId) => seedFieldWorkTypesForCompany(companyId, tx),
+    writeMarker: async (tx, completedAt) => {
+      await tx
+        .insert(appSettings)
+        .values({ key: FIELD_WORK_TYPE_SEED_DONE_KEY, value: completedAt })
+        .onConflictDoUpdate({
+          target: appSettings.key,
+          set: { value: completedAt, updatedAt: new Date() },
+        });
+    },
+    loadStateAfterCommit: loadState,
+  };
+}
+
+/**
+ * Run the seed under the step reporting contract (see `types.ts`):
+ *
+ *   * the inserts and the completion marker share one transaction, so a
+ *     failure part-way through leaves neither behind — no marker can vouch
+ *     for rows that were rolled back;
+ *   * every step result is pushed **after** the transaction commits, so a
+ *     `success` can never describe a write that was undone;
+ *   * `rowsAffected` is reconciled against a post-commit re-read, so it counts
+ *     rows that are actually present rather than statements attempted.
+ */
+export async function runSeedFieldWorkTypes(
   emit: ProgressEmitter,
   opts?: MigrationRunOptions,
+  deps: SeedFieldWorkTypesRunDeps = defaultRunDeps(),
 ): Promise<MigrationStepResult[]> {
   if (opts?.acknowledged !== true) {
     return [{
@@ -137,66 +191,85 @@ async function run(
     }];
   }
 
-  const results: MigrationStepResult[] = [];
   const seedStarted = Date.now();
   emit({ step: "seed-defaults", status: "running" });
-  try {
-    const companyRows = await db.select({ id: companies.id }).from(companies);
-    let inserted = 0;
-    for (const company of companyRows) {
-      inserted += await seedFieldWorkTypesForCompany(company.id);
-    }
-    const result = {
-      id: "seed-defaults",
-      status: "success" as const,
-      durationMs: Date.now() - seedStarted,
-      rowsAffected: inserted,
-    };
-    results.push(result);
-    emit({ step: result.id, status: result.status, rowsAffected: inserted });
-  } catch (error) {
-    const result = {
-      id: "seed-defaults",
-      status: "failed" as const,
-      durationMs: Date.now() - seedStarted,
-      error: error instanceof Error ? error.message : String(error),
-    };
-    results.push(result);
-    emit({ step: result.id, status: result.status, error: result.error });
-    return results;
-  }
-
-  const markerStarted = Date.now();
   emit({ step: "mark-done", status: "running" });
+
+  let inserted = 0;
   try {
-    const completedAt = new Date().toISOString();
-    await db
-      .insert(appSettings)
-      .values({ key: FIELD_WORK_TYPE_SEED_DONE_KEY, value: completedAt })
-      .onConflictDoUpdate({
-        target: appSettings.key,
-        set: { value: completedAt, updatedAt: new Date() },
-      });
-    const result = {
-      id: "mark-done",
-      status: "success" as const,
-      durationMs: Date.now() - markerStarted,
-      rowsAffected: 1,
-    };
-    results.push(result);
-    emit({ step: result.id, status: result.status, rowsAffected: 1 });
+    inserted = await deps.withTransaction(async (tx) => {
+      const companyIds = await deps.listCompanyIds(tx);
+      let count = 0;
+      for (const companyId of companyIds) {
+        count += await deps.seedCompany(tx, companyId);
+      }
+      await deps.writeMarker(tx, new Date().toISOString());
+      return count;
+    });
   } catch (error) {
-    const result = {
-      id: "mark-done",
-      status: "failed" as const,
-      durationMs: Date.now() - markerStarted,
-      error: error instanceof Error ? error.message : String(error),
-    };
-    results.push(result);
-    emit({ step: result.id, status: result.status, error: result.error });
+    // Nothing was committed — neither the inserts nor the marker — so both
+    // steps report failure and check() still reads "not started".
+    const message = error instanceof Error ? error.message : String(error);
+    const durationMs = Date.now() - seedStarted;
+    emit({ step: "seed-defaults", status: "failed", error: message });
+    emit({
+      step: "mark-done",
+      status: "failed",
+      error: "Rolled back with the seed inserts; no completion marker was written.",
+    });
+    return [
+      { id: "seed-defaults", status: "failed", durationMs, error: message },
+      {
+        id: "mark-done",
+        status: "failed",
+        durationMs: 0,
+        error: "Rolled back with the seed inserts; no completion marker was written.",
+      },
+    ];
   }
 
-  return results;
+  // Committed. Reconcile the reported count against what is actually there.
+  const durationMs = Date.now() - seedStarted;
+  let rowsAffected = inserted;
+  let shortfall: string | undefined;
+  try {
+    const after = await deps.loadStateAfterCommit();
+    if (after.rowsMissing > 0) {
+      // The writes committed but the defaults are still not all present:
+      // report the rows that are genuinely there, not the attempted count.
+      rowsAffected = Math.max(inserted - after.rowsMissing, 0);
+      shortfall =
+        `${after.rowsMissing} default field work type(s) are still missing after the run ` +
+        `across ${after.companiesMissingDefaults} company/companies.`;
+    }
+  } catch (error) {
+    shortfall = `Post-commit verification failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  }
+
+  if (shortfall) {
+    emit({ step: "seed-defaults", status: "failed", error: shortfall });
+    emit({ step: "mark-done", status: "success", rowsAffected: 1 });
+    return [
+      { id: "seed-defaults", status: "failed", durationMs, rowsAffected, error: shortfall },
+      { id: "mark-done", status: "success", durationMs: 0, rowsAffected: 1 },
+    ];
+  }
+
+  emit({ step: "seed-defaults", status: "success", rowsAffected });
+  emit({ step: "mark-done", status: "success", rowsAffected: 1 });
+  return [
+    { id: "seed-defaults", status: "success", durationMs, rowsAffected },
+    { id: "mark-done", status: "success", durationMs: 0, rowsAffected: 1 },
+  ];
+}
+
+async function run(
+  emit: ProgressEmitter,
+  opts?: MigrationRunOptions,
+): Promise<MigrationStepResult[]> {
+  return runSeedFieldWorkTypes(emit, opts);
 }
 
 export const seedFieldWorkTypesMigration: MigrationDefinition = {

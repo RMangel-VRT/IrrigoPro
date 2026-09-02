@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
-import { useQuery } from "@tanstack/react-query";
-import { Database, Eye, Shield } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Database, Eye, Server, Shield } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -9,7 +9,48 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { apiRequest } from "@/lib/queryClient";
 import { MigrationStatusBadge } from "@/components/admin/MigrationStatusBadge";
 import { MigrationRunner } from "@/components/admin/MigrationRunner";
-import type { MigrationListItem, MigrationPreview, MigrationProgress } from "@/types/migrations";
+import type {
+  MigrationListItem,
+  MigrationPreview,
+  MigrationProgress,
+  MigrationTarget,
+} from "@/types/migrations";
+
+// Task #1982 — the migrations page must name the database it is acting on, so
+// a production repair can never be mistaken for a dev one. Shared by the page
+// header and the run dialog.
+export function useMigrationTarget() {
+  return useQuery<MigrationTarget>({
+    queryKey: ["/api/admin/migrations", "environment"],
+    queryFn: async () => {
+      return await apiRequest("/api/admin/migrations/environment", "GET");
+    },
+  });
+}
+
+export function TargetBanner({ target }: { target?: MigrationTarget }) {
+  if (!target) return null;
+  const isProd = target.environment === "production" || target.deployment;
+  return (
+    <div
+      data-testid="migration-target"
+      className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs ${
+        isProd
+          ? "bg-red-50 border-red-300 text-red-800"
+          : "bg-gray-50 border-gray-200 text-gray-700"
+      }`}
+    >
+      <Server className="w-3.5 h-3.5 shrink-0" />
+      <span>
+        Acting on <span className="font-semibold uppercase">{target.environment}</span>
+        {" · "}
+        database <span className="font-mono">{target.database}</span>
+        {" on "}
+        <span className="font-mono">{target.host}</span>
+      </span>
+    </div>
+  );
+}
 
 function useCurrentUser() {
   const raw = localStorage.getItem("user");
@@ -27,6 +68,8 @@ export function PreviewModal({
   const [acknowledged, setAcknowledged] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
   const [lastProgress, setLastProgress] = useState<MigrationProgress | null>(null);
+  const queryClient = useQueryClient();
+  const { data: target } = useMigrationTarget();
 
   const { data: preview, isLoading, error } = useQuery<MigrationPreview>({
     queryKey: ["/api/admin/migrations", migrationId, "preview"],
@@ -42,9 +85,18 @@ export function PreviewModal({
 
   const canRun = (!hasOrphans && !hasWarnings) || acknowledged;
 
+  // Task #1982 — the app sets `staleTime: Infinity` globally, so neither the
+  // preview nor the migration list ever refreshes on its own. Without these
+  // invalidations the counts beside a finished run are the ones fetched
+  // *before* it ran — which is exactly how a green banner ended up next to
+  // "14 missing". Invalidate explicitly so the numbers on screen are post-run.
   function handleRunComplete(prog: MigrationProgress) {
     setLastProgress(prog);
     setRunOpen(false);
+    void queryClient.invalidateQueries({
+      queryKey: ["/api/admin/migrations", migrationId, "preview"],
+    });
+    void queryClient.invalidateQueries({ queryKey: ["/api/admin/migrations"], exact: true });
   }
 
   return (
@@ -53,6 +105,8 @@ export function PreviewModal({
         <DialogHeader>
           <DialogTitle className="text-base font-semibold">Migration Preview</DialogTitle>
         </DialogHeader>
+
+        <TargetBanner target={target} />
 
         {isLoading && (
           <div className="py-8 text-center text-gray-500 text-sm">Loading preview…</div>
@@ -63,6 +117,13 @@ export function PreviewModal({
             Failed to load preview.
           </div>
         )}
+
+        {/*
+          When a refetch fails React Query keeps the last successful data, so
+          the counts below would silently be the pre-run ones. Numbers that
+          cannot be re-read must not be shown at all — that ambiguity is the
+          whole incident.
+        */}
 
         {preview && (
           <div className="space-y-4">
@@ -80,14 +141,20 @@ export function PreviewModal({
 
             <div>
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Orphan row counts</p>
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-                {Object.entries(preview.orphanRows).map(([tbl, n]) => (
-                  <div key={tbl} className="flex justify-between gap-2">
-                    <span className="font-mono text-gray-600">{tbl}</span>
-                    <span className={n > 0 ? "text-red-600 font-semibold" : "text-green-700"}>{n}</span>
-                  </div>
-                ))}
-              </div>
+              {error ? (
+                <p className="text-sm text-red-700">
+                  These counts could not be re-read, so the numbers from before are not shown.
+                </p>
+              ) : (
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                  {Object.entries(preview.orphanRows).map(([tbl, n]) => (
+                    <div key={tbl} className="flex justify-between gap-2">
+                      <span className="font-mono text-gray-600">{tbl}</span>
+                      <span className={n > 0 ? "text-red-600 font-semibold" : "text-green-700"}>{n}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {(hasOrphans || preview.warnings.length > 0) && (
@@ -109,12 +176,27 @@ export function PreviewModal({
             )}
 
             {lastProgress && (
-              <div className={`p-3 rounded-lg border text-sm ${
-                lastProgress.state === "succeeded"
-                  ? "bg-green-50 border-green-200 text-green-700"
-                  : "bg-red-50 border-red-200 text-red-700"
-              }`}>
+              <div
+                data-testid="migration-last-run"
+                className={`p-3 rounded-lg border text-sm ${
+                  lastProgress.state === "succeeded"
+                    ? "bg-green-50 border-green-200 text-green-700"
+                    : lastProgress.state === "mismatched"
+                      ? "bg-amber-50 border-2 border-amber-500 text-amber-900"
+                      : "bg-red-50 border-red-200 text-red-700"
+                }`}
+              >
                 <p>Last run: {lastProgress.state}{lastProgress.finishedAt && ` at ${new Date(lastProgress.finishedAt).toLocaleTimeString()}`}</p>
+                {/* The post-run re-read, not the run's own report. */}
+                {lastProgress.postRun && (
+                  <p className="text-xs mt-1 opacity-80">
+                    Verified against the database after the run: status{" "}
+                    {lastProgress.postRun.status.state.replace(/_/g, " ")}.
+                  </p>
+                )}
+                {lastProgress.state === "mismatched" && lastProgress.mismatch && (
+                  <p className="text-xs mt-1 font-semibold">{lastProgress.mismatch.details}</p>
+                )}
                 {lastProgress.state !== "succeeded" && lastProgress.errorMessage && (
                   <p className="text-xs mt-1 opacity-80">{lastProgress.errorMessage}</p>
                 )}
@@ -158,6 +240,8 @@ export default function AdminMigrationsPage() {
     return null;
   }
 
+  const { data: target } = useMigrationTarget();
+
   const { data: migrations = [], isLoading, error, refetch } = useQuery<MigrationListItem[]>({
     queryKey: ["/api/admin/migrations"],
     queryFn: async () => {
@@ -179,6 +263,8 @@ export default function AdminMigrationsPage() {
           Super Admin
         </span>
       </div>
+
+      <TargetBanner target={target} />
 
       {isLoading && (
         <div className="py-10 text-center text-gray-500 text-sm">Loading migrations…</div>

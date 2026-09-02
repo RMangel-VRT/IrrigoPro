@@ -29,14 +29,28 @@ export type MigrationPreview = {
   warnings: string[];
 };
 
+// Task #1982 — what the server re-read from the database after the run
+// finished. The step results are the migration's report about itself; this is
+// the independent second opinion, and it is what the page renders.
+export type MigrationPostRunCheck = {
+  checkedAt: string;
+  status: MigrationStatus;
+  preview?: MigrationPreview;
+  error?: string;
+};
+
 export type MigrationProgress = {
   jobId: string;
   migrationId: string;
   startedAt: string;
-  state: 'running' | 'succeeded' | 'failed' | 'aborted';
+  // `mismatched` — the run reported success but the post-run re-read says the
+  // migration is not completed. Never render this as a success.
+  state: 'running' | 'succeeded' | 'failed' | 'aborted' | 'mismatched';
   steps: MigrationStepResult[];
   finishedAt?: string;
   errorMessage?: string;
+  postRun?: MigrationPostRunCheck;
+  mismatch?: { summary: string; details: string };
 };
 
 export type MigrationListItem = {
@@ -44,4 +58,15 @@ export type MigrationListItem = {
   title: string;
   description: string;
   status: MigrationStatus;
+};
+
+// Redacted identity of the database the API server is acting on. Host and
+// database name only — never a user, a password, or a connection string.
+export type MigrationTarget = {
+  environment: string;
+  deployment: boolean;
+  host: string;
+  database: string;
+  port: number | null;
+  redacted: true;
 };
