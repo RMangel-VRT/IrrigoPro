@@ -416,6 +416,7 @@ import { deriveSourceWorkDate } from "./invoice-item-source";
 // ./invoice-list-routes and imports them from @workspace/shared directly.
 import { registerQbPaymentSyncRoutes } from "./qb-payment-sync";
 import { registerAdminMigrationsRoutes } from "./admin-migrations-routes";
+import { registerFieldWorkTypeRoutes } from "./field-work-type-routes";
 import { registerWcLaborBackfillRoutes } from "./admin-wc-labor-backfill-routes";
 import { registerInspectionZoneBackfillRoutes } from "./admin-inspection-zone-backfill-routes";
 import { registerCleanupInvoice71256Routes } from "./cleanup-invoice-71256";
@@ -7457,6 +7458,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
   // Slice 4a — Super-admin DB migration management page.
   registerAdminMigrationsRoutes(app, requireAuthentication);
+  registerFieldWorkTypeRoutes(app, { requireAuthentication });
 
   // WC Labor Slice 2 — bulk seeder endpoint (super_admin only).
   // Triggers seedIssueTypeConfigsForActiveCompanies() on demand so companies

@@ -25,6 +25,7 @@ import {
   CAN_SEND_INVOICE_EMAIL,
   CAN_VIEW_REMINDER_HISTORY,
   CAN_MANAGE_QUICKBOOKS,
+  CAN_MANAGE_FIELD_WORK_TYPES,
 } from "@workspace/shared";
 
 // ── header auth (dev only) ───────────────────────────────────────────────────
@@ -168,5 +169,16 @@ export const requireQuickBooksAccess: Guard = (req, res, next) => {
     return;
   }
 
+  next();
+};
+
+/** Read or update the company-scoped field work type registry. */
+export const requireFieldWorkTypeAdmin: Guard = (req, res, next) => {
+  if (!hasCapability(req.authenticatedUserRole, CAN_MANAGE_FIELD_WORK_TYPES)) {
+    res.status(403).json({
+      message: "Access denied. Only company administrators can manage field work types.",
+    });
+    return;
+  }
   next();
 };

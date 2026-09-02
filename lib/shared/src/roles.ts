@@ -202,6 +202,12 @@ export const CAN_VIEW_COSTS = new Set<Role>([
   "billing_manager",
 ]);
 
+/** Maintain the company-scoped field work type registry. */
+export const CAN_MANAGE_FIELD_WORK_TYPES = new Set<Role>([
+  "super_admin",
+  "company_admin",
+]);
+
 // ─── UI landing defaults ────────────────────────────────────────────────────
 //
 // Task #1890 — which roles land on a non-default *view* is a presentation

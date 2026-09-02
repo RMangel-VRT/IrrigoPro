@@ -30,6 +30,25 @@ export const companies = pgTable("companies", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+// Company-scoped field work types drive the location requirements for field
+// tickets. Codes are unique within a company so each tenant can customize its
+// labels, ordering, lifecycle, and requirement matrix independently.
+export const fieldWorkTypes = pgTable("field_work_types", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").references(() => companies.id).notNull(),
+  code: text("code").notNull(),
+  label: text("label").notNull(),
+  requiresController: boolean("requires_controller").notNull().default(true),
+  requiresZone: boolean("requires_zone").notNull().default(true),
+  requiresDetails: boolean("requires_details").notNull().default(false),
+  sortOrder: integer("sort_order").notNull().default(0),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  uniqCompanyCode: uniqueIndex("uniq_field_work_type_company_code").on(table.companyId, table.code),
+  byCompany: index("idx_field_work_types_company").on(table.companyId),
+}));
+
 // Users table for authentication with company support
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
@@ -244,6 +263,13 @@ export const billingSheets = pgTable("billing_sheets", {
   workLocationAddress: text("work_location_address"),
   controllerLetter: text("controller_letter"),
   zoneNumber: integer("zone_number"),
+  // Field Location Capture — nullable for legacy rows; the location gate is
+  // activated per surface only after its own rollout is ready.
+  fieldWorkType: text("field_work_type"),
+  fieldWorkTypeDetails: text("field_work_type_details"),
+  workLocationSource: text("work_location_source"), // 'gps' | 'manual'
+  workLocationAccuracyM: decimal("work_location_accuracy_m", { precision: 6, scale: 1 }),
+  workLocationGpsError: text("work_location_gps_error"),
   // Task #1857 — nullable FK to irrigation_controllers. Populated going forward
   // when a billing sheet is created from a wet check. NULL on legacy sheets.
   controllerId: integer("controller_id").references(() => irrigationControllers.id),
@@ -737,6 +763,13 @@ export const workOrders = pgTable("work_orders", {
   // is for, mirrored from the originating estimate when applicable.
   controllerLetter: text("controller_letter"),
   zoneNumber: integer("zone_number"),
+  // Field Location Capture — nullable for legacy rows; the existing workType
+  // column above remains the billing-origin classification.
+  fieldWorkType: text("field_work_type"),
+  fieldWorkTypeDetails: text("field_work_type_details"),
+  workLocationSource: text("work_location_source"), // 'gps' | 'manual'
+  workLocationAccuracyM: decimal("work_location_accuracy_m", { precision: 6, scale: 1 }),
+  workLocationGpsError: text("work_location_gps_error"),
   // Task #1857 — nullable FK to irrigation_controllers. Populated going forward. NULL on legacy.
   controllerId: integer("controller_id").references(() => irrigationControllers.id),
   // AI-generated description fields (populated during completion)
@@ -1205,6 +1238,11 @@ export const insertWorkOrderSchema = createInsertSchema(workOrders)
     completedAt: z.union([z.string(), z.date()]).transform(val => val instanceof Date ? val : val ? new Date(val) : undefined).optional().nullable(),
   });
 export const insertWorkOrderItemSchema = createInsertSchema(workOrderItems).omit({ id: true });
+export const insertFieldWorkTypeSchema = createInsertSchema(fieldWorkTypes).omit({
+  id: true,
+  createdAt: true,
+  companyId: true,
+});
 export const insertInvoiceSchema = createInsertSchema(invoices).omit({ id: true, invoiceNumber: true, companyId: true, createdAt: true, updatedAt: true });
 export const insertInvoiceItemSchema = createInsertSchema(invoiceItems).omit({ id: true });
 export const insertInvoicePdfSchema = createInsertSchema(invoicePdfs).omit({ id: true, createdAt: true });
@@ -1312,6 +1350,8 @@ export type InsertQuickbooksIntegration = z.infer<typeof insertQuickbooksIntegra
 export type InsertQuickbooksSync = z.infer<typeof insertQuickbooksSyncSchema>;
 export type InsertWorkOrder = z.infer<typeof insertWorkOrderSchema>;
 export type InsertWorkOrderItem = z.infer<typeof insertWorkOrderItemSchema>;
+export type FieldWorkType = typeof fieldWorkTypes.$inferSelect;
+export type InsertFieldWorkType = z.infer<typeof insertFieldWorkTypeSchema>;
 export type InsertInvoice = z.infer<typeof insertInvoiceSchema>;
 export type InsertInvoiceItem = z.infer<typeof insertInvoiceItemSchema>;
 export type InsertInvoicePdf = z.infer<typeof insertInvoicePdfSchema>;

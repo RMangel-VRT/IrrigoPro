@@ -129,6 +129,7 @@ import {
   type AssemblyWithParts,
   // propertyControllers removed by Task #1857 — table dropped, migration 0018.
   issueTypeConfigs,
+  fieldWorkTypes,
   wetChecks,
   wetCheckZoneRecords,
   wetCheckFindings,
@@ -138,6 +139,8 @@ import {
   // PropertyController, InsertPropertyController removed by Task #1857.
   type IssueTypeConfig,
   type InsertIssueTypeConfig,
+  type FieldWorkType,
+  type InsertFieldWorkType,
   type WetCheck,
   type InsertWetCheck,
   type WetCheckZoneRecord,
@@ -190,6 +193,7 @@ import {
   type BillingPreviewWorkOrder,
 } from "./billing-preview-sources";
 import { resolveIssueTypeKey, seedIssueTypeConfigsForCompany } from "./seeds/issue-type-configs";
+import { seedFieldWorkTypesForCompany } from "./seeds/field-work-types";
 import {
   validateMerge,
   computeMergedTotals,
@@ -953,6 +957,13 @@ export interface IStorage {
 
   // Company Profile Management
   getCompanyProfile(companyId: number): Promise<Company | undefined>;
+  getFieldWorkTypes(companyId: number | null, activeOnly?: boolean): Promise<FieldWorkType[]>;
+  getFieldWorkTypeById(id: number, companyId: number | null): Promise<FieldWorkType | undefined>;
+  updateFieldWorkType(
+    id: number,
+    companyId: number | null,
+    patch: Partial<InsertFieldWorkType>,
+  ): Promise<FieldWorkType | undefined>;
   updateCompanyProfile(companyId: number, updates: Partial<InsertCompany>): Promise<Company>;
 
   // ── Wet Check System (Slice 2A) ───────────────────────────────────────────
@@ -1931,8 +1942,11 @@ export class DatabaseStorage implements IStorage {
       typeof start === "number" && nextProvided == null
         ? ({ ...company, nextEstimateNumber: start } as InsertCompany)
         : company;
-    const result = await db.insert(companies).values(payload).returning();
-    const newCompany = result[0];
+    const newCompany = await db.transaction(async (tx) => {
+      const [created] = await tx.insert(companies).values(payload).returning();
+      await seedFieldWorkTypesForCompany(created.id, tx);
+      return created;
+    });
     // Auto-seed issue_type_configs for the new company so wet check labor
     // recompute works immediately without requiring an admin trigger.
     // Fire-and-forget: a seed failure must never block company creation.
@@ -1940,6 +1954,45 @@ export class DatabaseStorage implements IStorage {
       console.warn(`[seedIssueTypeConfigs] failed for company ${newCompany.id}:`, err);
     });
     return newCompany;
+  }
+
+  async getFieldWorkTypes(
+    companyId: number | null,
+    activeOnly = true,
+  ): Promise<FieldWorkType[]> {
+    const conditions = [];
+    if (companyId !== null) conditions.push(eq(fieldWorkTypes.companyId, companyId));
+    if (activeOnly) conditions.push(eq(fieldWorkTypes.active, true));
+    return await db
+      .select()
+      .from(fieldWorkTypes)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(fieldWorkTypes.sortOrder, fieldWorkTypes.id);
+  }
+
+  async getFieldWorkTypeById(
+    id: number,
+    companyId: number | null,
+  ): Promise<FieldWorkType | undefined> {
+    const conditions = [eq(fieldWorkTypes.id, id)];
+    if (companyId !== null) conditions.push(eq(fieldWorkTypes.companyId, companyId));
+    const [row] = await db.select().from(fieldWorkTypes).where(and(...conditions)).limit(1);
+    return row;
+  }
+
+  async updateFieldWorkType(
+    id: number,
+    companyId: number | null,
+    patch: Partial<InsertFieldWorkType>,
+  ): Promise<FieldWorkType | undefined> {
+    const conditions = [eq(fieldWorkTypes.id, id)];
+    if (companyId !== null) conditions.push(eq(fieldWorkTypes.companyId, companyId));
+    const [updated] = await db
+      .update(fieldWorkTypes)
+      .set(patch)
+      .where(and(...conditions))
+      .returning();
+    return updated;
   }
 
   async updateCompany(id: number, company: Partial<InsertCompany>): Promise<Company | undefined> {
@@ -1987,11 +2040,18 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createCompanyProfile(companyData: InsertCompany): Promise<Company> {
-    const result = await db
-      .insert(companies)
-      .values(companyData)
-      .returning();
-    return result[0];
+    const newCompany = await db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(companies)
+        .values(companyData)
+        .returning();
+      await seedFieldWorkTypesForCompany(created.id, tx);
+      return created;
+    });
+    void seedIssueTypeConfigsForCompany(newCompany.id).catch((err) => {
+      console.warn(`[seedIssueTypeConfigs] failed for company ${newCompany.id}:`, err);
+    });
+    return newCompany;
   }
 
   async checkCompanyProfileExists(companyId: number): Promise<boolean> {
@@ -2018,14 +2078,17 @@ export class DatabaseStorage implements IStorage {
       const existingUsers = await db.select().from(users);
       if (existingUsers.length === 0) {
         // Create a placeholder company first for the demo user
-        const demoCompany = await db.insert(companies).values({
-          id: 99,
-          name: "Demo Company (Setup Required)",
-          subscription: "basic",
-          isActive: true,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        }).returning();
+        await db.transaction(async (tx) => {
+          const [demoCompany] = await tx.insert(companies).values({
+            id: 99,
+            name: "Demo Company (Setup Required)",
+            subscription: "basic",
+            isActive: true,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          }).returning();
+          await seedFieldWorkTypesForCompany(demoCompany.id, tx);
+        });
 
         // Create only essential users for fresh onboarding experience
         await db.insert(users).values([

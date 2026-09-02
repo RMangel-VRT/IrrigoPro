@@ -8,6 +8,10 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { listMigrations, getMigration } from "./registry";
 import { resolveCheckState } from "./invoice-sent-status-backfill";
+import {
+  computeFieldWorkTypeSeedState,
+  resolveFieldWorkTypeSeedStatus,
+} from "./seed-field-work-types";
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
 
@@ -79,6 +83,76 @@ describe("migration registry — static shape", () => {
       ids.includes("invoice-sent-status-backfill-v1"),
       "missing invoice-sent-status-backfill-v1",
     );
+  });
+
+  it("contains seed-field-work-types-v1", () => {
+    const ids = listMigrations().map((m) => m.id);
+    assert.ok(
+      ids.includes("seed-field-work-types-v1"),
+      "missing seed-field-work-types-v1",
+    );
+  });
+
+  it("computes missing field-work-type rows idempotently by company and code", () => {
+    const state = computeFieldWorkTypeSeedState(
+      [10, 20],
+      [
+        { companyId: 10, code: "zone_repair" },
+        { companyId: 20, code: "zone_repair" },
+      ],
+    );
+    assert.deepEqual(state, {
+      companyCount: 2,
+      companiesMissingDefaults: 2,
+      rowsMissing: 12,
+    });
+  });
+
+  it("requires preview acknowledgement before the field-work-type seed writes", async () => {
+    const migration = getMigration("seed-field-work-types-v1");
+    assert.ok(migration);
+    const result = await migration.run(() => {});
+    assert.equal(result.length, 1);
+    assert.equal(result[0].id, "seed-defaults");
+    assert.equal(result[0].status, "failed");
+    assert.match(result[0].error ?? "", /acknowledgement/i);
+  });
+
+  it("does not report the field-work-type migration complete without its marker", () => {
+    assert.deepEqual(
+      resolveFieldWorkTypeSeedStatus({
+        companyCount: 2,
+        companiesMissingDefaults: 0,
+        rowsMissing: 0,
+      }),
+      {
+        state: "partially_applied",
+        details: "All defaults are present, but the completion marker is missing.",
+      },
+    );
+    assert.deepEqual(
+      resolveFieldWorkTypeSeedStatus({
+        companyCount: 2,
+        companiesMissingDefaults: 0,
+        rowsMissing: 0,
+      }, "2026-09-02T12:00:00.000Z"),
+      {
+        state: "completed",
+        completedAt: "2026-09-02T12:00:00.000Z",
+      },
+    );
+  });
+
+  it("previews field-work-type seeding without mutating state", async () => {
+    const migration = getMigration("seed-field-work-types-v1");
+    assert.ok(migration);
+    const result = await migration.preview();
+    assert.deepEqual(result.steps.map((step) => step.id), [
+      "seed-defaults",
+      "mark-done",
+    ]);
+    assert.ok((result.orphanRows?.companies ?? -1) >= 0);
+    assert.ok((result.orphanRows?.fieldWorkTypesMissing ?? -1) >= 0);
   });
 
   it("invoice-sent-status-backfill-v1 has the required MigrationDefinition shape", () => {
