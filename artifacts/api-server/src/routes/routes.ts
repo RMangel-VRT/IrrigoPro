@@ -70,6 +70,7 @@ import {
 import { isUnroutedFinding, wcbIsEligible } from "../lib/finding-predicates";
 import { computeBillingSheetTotal } from "../billing-sheet-total";
 import { computeDeferredItems } from "../lib/work-order-deferred-items";
+import { workOrderLocationGateError } from "../lib/work-order-location-gate";
 import type {
   QbTokenResponse,
   QbTokenResponseValidated,
@@ -9578,6 +9579,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Merge creation photos with completion photos (don't overwrite)
       const existingWorkOrder = await storage.getWorkOrder(workOrderId, callerCompanyIdComplete0);
+      const locationGateError = existingWorkOrder
+        ? workOrderLocationGateError(existingWorkOrder)
+        : null;
+      if (locationGateError) {
+        res.status(400).json({ message: locationGateError });
+        return;
+      }
 
       // Branch enforcement: if the customer has branches configured, branchName must be present
       if (existingWorkOrder?.customerId) {
@@ -10047,6 +10055,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const existingWorkOrder = await storage.getWorkOrder(id, callerCompanyIdComplete1);
       if (!existingWorkOrder) {
         res.status(404).json({ message: "Work order not found" });
+        return;
+      }
+      const locationGateError = workOrderLocationGateError(existingWorkOrder);
+      if (locationGateError) {
+        res.status(400).json({ message: locationGateError });
         return;
       }
 

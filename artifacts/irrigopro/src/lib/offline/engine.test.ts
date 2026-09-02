@@ -8,6 +8,7 @@ import {
   putPhotoBlob,
 } from "./db";
 import type { QueuedMutation } from "./types";
+import { readySet } from "./sortQueue";
 
 describe("isLikelyEdgeError (Task #469)", () => {
   it("treats application/json 4xx as a real API error (not edge)", () => {
@@ -560,5 +561,156 @@ describe("SyncEngine retry cap (Task #501)", () => {
     const all = await listAllMutations(await openOfflineDB());
     expect(all[0].status).toBe("pending");
     expect(all[0].attemptCount).toBe(1);
+  });
+});
+
+describe("work-order offline mutations", () => {
+  beforeEach(async () => {
+    await freshDb();
+  });
+
+  function workOrderMutation(
+    id: string,
+    kind: "work_order.location_patch" | "work_order.complete",
+    clientId: string,
+    workOrderId = 42,
+  ): QueuedMutation {
+    return {
+      id,
+      kind,
+      method: kind === "work_order.location_patch" ? "PATCH" : "POST",
+      urlTemplate:
+        kind === "work_order.location_patch"
+          ? `/api/work-orders/${workOrderId}`
+          : "/api/work-orders/complete",
+      body:
+        kind === "work_order.location_patch"
+          ? {
+              workLocationLat: 39.7392,
+              workLocationLng: -104.9903,
+              workLocationAddress: null,
+            }
+          : {
+              workOrderId,
+              workSummary: "Completed the irrigation repair and tested it",
+              customerNotes: "System is operating normally",
+            },
+      workOrderId,
+      clientId,
+      parentClientId: null,
+      placeholders: {},
+      attemptCount: 0,
+      lastAttemptAt: null,
+      lastError: null,
+      status: "pending",
+      createdAt: Number(id.replace(/\D/g, "")) || 1,
+      resolvedId: null,
+    };
+  }
+
+  it("does not dispatch completion until all location patches for that work order finish", async () => {
+    let now = 10_000;
+    const calls: string[] = [];
+    const engine = new SyncEngine({
+      heartbeatIntervalMs: 0,
+      maxConcurrent: 2,
+      now: () => now,
+      fetchImpl: async (input) => {
+        const url = typeof input === "string" ? input : input.toString();
+        calls.push(url);
+        return new Response("{}", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+    engine.setOnline(false);
+    await engine.enqueue(workOrderMutation("location-1", "work_order.location_patch", "location-1"));
+    await engine.enqueue({
+      ...workOrderMutation("location-2", "work_order.location_patch", "location-2"),
+      parentClientIds: ["location-1"],
+    });
+    await engine.enqueue({
+      ...workOrderMutation("completion-1", "work_order.complete", "completion-1"),
+      parentClientIds: ["location-1", "location-2"],
+    });
+
+    engine.setOnline(true);
+    await engine.drainAll();
+
+    expect(calls).toEqual([
+      "/api/work-orders/42",
+      "/api/work-orders/42",
+      "/api/work-orders/complete",
+    ]);
+    const rows = await listAllMutations(await openOfflineDB());
+    expect(rows.every((row) => row.status === "completed")).toBe(true);
+  });
+
+  it("turns a JSON validation 400 into one terminal actionable error and continues", async () => {
+    let completionCalls = 0;
+    let laterCalls = 0;
+    const errors: Array<{ kind: string; status: number | null; message: string }> = [];
+    const engine = new SyncEngine({
+      heartbeatIntervalMs: 0,
+      maxConcurrent: 1,
+      fetchImpl: async (input) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/work-orders/complete") {
+          completionCalls++;
+          return new Response(
+            JSON.stringify({ message: "Pin the work location before completing this work order." }),
+            { status: 400, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        laterCalls++;
+        return new Response("{}", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+    engine.on((event) => {
+      if (event.type === "error") {
+        errors.push({ kind: event.kind, status: event.status, message: event.message });
+      }
+    });
+    engine.setOnline(true);
+    await engine.enqueue(workOrderMutation("completion-1", "work_order.complete", "completion-1"));
+    await engine.enqueue({
+      ...workOrderMutation("later-1", "work_order.location_patch", "work-order:99", 99),
+      createdAt: 999,
+    });
+
+    await engine.drainAll();
+
+    const rows = await listAllMutations(await openOfflineDB());
+    const completion = rows.find((row) => row.id === "completion-1")!;
+    expect(completion.status).toBe("failed");
+    expect(completion.attemptCount).toBe(1);
+    expect(completion.lastError).toBe("Pin the work location before completing this work order.");
+    expect(completionCalls).toBe(1);
+    expect(laterCalls).toBe(1);
+    expect(errors).toEqual([
+      {
+        kind: "work_order.complete",
+        status: 400,
+        message: "Pin the work location before completing this work order.",
+      },
+    ]);
+  });
+
+  it("releases ordering-only dependents after a failed or cancelled location patch", () => {
+    const failed = {
+      ...workOrderMutation("location-failed", "work_order.location_patch", "location-failed"),
+      status: "failed" as const,
+    };
+    const completion = {
+      ...workOrderMutation("completion-after-failure", "work_order.complete", "completion-after-failure"),
+      parentClientIds: ["location-failed"],
+      orderingDependencies: true,
+    };
+    expect(readySet([failed, completion], Date.now(), () => null)).toEqual([completion]);
+    expect(readySet([completion], Date.now(), () => null)).toEqual([completion]);
   });
 });

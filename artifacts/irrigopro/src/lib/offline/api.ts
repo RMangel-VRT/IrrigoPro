@@ -29,7 +29,12 @@ import {
   type OfflineDB,
 } from "./db";
 import { getSyncEngine, isOfflineQueueEnabled } from "./engine";
-import type { QueuedMutation, QueuedMutationKind } from "./types";
+import type {
+  QueuedMutation,
+  QueuedMutationKind,
+  WorkOrderCompletionPayload,
+  WorkOrderLocationPatchPayload,
+} from "./types";
 
 function uuid(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
@@ -143,6 +148,125 @@ export async function cachedApiRequest<T = any>(url: string): Promise<T> {
 export function isProbablyOffline(): boolean {
   if (typeof navigator === "undefined") return false;
   return navigator.onLine === false;
+}
+
+// Work-order mutations intentionally use the queue only when the device is
+// actually offline. This preserves the existing immediate online behavior,
+// while keeping every offline location patch and completion durable.
+export function shouldQueueWorkOrderMutation(): boolean {
+  return isOfflineQueueEnabled() && isProbablyOffline();
+}
+
+const workOrderQueueTails = new Map<number, Promise<void>>();
+
+async function withWorkOrderQueueLock<T>(
+  workOrderId: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const prior = workOrderQueueTails.get(workOrderId) ?? Promise.resolve();
+  const current = prior.then(operation, operation);
+  const tail = current.then(() => undefined, () => undefined);
+  workOrderQueueTails.set(workOrderId, tail);
+  try {
+    return await current;
+  } finally {
+    if (workOrderQueueTails.get(workOrderId) === tail) {
+      workOrderQueueTails.delete(workOrderId);
+    }
+  }
+}
+
+function isTerminalClientError(error: unknown): boolean {
+  return error instanceof Error && /^4\d\d:/.test(error.message);
+}
+
+async function outstandingWorkOrderLocationPatches(
+  workOrderId: number,
+): Promise<QueuedMutation[]> {
+  return (await getSyncEngine().listMutations())
+    .filter(
+      (mutation) =>
+        mutation.kind === "work_order.location_patch" &&
+        mutation.workOrderId === workOrderId &&
+        mutation.status !== "completed",
+    )
+    .sort((a, b) => a.createdAt - b.createdAt);
+}
+
+export async function patchWorkOrderLocation(
+  workOrderId: number,
+  payload: WorkOrderLocationPatchPayload,
+): Promise<{ queued: boolean }> {
+  return await withWorkOrderQueueLock(workOrderId, async () => {
+    const predecessors = await outstandingWorkOrderLocationPatches(workOrderId);
+    const mustJoinQueue =
+      predecessors.length > 0 || shouldQueueWorkOrderMutation();
+    if (!mustJoinQueue) {
+      try {
+        await apiRequest(`/api/work-orders/${workOrderId}`, "PATCH", payload);
+        return { queued: false };
+      } catch (error) {
+        if (!isOfflineQueueEnabled() || isTerminalClientError(error)) throw error;
+        // navigator.onLine is often still true during Wi-Fi captive portals,
+        // DNS failures, and server outages. Preserve the write durably after
+        // the immediate request proves connectivity is unavailable.
+        getSyncEngine().setOnline(false);
+      }
+    }
+
+    await getSyncEngine().enqueue(newMutation({
+      kind: "work_order.location_patch",
+      method: "PATCH",
+      urlTemplate: `/api/work-orders/${workOrderId}`,
+      body: payload,
+      clientId: uuid(),
+      parentClientId: null,
+      // Serialize successive pin changes so an older request cannot arrive
+      // last and overwrite the technician's newest location.
+      parentClientIds: predecessors.map((mutation) => mutation.clientId),
+      orderingDependencies: true,
+      placeholders: {},
+      workOrderId,
+    }));
+    return { queued: true };
+  });
+}
+
+export async function completeWorkOrder(
+  payload: WorkOrderCompletionPayload,
+): Promise<{ queued: boolean }> {
+  return await withWorkOrderQueueLock(payload.workOrderId, async () => {
+    const outstandingLocationPatches =
+      await outstandingWorkOrderLocationPatches(payload.workOrderId);
+    const mustJoinQueue =
+      outstandingLocationPatches.length > 0 ||
+      shouldQueueWorkOrderMutation();
+    if (!mustJoinQueue) {
+      try {
+        await apiRequest("/api/work-orders/complete", "POST", payload);
+        return { queued: false };
+      } catch (error) {
+        if (!isOfflineQueueEnabled() || isTerminalClientError(error)) throw error;
+        getSyncEngine().setOnline(false);
+      }
+    }
+
+    await getSyncEngine().enqueue(newMutation({
+      kind: "work_order.complete",
+      method: "POST",
+      urlTemplate: "/api/work-orders/complete",
+      body: payload,
+      clientId: uuid(),
+      parentClientId: null,
+      parentClientIds: outstandingLocationPatches.map(
+        (mutation) => mutation.clientId,
+      ),
+      orderingDependencies: true,
+      placeholders: {},
+      workOrderId: payload.workOrderId,
+    }));
+    return { queued: true };
+  });
 }
 
 // --- Wet check create --------------------------------------------------

@@ -50,7 +50,13 @@ export function readySet(
   // satisfied (no in-flight create can exist).
   const isParentSatisfied = (cid: string, self?: QueuedMutation): boolean => {
     const rows = otherRows(cid, self);
-    if (rows.length > 0) return rows.every((p) => p.status === "completed");
+    if (rows.length > 0) {
+      return rows.every((p) =>
+        p.status === "completed" ||
+        (self?.orderingDependencies === true && p.status === "failed")
+      );
+    }
+    if (self?.orderingDependencies === true) return true;
     if (resolveServerIdSync) return resolveServerIdSync(cid) != null;
     return true;
   };

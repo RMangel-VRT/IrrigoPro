@@ -19,7 +19,28 @@ export type QueuedMutationKind =
   | "finding.delete"
   | "photo.link"
   | "photo.upload"
-  | "photo.delete";
+  | "photo.delete"
+  | "work_order.location_patch"
+  | "work_order.complete";
+
+export interface WorkOrderLocationPatchPayload {
+  workLocationLat: number | null;
+  workLocationLng: number | null;
+  workLocationAddress: string | null;
+}
+
+export interface WorkOrderCompletionPayload {
+  workOrderId: number;
+  workSummary: string;
+  customerNotes: string;
+  completedAt: string;
+  laborMode: "flat" | "per_part";
+  totalHours: number;
+  usedParts: unknown[];
+  photos: string[];
+  totalPartsCost: string;
+  branchName?: string;
+}
 
 export interface QueuedMutation {
   id: string; // local UUID
@@ -31,6 +52,8 @@ export interface QueuedMutation {
   // Body, including its own clientId. Engine substitutes any `{{...}}`
   // placeholders pointing to a parent mutation's resolved id.
   body: unknown;
+  /** Server id for work-order mutations, used for actionable sync errors. */
+  workOrderId?: number;
   clientId: string;
   parentClientId: string | null;
   // Optional additional dependencies. The engine will not dispatch this
@@ -40,6 +63,9 @@ export interface QueuedMutation {
   // that submit cannot run while any descendant is still in flight or
   // backing off.
   parentClientIds?: string[];
+  // Ordering-only dependencies release after terminal failure/cancellation;
+  // the dependent request then receives its own actionable server response.
+  orderingDependencies?: boolean;
   // For URL placeholders: a list of clientIds whose server-assigned ids the
   // engine must resolve and patch into urlTemplate / body before dispatch.
   // Each entry maps a placeholder name → the clientId that produces it.
@@ -72,6 +98,7 @@ export interface ErrorEvent {
   kind: QueuedMutationKind;
   status: number | null;
   message: string;
+  workOrderId?: number;
 }
 export interface SyncStateEvent {
   type: "state";

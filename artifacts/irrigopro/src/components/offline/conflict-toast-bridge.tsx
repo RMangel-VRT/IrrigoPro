@@ -107,7 +107,14 @@ export function ConflictToastBridge() {
         // 4xx code path treats it as failed) show a friendly retry-style
         // message instead of dumping raw HTML at the field tech.
         const looksLikeHtml = isHtmlErrorMessage(e.message);
-        if (looksLikeHtml) {
+        if (e.kind === "work_order.complete") {
+          toast({
+            title: "Work order completion needs attention",
+            description: e.message.slice(0, 240),
+            variant: "destructive",
+            duration: 12_000,
+          });
+        } else if (looksLikeHtml) {
           toast({
             title: "Couldn't reach server — will retry",
             description: kindLabel(e.kind),

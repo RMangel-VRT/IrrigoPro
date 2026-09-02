@@ -38,3 +38,4 @@
 - [Offline IDB connection lifetime](offline-idb-connection-lifetime.md) — mobile closes the handle under you; heal at the one shared opener, probe don't string-match, and never charge a retry for local storage.
 - [Billing PDFs use no emoji entities](billing-pdf-no-emoji-entities.md) — use inline currentColor SVG for every icon, including conditional warnings, even when local Chromium renders the glyph.
 - [Chromium PDF atomic cards](chromium-pdf-atomic-cards.md) — break-inside alone may still fragment bordered blocks; use an atomic inline-block and verify the rasterized page boundary.
+- [Offline ordering dependencies](offline-ordering-dependencies.md) — serialize list+enqueue; reconnects must join existing chains, and terminal/cancelled ordering parents must release dependents.

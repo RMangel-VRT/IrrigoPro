@@ -92,6 +92,10 @@ async function reverseGeocode(lat: number, lng: number): Promise<string> {
   return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
 }
 
+function canUseNetwork(): boolean {
+  return typeof navigator === "undefined" || navigator.onLine !== false;
+}
+
 async function forwardGeocode(address: string): Promise<[number, number] | null> {
   try {
     const response = await fetch(
@@ -200,7 +204,9 @@ export function LocationPicker({
         centeredBy = "boundary";
       } else if (!hasCustomerAddress && companyFallbackAddress) {
         // Only consult company address when the customer has NO address and NO boundary.
-        const coords = await forwardGeocode(companyFallbackAddress);
+        const coords = canUseNetwork()
+          ? await forwardGeocode(companyFallbackAddress)
+          : null;
         if (coords) {
           initialCenter = coords;
           initialZoom = 12;
@@ -239,8 +245,10 @@ export function LocationPicker({
         // Dismiss the company-fallback notice immediately — before the async
         // reverse-geocode and before the parent updates selectedLocation.
         setHasPinDropped(true);
-        const address = await reverseGeocode(lat, lng);
-        onLocationSelect({ lat, lng, address });
+         const address = canUseNetwork()
+           ? await reverseGeocode(lat, lng)
+           : undefined;
+         onLocationSelect({ lat, lng, ...(address ? { address } : {}) });
       });
 
       if (selectedLocation) {
@@ -311,6 +319,7 @@ export function LocationPicker({
     if (hasCustomerAddress) return;         // customer has an address — never consult company
     if (!companyFallbackAddress) return;
     if (selectedLocation) return;
+    if (!canUseNetwork()) return;
 
     let cancelled = false;
     forwardGeocode(companyFallbackAddress).then((coords) => {
@@ -424,8 +433,10 @@ export function LocationPicker({
           const marker = L.marker([lat, lng]).addTo(map);
           markerRef.current = marker;
         }
-        const address = await reverseGeocode(lat, lng);
-        onLocationSelect({ lat, lng, address });
+        const address = canUseNetwork()
+          ? await reverseGeocode(lat, lng)
+          : undefined;
+        onLocationSelect({ lat, lng, ...(address ? { address } : {}) });
         setIsLocating(false);
       },
       (error) => {

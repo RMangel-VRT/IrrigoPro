@@ -31,6 +31,11 @@ import { FileUpload } from "@/components/ui/file-upload";
 import { PhotoImage, usePhotoSignedUrls } from "@/components/ui/photo-image";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import {
+  completeWorkOrder,
+  isProbablyOffline,
+  patchWorkOrderLocation,
+} from "@/lib/offline/api";
 import { buildMapsUrl } from "@/lib/maps-url";
 import {
   CheckCircle,
@@ -155,7 +160,7 @@ export function WorkOrderCompletion({
 
   const updatePinMutation = useMutation({
     mutationFn: async (payload: { workLocationLat: number | null; workLocationLng: number | null; workLocationAddress: string | null }) => {
-      return await apiRequest(`/api/work-orders/${workOrder.id}`, "PATCH", payload);
+      return await patchWorkOrderLocation(workOrder.id, payload);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/work-orders"] });
@@ -187,7 +192,9 @@ export function WorkOrderCompletion({
           onSuccess: () => {
             setPinningHere(false);
             toast({
-              title: "Pin moved to your current location",
+              title: isProbablyOffline()
+                ? "Work location queued"
+                : "Pin moved to your current location",
               description: `${next.workLocationLat.toFixed(6)}, ${next.workLocationLng.toFixed(6)}`,
               action: (
                 <ToastAction
@@ -358,12 +365,14 @@ export function WorkOrderCompletion({
 
   const completeWorkOrderMutation = useMutation({
     mutationFn: async (data: any) => {
-      return apiRequest("/api/work-orders/complete", "POST", data);
+      return completeWorkOrder(data);
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       toast({
-        title: "Work Order Completed",
-        description: "Work order has been successfully completed with all documentation.",
+        title: result.queued ? "Work order completion queued" : "Work Order Completed",
+        description: result.queued
+          ? "Saved on this device and will finish when you're back online."
+          : "Work order has been successfully completed with all documentation.",
       });
       queryClient.invalidateQueries({ queryKey: ["/api/work-orders"] });
       onComplete();
@@ -462,16 +471,25 @@ export function WorkOrderCompletion({
 
   const onFinalSubmit = async () => {
     if (!completionData) return;
+    if (updatePinMutation.isPending) {
+      toast({
+        title: "Saving work location",
+        description: "Wait for the location to be saved before completing this work order.",
+      });
+      return;
+    }
 
     setIsSubmitting(true);
     
     try {
       // If work order hasn't been started yet, start it first
       if (workOrder.status === 'assigned' || workOrder.status === 'pending') {
-        await apiRequest(`/api/work-orders/${workOrder.id}`, "PATCH", { 
-          status: 'in_progress',
-          startedAt: new Date().toISOString()
-        });
+        if (!isProbablyOffline()) {
+          await apiRequest(`/api/work-orders/${workOrder.id}`, "PATCH", {
+            status: 'in_progress',
+            startedAt: new Date().toISOString()
+          });
+        }
       }
       
       // Now complete the work order
@@ -1146,10 +1164,20 @@ export function WorkOrderCompletion({
               )}
               <Button 
                 type="submit" 
-                disabled={isSubmitting || isBranchCheckPending}
+                disabled={
+                  isSubmitting ||
+                  isBranchCheckPending ||
+                  updatePinMutation.isPending
+                }
                 className="bg-green-600 hover:bg-green-700 text-white w-full sm:w-auto min-h-[44px]"
               >
-                {isBranchCheckPending ? "Loading..." : isSubmitting ? "Reviewing..." : "Review Work Order"}
+                {isBranchCheckPending
+                  ? "Loading..."
+                  : updatePinMutation.isPending
+                    ? "Saving location..."
+                    : isSubmitting
+                      ? "Reviewing..."
+                      : "Review Work Order"}
               </Button>
             </div>
           </form>

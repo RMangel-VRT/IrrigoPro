@@ -33,6 +33,27 @@ import type {
   QueuedMutation,
 } from "./types";
 
+// API validation responses are JSON objects, but Response.text() gives the
+// engine the serialized envelope. Keep the terminal queue error actionable
+// instead of showing `{"message":"..."}` in the sync drawer.
+export function extractApiErrorMessage(body: string, status: number): string {
+  const fallback = body || `${status}`;
+  try {
+    const parsed = JSON.parse(body);
+    if (typeof parsed === "string" && parsed.trim()) return parsed;
+    if (parsed && typeof parsed === "object") {
+      for (const key of ["message", "error", "detail"]) {
+        if (typeof parsed[key] === "string" && parsed[key].trim()) {
+          return parsed[key];
+        }
+      }
+    }
+  } catch {
+    // Non-JSON bodies are handled by the edge-error classifier.
+  }
+  return fallback;
+}
+
 // Detect a 4xx response that almost certainly came from an upstream/edge
 // layer (deployment proxy, stale PWA shell, blocked-host page, generic
 // CDN/load-balancer error page) rather than from our Express API.
@@ -652,7 +673,9 @@ export class SyncEngine {
         try { body = await res.text(); } catch {}
         const ctype = (res.headers.get("content-type") ?? "").toLowerCase();
         const looksLikeEdge = isLikelyEdgeError(ctype, body);
-        const message = body || `${res.status}`;
+        const message = looksLikeEdge
+          ? (body || `${res.status}`)
+          : extractApiErrorMessage(body, res.status);
         if (looksLikeEdge) {
           this.setOnline(false);
           const nextAttempt = m.attemptCount + 1;
@@ -669,6 +692,7 @@ export class SyncEngine {
               kind: m.kind,
               status: res.status,
               message: giveUp,
+              workOrderId: m.workOrderId,
             });
             await this.broadcastState();
           } else {
@@ -693,6 +717,7 @@ export class SyncEngine {
             kind: m.kind,
             status: res.status,
             message,
+            workOrderId: m.workOrderId,
           });
           await this.broadcastState();
         }
@@ -738,6 +763,7 @@ export class SyncEngine {
             kind: m.kind,
             status: res.status,
             message,
+            workOrderId: m.workOrderId,
           });
           await this.broadcastState();
         } else {

@@ -253,13 +253,29 @@ function kindLabel(kind: QueuedMutationKind): string {
     case "photo.link":         return "Attach photo";
     case "photo.upload":       return "Upload photo";
     case "photo.delete":       return "Remove photo";
+    case "work_order.location_patch": return "Save work location";
+    case "work_order.complete": return "Complete work order";
     default:                   return kind;
   }
 }
 
 // Task #469 — surface a plain "Couldn't reach server" line for HTML / edge
 // errors instead of the raw `<!doctype html>…` payload.
-function friendlyErrorMessage(raw: string): string {
+function friendlyErrorMessage(raw: string, kind?: QueuedMutationKind): string {
+  let normalized = raw;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      const candidate = parsed.message ?? parsed.error ?? parsed.detail;
+      if (typeof candidate === "string" && candidate.trim()) normalized = candidate;
+    }
+  } catch {
+    // The engine normally parses JSON errors; this also keeps older rows clear.
+  }
+  if (kind === "work_order.complete" && normalized.trim()) {
+    return `Work order completion needs attention: ${normalized.slice(0, 220)}`;
+  }
+  raw = normalized;
   const head = raw.trimStart().slice(0, 64).toLowerCase();
   // Task #501 — passive retry cap reached. The raw message is shaped like
   // `gave_up_after_8_attempts` or `gave_up_after_60_minutes: <body>`.
@@ -354,7 +370,7 @@ export function MutationRow({
             className="text-[11px] text-red-700 mt-0.5 break-words"
             data-testid={`queue-error-${m.id}`}
           >
-            {friendlyErrorMessage(m.lastError)}
+            {friendlyErrorMessage(m.lastError, m.kind)}
           </div>
         )}
       </div>
