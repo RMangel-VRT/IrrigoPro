@@ -251,6 +251,18 @@ const woFixture: PdfWorkOrderRow = {
 
 const bsHtml = ticketPageBS(bsFixture, INVOICE_NUMBER, [], null, undefined, DEFAULT_BRAND_COLORS);
 const wcbHtml = ticketPageWCB(wcbFixture, INVOICE_NUMBER, [], null, undefined, DEFAULT_BRAND_COLORS);
+const pinnedQrHtml = ticketPageWO(
+  {
+    ...woFixture,
+    workLocationLat: 39.7392364,
+    workLocationLng: -104.9902508,
+  },
+  INVOICE_NUMBER,
+  [],
+  null,
+  undefined,
+  "data:image/png;base64,QR-SNAPSHOT",
+);
 
 // ── shared structural assertions ──────────────────────────────────────────────
 
@@ -471,5 +483,15 @@ describe("ticketPageBS — snapshot (Slice 4)", () => {
 describe("ticketPageWCB — snapshot (Slice 4)", () => {
   it("matches stored snapshot", () => {
     toMatchSnapshot("ticketPageWCB", wcbHtml);
+  });
+});
+
+describe("ticket pin QR — focused snapshot", () => {
+  it("matches the reviewed QR-only block", () => {
+    const qrBlock = pinnedQrHtml.match(
+      /<div class="ticket-site-qr">[\s\S]*?<\/div>/,
+    )?.[0];
+    assert.ok(qrBlock, "pinned ticket must contain the QR block");
+    toMatchSnapshot("ticketPinQrBlock", qrBlock);
   });
 });

@@ -337,7 +337,57 @@ export function coverPage(
 }
 
 type InvoiceTicketSiteJobType = Extract<JobTypeKey, 'workOrder' | 'billingSheet' | 'wetCheck'>;
-export function ticketPageWO(wo: PdfWorkOrderRow, invoiceNumber: string, photoDataUris: string[], logoDataUri?: string | null, companyName?: string): string {
+
+/**
+ * These ticket-specific adapters keep the source-field precedence in one place
+ * for both synchronous HTML rendering and upstream asset preloading.
+ */
+export function buildPdfWorkOrderSiteMetadata(wo: PdfWorkOrderRow): PdfSiteMetadata {
+  return buildPdfSiteMetadata({
+    locationCandidates: [wo.workLocationAddress, wo.projectAddress],
+    branch: wo.branchName,
+    controllerLabel: wo.controllerLetter,
+    zoneNumber: wo.zoneNumber,
+    controllerLabels: (wo.items ?? []).map(item => item.controllerLetter),
+    zoneNumbers: (wo.items ?? []).map(item => item.zoneNumber),
+    latitude: wo.workLocationLat,
+    longitude: wo.workLocationLng,
+  });
+}
+
+export function buildPdfBillingSheetSiteMetadata(bs: PdfBillingSheetRow): PdfSiteMetadata {
+  const bsWetCheckZones = bs.wetCheckView?.zones ?? [];
+  return buildPdfSiteMetadata({
+    locationCandidates: [bs.workLocationAddress, bs.propertyAddress],
+    branch: bs.branchName,
+    controllerLabel: bs.controllerLetter,
+    zoneNumber: bs.zoneNumber,
+    controllerLabels: bsWetCheckZones.map(zone => zone.controllerLetter),
+    zoneNumbers: bsWetCheckZones.map(zone => zone.zoneNumber),
+    latitude: bs.workLocationLat,
+    longitude: bs.workLocationLng,
+  });
+}
+
+export function buildPdfWetCheckSiteMetadata(row: PdfWetCheckBillingRow): PdfSiteMetadata {
+  const { wetCheckBilling: wcb, wetCheckView: view } = row;
+  return buildPdfSiteMetadata({
+    locationCandidates: [wcb.propertyAddress, view.inspection.propertyAddress],
+    branch: wcb.branchName,
+    controllerLabels: (view.zones ?? []).map(zone => zone.controllerLetter),
+    zoneNumbers: (view.zones ?? []).map(zone => zone.zoneNumber),
+    // No pin here: wet_check_billings carries no coordinate columns.
+  });
+}
+
+export function ticketPageWO(
+  wo: PdfWorkOrderRow,
+  invoiceNumber: string,
+  photoDataUris: string[],
+  logoDataUri?: string | null,
+  companyName?: string,
+  pinQrDataUri?: string | null,
+): string {
   const workText = wo.aiDetailedDescription || wo.workSummary || wo.workDescription;
   const workBullets = workText
     ? `<div class="ticket-section">
@@ -356,17 +406,8 @@ export function ticketPageWO(wo: PdfWorkOrderRow, invoiceNumber: string, photoDa
   // Task #1959 — clock/zone are recorded per line item far more often than on
   // the parent work order, so merge both sources. One distinct value still
   // reads singular; several read as a multi-zone summary.
-  const site = buildPdfSiteMetadata({
-    locationCandidates: [wo.workLocationAddress, wo.projectAddress],
-    branch: wo.branchName,
-    controllerLabel: wo.controllerLetter,
-    zoneNumber: wo.zoneNumber,
-    controllerLabels: (wo.items ?? []).map(item => item.controllerLetter),
-    zoneNumbers: (wo.items ?? []).map(item => item.zoneNumber),
-    latitude: wo.workLocationLat,
-    longitude: wo.workLocationLng,
-  });
-  const sitePanel = ticketSitePanel(site, 'workOrder', wo.locationNotes);
+  const site = buildPdfWorkOrderSiteMetadata(wo);
+  const sitePanel = ticketSitePanel(site, 'workOrder', wo.locationNotes, pinQrDataUri);
 
   const logoHtml = logoDataUri
     ? `<img src="${logoDataUri}" class="ticket-header-logo" alt="Company logo">`
@@ -414,7 +455,15 @@ export function ticketPageWO(wo: PdfWorkOrderRow, invoiceNumber: string, photoDa
   </div>`;
 }
 
-export function ticketPageBS(bs: PdfBillingSheetRow, invoiceNumber: string, photoDataUris: string[], logoDataUri?: string | null, companyName?: string, brandColors: PdfBrandColors = DEFAULT_BRAND_COLORS): string {
+export function ticketPageBS(
+  bs: PdfBillingSheetRow,
+  invoiceNumber: string,
+  photoDataUris: string[],
+  logoDataUri?: string | null,
+  companyName?: string,
+  brandColors: PdfBrandColors = DEFAULT_BRAND_COLORS,
+  pinQrDataUri?: string | null,
+): string {
   // WORK PERFORMED is customer-facing. Source ONLY from technician-authored
   // fields (`aiDetailedDescription` then `workDescription`) — never from
   // `bs.notes`, which holds internal manager notes and historically also
@@ -444,18 +493,8 @@ export function ticketPageBS(bs: PdfBillingSheetRow, invoiceNumber: string, phot
   // Task #1959 — billing sheet line items carry no clock/zone columns at all;
   // for wet-check-backed sheets the real values live on the inspected zone
   // records that already drive the Repairs Summary below.
-  const bsWetCheckZones = bs.wetCheckView?.zones ?? [];
-  const bsSite = buildPdfSiteMetadata({
-    locationCandidates: [bs.workLocationAddress, bs.propertyAddress],
-    branch: bs.branchName,
-    controllerLabel: bs.controllerLetter,
-    zoneNumber: bs.zoneNumber,
-    controllerLabels: bsWetCheckZones.map(zone => zone.controllerLetter),
-    zoneNumbers: bsWetCheckZones.map(zone => zone.zoneNumber),
-    latitude: bs.workLocationLat,
-    longitude: bs.workLocationLng,
-  });
-  const bsSitePanel = ticketSitePanel(bsSite, 'billingSheet');
+  const bsSite = buildPdfBillingSheetSiteMetadata(bs);
+  const bsSitePanel = ticketSitePanel(bsSite, 'billingSheet', null, pinQrDataUri);
 
   return `
   <div class="ticket-page ticket-type-bs">
@@ -517,19 +556,14 @@ export function ticketPageWCB(
   companyName?: string,
   brandColors: PdfBrandColors = DEFAULT_BRAND_COLORS,
   zonePhotoGroups?: WcbZonePhotoGroupResolved[],
+  pinQrDataUri?: string | null,
 ): string {
   const { wetCheckBilling: wcb, wetCheckView: view } = row;
   // Task #1959 — clock/zone were previously never passed in here, so these
   // lines could not render at all regardless of the data. They come from the
   // inspected zone records, the same source as the Repairs Summary body.
-  const wcbSite = buildPdfSiteMetadata({
-    locationCandidates: [wcb.propertyAddress, view.inspection.propertyAddress],
-    branch: wcb.branchName,
-    controllerLabels: (view.zones ?? []).map(zone => zone.controllerLetter),
-    zoneNumbers: (view.zones ?? []).map(zone => zone.zoneNumber),
-    // No pin here: wet_check_billings carries no coordinate columns.
-  });
-  const wcbSitePanel = ticketSitePanel(wcbSite, 'wetCheck');
+  const wcbSite = buildPdfWetCheckSiteMetadata(row);
+  const wcbSitePanel = ticketSitePanel(wcbSite, 'wetCheck', null, pinQrDataUri);
 
   const totalHours = parseFloat(String(wcb.totalHours || '0'));
   const laborRate = parseFloat(String(wcb.appliedLaborRate || wcb.laborRate || '0'));
@@ -1716,6 +1750,35 @@ export function buildFullCSS(colors: PdfBrandColors = DEFAULT_BRAND_COLORS): str
     break-after: avoid;
   }
 
+  .ticket-site-pin-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-top: 5px;
+  }
+
+  .ticket-site-pin {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .ticket-site-qr {
+    flex: 0 0 74px;
+    width: 74px;
+    text-align: center;
+    color: #374151;
+    font-size: 9px;
+    line-height: 1.15;
+  }
+
+  .ticket-site-qr-image {
+    display: block;
+    width: 74px;
+    height: 74px;
+    image-rendering: pixelated;
+    margin-bottom: 2px;
+  }
+
   .ticket-site-panel-label {
     color: var(--ticket-site-accent);
     font-size: 9px;
@@ -2282,6 +2345,7 @@ export function ticketSitePanel(
   site: PdfSiteMetadata,
   jobType: InvoiceTicketSiteJobType,
   locationNotes?: string | null,
+  pinQrDataUri?: string | null,
 ): string {
   const config = INVOICE_TICKET_SITE_CONFIG[jobType];
   const notes = locationNotes?.trim() || null;
@@ -2303,7 +2367,15 @@ export function ticketSitePanel(
     ? `<div class="ticket-site-notes"><span class="ticket-site-notes-label">Location notes</span><span>${escapeHtml(notes)}</span></div>`
     : '';
   const pinHtml = site.pin
-    ? `<div class="ticket-site-pin">${PDF_PIN_ICON}<span>Pin ${escapeHtml(site.pin.coordinates)}</span>&nbsp;&middot;&nbsp;<a href="${escapeHtml(site.pin.mapUrl)}">Open in Maps</a></div>`
+    ? `<div class="ticket-site-pin-row">
+         <div class="ticket-site-pin">${PDF_PIN_ICON}<span>Pin ${escapeHtml(site.pin.coordinates)}</span>&nbsp;&middot;&nbsp;<a href="${escapeHtml(site.pin.mapUrl)}">Open in Maps</a></div>
+         ${pinQrDataUri?.trim()
+           ? `<div class="ticket-site-qr">
+                <img src="${escapeHtml(pinQrDataUri)}" class="ticket-site-qr-image" width="74" height="74" alt="" aria-hidden="true">
+                <span>Scan for pin</span>
+              </div>`
+           : ''}
+       </div>`
     : '';
   const controllerZoneText = [
     site.controller

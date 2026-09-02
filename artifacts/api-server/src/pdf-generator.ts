@@ -1,4 +1,5 @@
 import puppeteer from 'puppeteer-core';
+import QRCode from 'qrcode';
 import { resolveChromiumExecutable } from './chromium-resolver';
 import { VRT_LOGO_DATA_URI } from './assets/vrt-logo.js';
 import { IRRIGOPRO_LOGO_DATA_URI } from './assets/irrigopro-logo.js';
@@ -18,6 +19,9 @@ import {
   ticketPageWCB,
   reconciliationPage,
   buildFullCSS,
+  buildPdfWorkOrderSiteMetadata,
+  buildPdfBillingSheetSiteMetadata,
+  buildPdfWetCheckSiteMetadata,
 } from './pdf-helpers';
 import type { WcbZonePhotoGroupResolved } from './pdf-helpers';
 import type { PdfWcbZonePhotoGroup } from './pdf-view-model';
@@ -28,6 +32,7 @@ const _objectStorageService = new ObjectStorageService();
 
 const PDF_PHOTO_MAX_DIM = 300;
 const PDF_PHOTO_QUALITY = 60;
+export const PDF_PIN_QR_SIZE = 148;
 
 export async function compressForPdf(input: Buffer): Promise<Buffer> {
   return sharp(input, { failOn: 'none' })
@@ -131,6 +136,48 @@ export async function preloadPhotos(urls: string[], port: number): Promise<strin
   return results;
 }
 
+export interface PdfPinQrSource {
+  mapUrl: string | null;
+  invoiceNumber: string;
+  ticketLabel: string;
+}
+
+/**
+ * Generate a print-sized QR locally. The 2x source is rendered at 74px in the
+ * PDF so Chromium can preserve sharp module edges without a network request.
+ */
+export async function generatePdfPinQrDataUri(mapUrl: string): Promise<string> {
+  return QRCode.toDataURL(mapUrl, {
+    type: 'image/png',
+    width: PDF_PIN_QR_SIZE,
+    errorCorrectionLevel: 'M',
+    margin: 1,
+  });
+}
+
+/**
+ * Resolve every ticket's QR independently and concurrently. A missing pin is
+ * intentionally a no-op; an individual generator failure must not prevent the
+ * rest of the invoice packet from rendering.
+ */
+export async function preloadPinQrs(
+  sources: PdfPinQrSource[],
+  generateQr: (mapUrl: string) => Promise<string> = generatePdfPinQrDataUri,
+): Promise<Array<string | null>> {
+  return Promise.all(sources.map(async source => {
+    if (!source.mapUrl) return null;
+    try {
+      return await generateQr(source.mapUrl);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[PDF] Invoice ${source.invoiceNumber}: ${source.ticketLabel} pin QR generation failed — ${detail}`,
+      );
+      return null;
+    }
+  }));
+}
+
 /**
  * Task #843 — Convert URL-based zone photo groups into data-URI-based groups
  * for inline rendering in the WCB ticket PDF.
@@ -218,6 +265,33 @@ export class PDFGenerator {
     const port = parseInt(process.env.PORT || '5000', 10);
     const invoiceNumber = viewModel.invoice.invoiceNumber;
 
+    // Build the QR source list from the exact same normalized site metadata
+    // consumed by the synchronous ticket builders. One Promise.all covers the
+    // complete packet, so pinned rows never serialize QR generation.
+    const pinQrSources: PdfPinQrSource[] = [
+      ...viewModel.workOrders.map(wo => ({
+        mapUrl: buildPdfWorkOrderSiteMetadata(wo).pin?.mapUrl ?? null,
+        invoiceNumber,
+        ticketLabel: `Work Order ${wo.workOrderNumber}`,
+      })),
+      ...viewModel.billingSheets.map(bs => ({
+        mapUrl: buildPdfBillingSheetSiteMetadata(bs).pin?.mapUrl ?? null,
+        invoiceNumber,
+        ticketLabel: `Billing Sheet ${bs.billingNumber}`,
+      })),
+      ...viewModel.wetCheckBillings.map(wcb => ({
+        mapUrl: buildPdfWetCheckSiteMetadata(wcb).pin?.mapUrl ?? null,
+        invoiceNumber,
+        ticketLabel: `WC Billing ${wcb.wetCheckBilling.billingNumber}`,
+      })),
+    ];
+    const pinQrDataUris = await preloadPinQrs(pinQrSources);
+    const woPinQrDataUris = pinQrDataUris.slice(0, viewModel.workOrders.length);
+    const bsQrStart = viewModel.workOrders.length;
+    const bsPinQrDataUris = pinQrDataUris.slice(bsQrStart, bsQrStart + viewModel.billingSheets.length);
+    const wcbQrStart = bsQrStart + viewModel.billingSheets.length;
+    const wcbPinQrDataUris = pinQrDataUris.slice(wcbQrStart);
+
     const woPhotoMaps: string[][] = [];
     for (const wo of viewModel.workOrders) {
       const result = wo.photos.length > 0 ? await preloadPhotos(wo.photos, port) : [];
@@ -273,7 +347,17 @@ export class PDFGenerator {
     try {
       const page = await browser.newPage();
 
-      const htmlContent = this.generateInvoiceDetailHTML(viewModel, woPhotoMaps, bsPhotoMaps, wcbPhotoMaps, viewModel.brandColors, wcbZonePhotoGroupMaps);
+       const htmlContent = this.generateInvoiceDetailHTML(
+         viewModel,
+         woPhotoMaps,
+         bsPhotoMaps,
+         wcbPhotoMaps,
+         viewModel.brandColors,
+         wcbZonePhotoGroupMaps,
+         woPinQrDataUris,
+         bsPinQrDataUris,
+         wcbPinQrDataUris,
+       );
 
       await page.setContent(htmlContent, { waitUntil: 'domcontentloaded' });
 
@@ -314,13 +398,16 @@ export class PDFGenerator {
     wcbPhotoMaps: string[][] = [],
     brandColors: PdfBrandColors = DEFAULT_BRAND_COLORS,
     wcbZonePhotoGroupMaps: Array<WcbZonePhotoGroupResolved[] | undefined> = [],
+    woPinQrDataUris: Array<string | null> = [],
+    bsPinQrDataUris: Array<string | null> = [],
+    wcbPinQrDataUris: Array<string | null> = [],
   ): string {
     const { invoice, workOrders, billingSheets, wetCheckBillings } = vm;
 
     const ticketPages = [
-      ...workOrders.map((wo, i) => ticketPageWO(wo, invoice.invoiceNumber, woPhotoMaps[i] ?? [], vm.company.logoDataUri, vm.company.name)),
-      ...billingSheets.map((bs, i) => ticketPageBS(bs, invoice.invoiceNumber, bsPhotoMaps[i] ?? [], vm.company.logoDataUri, vm.company.name, brandColors)),
-      ...wetCheckBillings.map((wcb, i) => ticketPageWCB(wcb, invoice.invoiceNumber, wcbPhotoMaps[i] ?? [], vm.company.logoDataUri, vm.company.name, brandColors, wcbZonePhotoGroupMaps[i])),
+      ...workOrders.map((wo, i) => ticketPageWO(wo, invoice.invoiceNumber, woPhotoMaps[i] ?? [], vm.company.logoDataUri, vm.company.name, woPinQrDataUris[i])),
+      ...billingSheets.map((bs, i) => ticketPageBS(bs, invoice.invoiceNumber, bsPhotoMaps[i] ?? [], vm.company.logoDataUri, vm.company.name, brandColors, bsPinQrDataUris[i])),
+      ...wetCheckBillings.map((wcb, i) => ticketPageWCB(wcb, invoice.invoiceNumber, wcbPhotoMaps[i] ?? [], vm.company.logoDataUri, vm.company.name, brandColors, wcbZonePhotoGroupMaps[i], wcbPinQrDataUris[i])),
     ].join('');
 
     // Task #1809 — standalone invoices skip the reconciliation summary page
