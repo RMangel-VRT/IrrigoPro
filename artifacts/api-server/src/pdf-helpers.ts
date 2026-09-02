@@ -41,6 +41,19 @@ export interface WcbZonePhotoGroupResolved {
 
 export const FAILED_PHOTO_SENTINEL = '__PHOTO_UNAVAILABLE__';
 
+/**
+ * Font-independent icons used in invoice ticket metadata.
+ *
+ * These stay as inline SVG so the PDF does not depend on an emoji font,
+ * external assets, or a network request. `currentColor` keeps each icon in
+ * step with the surrounding ticket text.
+ */
+export const PDF_PIN_ICON = `<svg class="pdf-inline-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><path d="M20 10c0 5-8 12-8 12S4 15 4 10a8 8 0 1 1 16 0Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>`;
+export const PDF_BRANCH_ICON = `<svg class="pdf-inline-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><path d="M4 21V4h10v17M4 8h10M8 4V2h8v19M14 10h6v11M7 12h2M7 16h2M11 12h2M11 16h2M17 14h1M17 18h1" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/></svg>`;
+export const PDF_CLOCK_ICON = `<svg class="pdf-inline-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/></svg>`;
+export const PDF_WARNING_ICON = `<svg class="pdf-inline-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><path d="M10.3 3.7 2.5 17.2A2 2 0 0 0 4.2 20h15.6a2 2 0 0 0 1.7-2.8L13.7 3.7a2 2 0 0 0-3.4 0Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/><path d="M12 9v4M12 17h.01" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/></svg>`;
+export const PDF_INFO_ICON = `<svg class="pdf-inline-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 11v5M12 8h.01" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/></svg>`;
+
 export function formatWorkSummaryAsBullets(text: string | null | undefined): string {
   if (!text || text.trim().length === 0) return '';
   const trimmed = text.trim();
@@ -339,7 +352,7 @@ function ticketSiteBlock(site: PdfSiteMetadata, locationSuffix?: string | null):
   if (!locationText && !pin) return '';
 
   const addressHtml = locationText
-    ? `<div class="ticket-site-address">&#128205; ${escapeHtml(locationText)}</div>`
+    ? `<div class="ticket-site-address">${PDF_PIN_ICON} ${escapeHtml(locationText)}</div>`
     : '';
   const pinHtml = pin
     ? `<div class="ticket-site-pin">Pin ${escapeHtml(pin.coordinates)} &nbsp;&middot;&nbsp; <a href="${escapeHtml(pin.mapUrl)}">Open in Maps</a></div>`
@@ -360,7 +373,7 @@ export function ticketPageWO(wo: PdfWorkOrderRow, invoiceNumber: string, photoDa
   const failedPhotoCount = photoDataUris.filter(u => u === FAILED_PHOTO_SENTINEL).length;
   const photoFailWarning = failedPhotoCount > 0
     ? `<div class="ticket-photo-fail-warning">
-         &#9888; Warning: ${failedPhotoCount} photo${failedPhotoCount > 1 ? 's' : ''} could not be loaded and ${failedPhotoCount > 1 ? 'were' : 'was'} omitted from this PDF.
+         ${PDF_WARNING_ICON} Warning: ${failedPhotoCount} photo${failedPhotoCount > 1 ? 's' : ''} could not be loaded and ${failedPhotoCount > 1 ? 'were' : 'was'} omitted from this PDF.
        </div>`
     : '';
 
@@ -379,11 +392,11 @@ export function ticketPageWO(wo: PdfWorkOrderRow, invoiceNumber: string, photoDa
   });
   const siteBlock = ticketSiteBlock(site, wo.locationNotes);
   const branchLine = site.branch
-    ? `<div class="ticket-header-branch">&#127970; Branch: ${escapeHtml(site.branch)}</div>`
+    ? `<div class="ticket-header-branch">${PDF_BRANCH_ICON} Branch: ${escapeHtml(site.branch)}</div>`
     : '';
   const clockZoneText = pdfControllerZoneText(site);
   const clockZoneLine = clockZoneText
-    ? `<div class="ticket-header-branch">&#128336; ${escapeHtml(clockZoneText)}</div>`
+    ? `<div class="ticket-header-branch">${PDF_CLOCK_ICON} ${escapeHtml(clockZoneText)}</div>`
     : '';
 
   const logoHtml = logoDataUri
@@ -449,7 +462,7 @@ export function ticketPageBS(bs: PdfBillingSheetRow, invoiceNumber: string, phot
   const failedPhotoCountBS = photoDataUris.filter(u => u === FAILED_PHOTO_SENTINEL).length;
   const photoFailWarningBS = failedPhotoCountBS > 0
     ? `<div class="ticket-photo-fail-warning">
-         &#9888; Warning: ${failedPhotoCountBS} photo${failedPhotoCountBS > 1 ? 's' : ''} could not be loaded and ${failedPhotoCountBS > 1 ? 'were' : 'was'} omitted from this PDF.
+         ${PDF_WARNING_ICON} Warning: ${failedPhotoCountBS} photo${failedPhotoCountBS > 1 ? 's' : ''} could not be loaded and ${failedPhotoCountBS > 1 ? 'were' : 'was'} omitted from this PDF.
        </div>`
     : '';
 
@@ -476,7 +489,7 @@ export function ticketPageBS(bs: PdfBillingSheetRow, invoiceNumber: string, phot
   const bsSiteBlock = ticketSiteBlock(bsSite);
   const bsClockZoneText = pdfControllerZoneText(bsSite);
   const bsClockZoneLine = bsClockZoneText
-    ? `<div class="ticket-header-branch">&#128336; ${escapeHtml(bsClockZoneText)}</div>`
+    ? `<div class="ticket-header-branch">${PDF_CLOCK_ICON} ${escapeHtml(bsClockZoneText)}</div>`
     : '';
 
   return `
@@ -487,7 +500,7 @@ export function ticketPageBS(bs: PdfBillingSheetRow, invoiceNumber: string, phot
         <div class="ticket-header-line1">Billing Sheet #${bs.billingNumber} &nbsp;|&nbsp; Invoice #${invoiceNumber}</div>
         <div class="ticket-header-line2">Date: ${formatDate(bs.workDate)} &nbsp;|&nbsp; Technician: ${bs.technicianName} &nbsp;|&nbsp; Hours: ${bs.totalHours} hrs</div>
         ${bsSiteBlock}
-        ${bsSite.branch ? `<div class="ticket-header-branch">&#127970; Branch: ${escapeHtml(bsSite.branch)}</div>` : ''}
+        ${bsSite.branch ? `<div class="ticket-header-branch">${PDF_BRANCH_ICON} Branch: ${escapeHtml(bsSite.branch)}</div>` : ''}
         ${bsClockZoneLine}
       </div>
     </div>
@@ -554,7 +567,7 @@ export function ticketPageWCB(
   const wcbSiteBlock = ticketSiteBlock(wcbSite);
   const wcbClockZoneText = pdfControllerZoneText(wcbSite);
   const wcbClockZoneLine = wcbClockZoneText
-    ? `<div class="ticket-header-branch">&#128336; ${escapeHtml(wcbClockZoneText)}</div>`
+    ? `<div class="ticket-header-branch">${PDF_CLOCK_ICON} ${escapeHtml(wcbClockZoneText)}</div>`
     : '';
 
   const totalHours = parseFloat(String(wcb.totalHours || '0'));
@@ -566,7 +579,7 @@ export function ticketPageWCB(
   const failedPhotoCount = photoDataUris.filter(u => u === FAILED_PHOTO_SENTINEL).length;
   const photoFailWarning = failedPhotoCount > 0
     ? `<div class="ticket-photo-fail-warning">
-         &#9888; Warning: ${failedPhotoCount} photo${failedPhotoCount > 1 ? 's' : ''} could not be loaded and ${failedPhotoCount > 1 ? 'were' : 'was'} omitted from this PDF.
+         ${PDF_WARNING_ICON} Warning: ${failedPhotoCount} photo${failedPhotoCount > 1 ? 's' : ''} could not be loaded and ${failedPhotoCount > 1 ? 'were' : 'was'} omitted from this PDF.
        </div>`
     : '';
 
@@ -595,7 +608,7 @@ export function ticketPageWCB(
         <div class="ticket-header-line1">WC Billing #${wcb.billingNumber} &nbsp;|&nbsp; Invoice #${invoiceNumber}</div>
         <div class="ticket-header-line2">Date: ${formatDate(new Date(wcb.workDate))} &nbsp;|&nbsp; Technician: ${wcb.technicianName} &nbsp;|&nbsp; Hours: ${totalHours} hrs</div>
         ${wcbSiteBlock}
-        ${wcbSite.branch ? `<div class="ticket-header-branch">&#127970; Branch: ${escapeHtml(wcbSite.branch)}</div>` : ''}
+        ${wcbSite.branch ? `<div class="ticket-header-branch">${PDF_BRANCH_ICON} Branch: ${escapeHtml(wcbSite.branch)}</div>` : ''}
         ${wcbClockZoneLine}
       </div>
     </div>
@@ -729,7 +742,7 @@ export function partsBlockForWetCheckBS(
 
   // Stale labor note shown under the header when zone repair_labor_hours are stale
   const staleLaborNote = view.zonesHaveStaleLaborData
-    ? `<div class="zone-labor-note">&#9432; Zone labor data is pending a refresh &mdash; zone subtotals reflect parts only. Labor will appear once the wet check record is updated.</div>`
+    ? `<div class="zone-labor-note">${PDF_INFO_ICON} Zone labor data is pending a refresh &mdash; zone subtotals reflect parts only. Labor will appear once the wet check record is updated.</div>`
     : '';
 
   const repairsSummaryBlock = rollupRows
@@ -982,7 +995,7 @@ export function reconciliationPage(vm: PdfViewModel): string {
   const warningRow = validationWarning ? `
     <tr class="recon-warning">
       <td colspan="3">
-        <span class="recon-warning-icon">&#9888;</span>
+        <span class="recon-warning-icon">${PDF_WARNING_ICON}</span>
         ${validationWarning}
       </td>
     </tr>` : '';
@@ -1727,6 +1740,14 @@ export function buildFullCSS(colors: PdfBrandColors = DEFAULT_BRAND_COLORS): str
     color: #ffffff;
     line-height: 1.3;
     letter-spacing: 0.01em;
+  }
+
+  .pdf-inline-icon {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    vertical-align: -0.15em;
+    flex: 0 0 auto;
   }
 
   .ticket-site-pin {

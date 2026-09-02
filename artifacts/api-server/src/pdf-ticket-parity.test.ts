@@ -20,9 +20,22 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ticketPageBS, ticketPageWCB } from "./pdf-helpers.js";
+import {
+  ticketPageBS,
+  ticketPageWCB,
+  ticketPageWO,
+  partsBlockForWetCheckBS,
+  reconciliationPage,
+  buildFullCSS,
+  FAILED_PHOTO_SENTINEL,
+  PDF_PIN_ICON,
+  PDF_BRANCH_ICON,
+  PDF_CLOCK_ICON,
+  PDF_WARNING_ICON,
+  PDF_INFO_ICON,
+} from "./pdf-helpers.js";
 import { DEFAULT_BRAND_COLORS } from "./pdf-view-model.js";
-import type { PdfBillingSheetRow, PdfBillingSheetItemRow } from "./pdf-view-model.js";
+import type { PdfWorkOrderRow, PdfBillingSheetRow, PdfBillingSheetItemRow } from "./pdf-view-model.js";
 import type { PdfWetCheckBillingRow } from "./pdf-view-model.js";
 
 // ── snapshot helper ───────────────────────────────────────────────────────────
@@ -208,6 +221,30 @@ const wcbFixture: PdfWetCheckBillingRow = {
   } as any,
 };
 
+const woFixture: PdfWorkOrderRow = {
+  workOrderNumber: "WO-PARITY-TEST",
+  projectName: "Parity Project",
+  projectAddress: PROPERTY_ADDRESS,
+  branchName: "North Campus",
+  controllerLetter: "B",
+  zoneNumber: 2,
+  locationNotes: "",
+  technicianName: "Parity Tech",
+  completedAt: APPROVED_AT,
+  totalHours: 3,
+  laborRate: 85,
+  workDescription: "Replaced rotor heads",
+  workSummary: "",
+  aiDetailedDescription: "",
+  photos: [],
+  items: [],
+  partsSubtotal: 100,
+  laborSubtotal: 255,
+  rowTotal: 355,
+  approvedBy: null,
+  approvedAt: null,
+};
+
 // ── render once, reuse across all assertions ──────────────────────────────────
 
 const bsHtml = ticketPageBS(bsFixture, INVOICE_NUMBER, [], null, undefined, DEFAULT_BRAND_COLORS);
@@ -306,6 +343,99 @@ describe("ticketPageBS + ticketPageWCB — TOTAL value sanity (Slice 4)", () => 
   it("both renderers show $355.00 as the TOTAL", () => {
     assert.match(bsHtml, /TOTAL[\s\S]*?\$355\.00/, "BS TOTAL must be $355.00");
     assert.match(wcbHtml, /TOTAL[\s\S]*?\$355\.00/, "WCB TOTAL must be $355.00");
+  });
+});
+
+describe("invoice ticket metadata — font-independent icons (Task #1968)", () => {
+  it("uses inline SVG pin, branch, and clock icons in all three ticket builders", () => {
+    const bsWithMetadata = ticketPageBS(
+      { ...bsFixture, branchName: "North Campus", controllerLetter: "A", zoneNumber: 1 },
+      INVOICE_NUMBER,
+      [],
+      null,
+      undefined,
+      DEFAULT_BRAND_COLORS,
+    );
+    const wcbWithMetadata = ticketPageWCB(
+      {
+        ...wcbFixture,
+        wetCheckBilling: { ...wcbFixture.wetCheckBilling, branchName: "North Campus" },
+      },
+      INVOICE_NUMBER,
+      [],
+      null,
+      undefined,
+      DEFAULT_BRAND_COLORS,
+    );
+    const woHtml = ticketPageWO(woFixture, INVOICE_NUMBER, []);
+    const ticketHtml = [bsWithMetadata, wcbWithMetadata, woHtml];
+
+    for (const html of ticketHtml) {
+      assert.match(html, /class="pdf-inline-icon"/, "ticket must contain inline SVG metadata icons");
+      assert.match(html, /aria-hidden="true"/, "metadata icons must be hidden from assistive technology");
+      assert.match(html, /stroke="currentColor"/, "metadata icons must inherit surrounding text color");
+      assert.doesNotMatch(html, /&#(?:128205|127970|128336);/, "ticket must not contain known emoji entity glyphs");
+    }
+
+    assert.match(bsWithMetadata, new RegExp(PDF_PIN_ICON.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(bsWithMetadata, new RegExp(PDF_BRANCH_ICON.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(bsWithMetadata, new RegExp(PDF_CLOCK_ICON.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  });
+
+  it("includes one shared print alignment rule for metadata icons", () => {
+    const css = buildFullCSS(DEFAULT_BRAND_COLORS);
+    const rule = css.match(/\.pdf-inline-icon\s*\{[^}]+\}/)?.[0];
+
+    assert.ok(rule, "shared .pdf-inline-icon rule must be present");
+    assert.match(rule, /display:\s*inline-block/);
+    assert.match(rule, /width:\s*1em/);
+    assert.match(rule, /height:\s*1em/);
+    assert.match(rule, /vertical-align:\s*-0\.15em/);
+    assert.match(rule, /flex:\s*0 0 auto/);
+  });
+
+  it("uses inline SVGs in photo, stale-labor, and reconciliation warnings", () => {
+    const photoWarningHtml = [
+      ticketPageWO(woFixture, INVOICE_NUMBER, [FAILED_PHOTO_SENTINEL]),
+      ticketPageBS(bsFixture, INVOICE_NUMBER, [FAILED_PHOTO_SENTINEL]),
+      ticketPageWCB(wcbFixture, INVOICE_NUMBER, [FAILED_PHOTO_SENTINEL]),
+    ];
+    const staleLaborHtml = partsBlockForWetCheckBS({
+      ...wcbFixture.wetCheckView,
+      zonesHaveStaleLaborData: true,
+    });
+    const reconciliationHtml = reconciliationPage({
+      workOrders: [],
+      billingSheets: [],
+      wetCheckBillings: [],
+      totals: {
+        laborSubtotal: 0,
+        partsSubtotal: 0,
+        grandTotal: 0,
+      },
+      validationWarning: "Invoice totals need review",
+      customerHasBranches: false,
+      branchSubtotals: [],
+      invoice: {
+        invoiceNumber: INVOICE_NUMBER,
+        periodStart: new Date("2026-05-01"),
+        periodEnd: new Date("2026-05-31"),
+      },
+    } as any);
+
+    for (const html of photoWarningHtml) {
+      assert.ok(html.includes(PDF_WARNING_ICON), "photo warning must use the shared SVG warning icon");
+    }
+    assert.ok(staleLaborHtml.includes(PDF_INFO_ICON), "stale labor note must use the shared SVG info icon");
+    assert.ok(reconciliationHtml.includes(PDF_WARNING_ICON), "reconciliation warning must use the shared SVG warning icon");
+
+    for (const html of [...photoWarningHtml, staleLaborHtml, reconciliationHtml]) {
+      assert.doesNotMatch(
+        html,
+        /&#(?:128205|127970|128336|9888|9432);/,
+        "invoice PDF HTML must not contain known emoji entity glyphs",
+      );
+    }
   });
 });
 

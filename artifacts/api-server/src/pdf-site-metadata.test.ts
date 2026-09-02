@@ -266,7 +266,7 @@ describe('ticket rendering — prominent site block and pin', () => {
   it('renders the work site as its own emphasized block, not another metadata line', () => {
     const html = ticketPageWO(baseWorkOrder, '1', []);
     assert.match(html, /ticket-site-block/);
-    assert.match(html, /<div class="ticket-site-address">[^<]*Specific Work Site<\/div>/);
+    assert.match(html, /<div class="ticket-site-address">[\s\S]*Specific Work Site<\/div>/);
     assert.doesNotMatch(html, /ticket-header-line3/);
   });
 
