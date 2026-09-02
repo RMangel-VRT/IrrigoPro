@@ -1,0 +1,105 @@
+# AMENDMENT to #1989 — Preset-Only Work Type Registry
+
+**Source:** Review of #1989 against the merged code, 2026-09-02.
+**Status:** Two corrections to #1989 before it is built. Everything else in that ticket stands.
+**Supersedes:** `BUILD - Company Admin Work Type Registry.md` — that ticket is dead. #1989 reverses the admin-screen decision in favour of preset-only, deliberately. Do not build it.
+
+---
+
+## Correction 1 — Step 4 inverts: retired types keep their rule
+
+**Decided 2026-09-02.**
+
+### The contradiction
+
+Step 4 as written says the picker and the location gate resolve their rule from the **active** list only, so a retired type resolves no rule.
+
+The Missing Location Data report already does the opposite. `artifacts/api-server/src/routes/missing-location-data-route.ts:277`:
+
+```ts
+rulesByCompany.set(id, await storage.getFieldWorkTypes(id, false));
+```
+
+`activeOnly = false` — the report resolves rules from the full registry, retired types included (`storage.ts:1959-1971`).
+
+Build step 4 as specified and the same ticket gets two verdicts. Take a post-cutoff billing sheet carrying a type that is later retired:
+
+- **The report** resolves its rule and evaluates the ticket exactly as it was evaluated the day it was saved. Complete. Stays off the report.
+- **The wizard** resolves no rule, so `checkLocationGate` hits `rule == null`, pushes `work_type_missing` and returns early. Step 2 blocks.
+
+Someone opens that ticket to fix a typo in the description and cannot save it. They cannot re-select the same work type either — step 3 deliberately makes it visible but unselectable. Their only exit is reclassifying a ticket that was captured correctly, while the report insists nothing is wrong with it. The report's job is to predict what the gate will say; a report that contradicts the gate is worse than no report.
+
+### The change
+
+**Rule resolution uses the full registry — active and retired — everywhere. Selection uses the active list only.**
+
+The report is already correct and does not change. Step 4 inverts.
+
+This still satisfies what "Done looks like" is reaching for. Resolving a retired type's rule normally demands nothing **new** — it demands exactly what it demanded when the record was saved. That is not the same as demanding nothing at all, and the difference is precisely what keeps a saved ticket editable.
+
+### Consequences for steps 2 and 3
+
+- **Step 2** now exposes three things from the shared registry hook, not two: the **selectable list** (active only), a **display-name resolver** (full registry), and a **rule resolver** (full registry). Everything downstream reads one of the three, never a raw mixed list.
+- **Simplest wiring:** fetch the full registry once via the step 1 opt-in and derive the selectable subset client-side by filtering on `active`. Two fetches of the same table is the thing to avoid.
+- **Step 3 is unchanged** — the full registry gives the picker the real label for free.
+- **The hazard flips.** Step 4 currently warns that a retired type must not start demanding a controller and zone. Under this amendment the opposite is the risk: the **selectable** list must stay active-only so a retired type can never be chosen for new work, and the **empty-registry** check must count **active** types only. #1989's own note already calls this out — the empty-registry question and the stored-but-missing-code question sit a few lines apart in the same component and answer different things. That note is now the most important sentence in the ticket.
+
+### Tests
+
+- A ticket carrying a retired code resolves that code's rule: a retired `zone_repair` still evaluates as requiring controller and zone, and a ticket saved complete under it stays complete and saveable.
+- The same ticket produces the identical verdict from the report route and from `checkLocationGate` on the client. Assert them against each other, not just individually.
+- A retired code is absent from the selectable options while still rendering its real name on the record.
+- A company whose only remaining types are retired is treated as **empty** (fail-open path), not as populated.
+
+---
+
+## Correction 2 — The seed migration must reconcile, not only insert
+
+**Decided 2026-09-02.**
+
+### The problem
+
+#1989 states that presets are owned by "code plus the seed migration." The seed migration cannot do that job as written.
+
+`seedFieldWorkTypesForCompany` (`artifacts/api-server/src/seeds/field-work-types.ts`) inserts with `onConflictDoNothing` on `(companyId, code)`. That is what makes it safe to re-run, and it is right for inserts — but it means the seed **only ever adds missing rows and never updates an existing one.** A company that already holds `controller_repair` keeps that row's label and requirement flags forever, whatever the source file later says.
+
+Step 6 then narrows the manage capability to super admin, so no company admin can correct it either.
+
+The immediate casualty is the rename in `FIX - Location Gate Scope, Empty Registry Fail-Open, Stale Cutoff Comment.md`: `"Controller Repair"` → `"Controller/Clock Repair"`. Both companies were seeded on 2026-09-02, before that edit. Changing the source file will not touch them. Techs keep seeing the old label, nothing in the app can change it, and the migration reports success while doing nothing.
+
+As written, #1989 produces a preset registry where presets can be added but never corrected.
+
+### The change
+
+Make `seed-field-work-types-v1` **reconcile** existing rows to the source file rather than skipping them:
+
+- **Insert** rows the company is missing (unchanged).
+- **Update** `label`, `requiresController`, `requiresZone`, `requiresDetails` and `sortOrder` on existing rows to match `FIELD_WORK_TYPE_SEEDS`.
+- **Never write `active`.** Step 6 keeps super-admin PATCH alive and this whole ticket is built around retired types existing, so retirement is a runtime action, not a code one. Reconciling `active` from the source file would silently resurrect every type anyone ever retired, on the next run. Leave the column alone.
+
+**The preview must show what will change, not just what will be inserted.** Today it reports `fieldWorkTypesMissing`. It now needs a second count — rows whose label or flags differ from the source — and should name them, because a requirement-flag change alters what the gate demands of every ticket saved afterwards. That is not a change anyone should acknowledge blind.
+
+Update `check()` and `resolveFieldWorkTypeSeedStatus` accordingly: a company whose rows exist but have drifted from the source is `partially_applied`, not `completed`.
+
+### Interaction with the other open ticket
+
+Once this migration updates rows rather than only inserting them, the unexplained false success in `FIX - Field Work Type Seed Missing + Migration Reported Success Without Committing.md` matters considerably more. A migration that can report "14 rows updated" having committed none is one thing when it is seeding an empty table and quite another when it is changing what the field gate demands. **Resolve that ticket before this reconcile ships.**
+
+### Tests
+
+- A company whose `controller_repair` row still reads "Controller Repair" is updated to "Controller/Clock Repair" by a re-run; preview names it beforehand.
+- A row whose `active` is `false` stays `false` across a re-run, and its label and flags are still reconciled.
+- A requirement-flag change in the source file propagates, and the preview reports it as a change rather than burying it.
+- A fully reconciled company reports 0 insertions, 0 updates, and `check()` returns `completed`.
+- A drifted company reports `partially_applied` before the run and `completed` after.
+
+---
+
+## Unchanged in #1989 — build as written
+
+Steps 1, 3, 5, 6 and 7 stand. In particular:
+
+- **Step 6's 403.** A capability refusal on your own company's data is correctly a 403; the cross-tenant 404 is correctly left alone. Those are different questions and the ticket gets the distinction right.
+- **Step 5**, matching the billing sheet preview and summary to the same display resolver.
+- The executor notes on the Radix Select pointer-capture shim, on membership assertions over row counts against a shared dev database, and on the manage capability having exactly one consumer.
+- Everything in Out of Scope, including no create endpoint, no admin page, and no per-company vocabulary.

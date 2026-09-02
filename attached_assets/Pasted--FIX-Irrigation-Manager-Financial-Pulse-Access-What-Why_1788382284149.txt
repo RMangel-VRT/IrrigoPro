@@ -1,0 +1,105 @@
+# FIX — Irrigation Manager Financial Pulse Access
+
+**What & Why**
+
+The irrigation manager's sidebar already contains a **Financial Pulse** link. Clicking it fails. The nav offers a page the API refuses him, and he has been staring at an error screen while trying to plan crew work.
+
+This is a nav/gate disagreement, not a missing feature. `managerNav` lists Financial Pulse under Operations (`nav-config.ts:271`), and `/financial-pulse` is a registered route for his role (`App.tsx`), but every endpoint under `/api/financial-pulse/*` refuses him:
+
+```
+// financial-pulse.ts:72-77
+// TODO(roles): migrate to a capability from lib/shared/src/roles.ts (hasCapability).
+const ALLOWED_ROLES = new Set([
+  "super_admin",
+  "company_admin",
+  "billing_manager",
+]);
+```
+
+`resolveScope` (`financial-pulse.ts:128-135`) returns 403 for anything outside that set, and every route in the file resolves through it.
+
+The exclusion was deliberate. The file header says so:
+
+> Field techs and irrigation managers get a hard 403 — these tiles surface money, margin, and per-tech wage info that must not leak to roles whose UI strips pricing.
+
+That decision is being reversed for `irrigation_manager` only.
+
+## What this exposes (decided, eyes open)
+
+Financial Pulse is not a billing-totals page. Granting access hands the irrigation manager:
+
+- Gross margin percentage, with its `revenue`, `partsCost` and `laborCost` components (`financial-pulse.ts:745-753`).
+- **Per-tech hourly wages** — `users.hourlyWage` is selected and returned per technician (`financial-pulse.ts:417`, `:426`).
+- The CSV export, which carries `Margin %` and `laborCost` columns (`financial-pulse.ts:1847`, `:1860-1861`).
+
+**Decision (Randy, 2026-09-02): full access, including margin and per-tech wages.** The irrigation manager is a senior operational role who assigns crews and needs the same financial picture a billing manager has. This is recorded here so the exposure is a choice on the record, not a side effect nobody noticed.
+
+`field_tech` visibility is **unchanged** — techs keep the hard 403. Nothing in this ticket touches their access.
+
+## Scope boundary
+
+This ticket is **Financial Pulse only**. Budget visibility (`CAN_VIEW_BUDGETS`, the `/api/customers/:id/budget-usage` allowlist) is **not** changed here — it is Slice 4 of the Budget Status restore and lands with that ticket. There is no budget page and no budget data to see until the restore ships, so granting budget reads now would grant access to nothing.
+
+## Slice 1 — Widen the Financial Pulse allowlist
+
+`artifacts/api-server/src/routes/financial-pulse.ts`
+
+1. Add `"irrigation_manager"` to `ALLOWED_ROLES` (`:73-77`).
+2. **Update the file header comment** (`:1-7`). It currently states that irrigation managers get a hard 403. Leaving a comment that contradicts the code is a Rule 7 defect ("no dead code / stale claims"). Rewrite it to name the roles that are allowed and to state that `field_tech` remains excluded, with a one-line note that the manager sees margin and wage data by explicit decision.
+3. **Do not touch `CAN_VIEW_COSTS`** in `lib/shared/src/roles.ts:199-205`. That capability is documented as covering "part costs, margins, labor rates, **and** Financial Pulse" and currently has no production consumers — only the bookkeeper role-matrix test reads it. Widening it would silently grant part-cost and margin visibility across the app the moment someone wires it to a pricing route. Add a short comment at `CAN_VIEW_COSTS` noting that Financial Pulse has diverged from this set and why, so the next person to migrate the TODO does not quietly re-narrow it.
+4. Verify **every** route in the file resolves through `resolveScope` and none carries its own separate role check — including the CSV export path (`:1324` onward). If any route gates independently, widen it in the same change or the manager gets a page that half-loads.
+
+## Slice 2 — Confirm the nav needs no change
+
+`managerNav` already contains the Financial Pulse leaf (`nav-config.ts:271`). No nav edit is required, and none should be made.
+
+Rule 3 is satisfied by this fix rather than violated by it: the route was already reachable, and this change makes the destination work. Confirm by loading the app as an `irrigation_manager` and clicking the existing sidebar link — not by calling the API directly.
+
+## Multi-tenancy (Rule 1)
+
+Unchanged, and must be verified as unchanged. `resolveScope` derives the company from the authenticated user; `super_admin` passes an explicit company; every other role including `irrigation_manager` is confined to their own. The widened allowlist must not open a cross-company path — an irrigation manager in company A requesting company B's pulse still gets refused, and the roll-ups never aggregate across companies.
+
+## Decisions
+
+- **`irrigation_manager` gets full Financial Pulse, including gross margin, parts and labor cost, and per-tech hourly wages** (decided).
+- **`field_tech` remains excluded** (decided) — hard 403, no partial payload.
+- **The local allowlist is widened; `CAN_VIEW_COSTS` is left alone** (decided) — the capability migration is a separate concern and must not become an accidental grant.
+- **Budget visibility is out of scope** (decided) — it ships with the Budget Status restore.
+- **No nav change** (decided) — the link already exists.
+
+## Done looks like
+
+- An irrigation manager clicks Financial Pulse in their sidebar and the page loads with real figures.
+- The CSV export works for that role.
+- A field tech still gets a hard 403 on every Financial Pulse endpoint.
+- The file header comment describes the actual gate.
+- An irrigation manager cannot see another company's data by any route in the file.
+
+## Tests
+
+Extend `artifacts/api-server/src/routes/financial-pulse.test.ts`:
+
+- `irrigation_manager` receives 200 on each Financial Pulse endpoint, including the CSV export.
+- `field_tech` still receives 403 on each — asserted per route, not once.
+- A role outside the allowlist is refused.
+- Tenant isolation: an `irrigation_manager` in company A cannot resolve company B's scope, and a `super_admin` passing an explicit company still can.
+- The bookkeeper role matrix (`bookkeeper-role-matrix.test.ts:159-163`) still passes unchanged — the bookkeeper stays out of budgets, costs and approvals.
+
+Register the suite as a **validation command**, not a workflow — this repo is past its workflow cap.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the allowlist change and the corrected header comment.
+- [ ] Screenshot of Financial Pulse loading in the running app **while signed in as an irrigation manager**, reached by clicking the existing sidebar link.
+- [ ] Captured 403 response body for a `field_tech` on the same endpoint.
+- [ ] Test output for the role matrix and the tenant-isolation cases.
+- [ ] Grep proof that `CAN_VIEW_COSTS` membership is unchanged.
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+
+- `artifacts/api-server/src/routes/financial-pulse.ts` (header comment `:1-7`, `ALLOWED_ROLES` `:72-77`, `resolveScope` `:128-135`, wage select `:417` / `:426`, margin payload `:745-753`, CSV export `:1324`, `:1847`, `:1860-1861`)
+- `artifacts/api-server/src/routes/financial-pulse.test.ts`
+- `lib/shared/src/roles.ts` (`CAN_VIEW_COSTS` `:199-205` — comment only, no membership change)
+- `artifacts/api-server/src/routes/bookkeeper-role-matrix.test.ts` (`:159-163` — must still pass)
+- `artifacts/irrigopro/src/components/layout/nav-config.ts` (`managerNav` `:256`, Financial Pulse leaf `:271` — no change, verification only)

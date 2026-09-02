@@ -1,0 +1,146 @@
+# RESTORE — Seasonal Budget Model (re-land Task #1865)
+
+**What & Why**
+
+Task #1865 was built and merged as commit `5d32d82b` on 2026-07-31. On 2026-08-06, commit `109fd0df` — *"Restored to '556f2794f809c2afdb8da16b8f85db7739573aa0'"*, a Replit checkpoint rollback — deleted it wholesale, along with Task #1866. There is no revert commit and no ticket explaining it. It appears unintentional, and it went unnoticed for a month because the feature had no data in it yet.
+
+The rollback removed 3,966 lines across 34 files. This ticket re-lands the #1865 half. Task #1866 (the Budget Status page, Manager Workspace card and crew view) is re-landed by its own ticket, which depends on this one.
+
+**The original spec is still at the project root and is still authoritative:** `BUILD - Seasonal Budget Model (Annual Goal Spread Across Apr-Oct).md`. Read it — this document does not restate the model, it tells you how to put the already-written code back.
+
+## The work is not lost; do not rewrite it
+
+Every deleted file exists intact in git history at `5d32d82b`. Recover it from there rather than re-implementing from the spec — the code was reviewed, tested and shipped once.
+
+Files to recover from `5d32d82b`:
+
+- `lib/db/src/schema/schema.ts` — the `budgetSeasonCurve` company column, `annualBudgetGoal`, `budgetSeasonCurveOverride`, and the `customerBudgetMonths` table (42 lines added)
+- `artifacts/api-server/src/services/generate-budget-months.ts` (356 lines)
+- `artifacts/api-server/src/seasonal-budget.test.ts` (535 lines)
+- `artifacts/api-server/src/scripts/backfill-seasonal-budget.ts` (150 lines)
+- `artifacts/api-server/src/routes/budget-routes.ts` (+278 lines)
+- `artifacts/api-server/src/routes/customer-routes.ts` (+64 lines)
+- `artifacts/api-server/src/storage.ts` (+79 lines)
+- `artifacts/api-server/src/services/budget-alert-service.ts` (cap resolution now per-month)
+- `artifacts/api-server/src/routes/financial-pulse.ts` (cap parsing)
+- `artifacts/api-server/src/financial-pulse-math.ts`
+- `artifacts/irrigopro/src/components/customer-form.tsx` (+505 lines — the `BudgetAndAlertsCard` editor)
+- `artifacts/irrigopro/src/pages/customer-profile.tsx`
+- `lib/db/src/pricing-fields.ts`
+- The updated test files for budget routes, the alert service, the customer-form budget preview, and the four financial-pulse suites
+
+## This is a merge, not a revert
+
+`git revert 109fd0df` will not apply. Main has moved 61 commits since the rollback and several of the affected files have changed for unrelated reasons. Measured against the restore commit:
+
+| File | Drift since 109fd0df |
+|---|---|
+| `artifacts/api-server/src/storage.ts` | +770 / -174 |
+| `lib/db/src/schema/schema.ts` | +152 / -1 |
+| `artifacts/api-server/src/routes/financial-pulse.ts` | +107 / -48 |
+| `artifacts/api-server/src/financial-pulse-math.ts` | +31 / -19 |
+| `artifacts/irrigopro/src/routes` / `App.tsx` | +50 / -1 |
+| `artifacts/irrigopro/src/components/layout/nav-config.ts` | +87 / -3 |
+| `artifacts/api-server/src/routes/budget-routes.ts` | +1 / -0 |
+
+These three are **byte-identical** to their pre-rollback state and re-apply cleanly: `customer-form.tsx`, `customer-profile.tsx`, `customer-routes.ts`.
+
+The #1865 changes were almost entirely additive — new columns, a new table, a new service, new form sections. Re-apply them as additions onto current main. Do not check out whole files from `5d32d82b` over files that have drifted; that would silently revert a month of unrelated work.
+
+## Slice 0 — Production preflight (run before any code change)
+
+The rollback deleted the migration but **may not have undone the database**. Migration `0019_seasonal_budget_model.sql` and its `apply-migration-0019.mjs` runner existed in the merged commit; whether they were executed against production before 2026-08-06 is unknown.
+
+Before touching anything, report on the live database:
+
+1. Do `customers.annual_budget_goal` and `customers.budget_season_curve_override` exist?
+2. Does `companies.budget_season_curve` (or wherever the company curve landed) exist?
+3. Does the `customer_budget_months` table exist, and does it hold any rows?
+4. Do `customers.monthly_budget_cap` and `annual_budget_cap` still exist, and how many customers have non-null values?
+
+Post the answers in the ticket before proceeding. Three outcomes:
+
+- **Nothing exists** — normal path, apply the schema.
+- **Everything exists and `customer_budget_months` is empty** — schema is already there; re-land code only, skip the migration, run the backfill.
+- **Everything exists with rows in it** — stop and report. Someone has data that the current code cannot see, and the backfill must not run blind over it.
+
+## Slice 1 — Schema
+
+Schema is applied with `drizzle-kit push` from `lib/db` (`pnpm --filter @workspace/db push`), driven by `schema.ts`; the numbered files in `lib/db/migrations/` are the written record of each change.
+
+1. Re-apply the `schema.ts` additions from `5d32d82b` onto current `schema.ts`, additively.
+2. **Renumber the migration.** `0019` is now taken by `0019_work_order_parent_follow_up.sql` (commit `e96d57fa`, Task #1935) and `0020` by `0020_field_location_rules.sql`. Write the recovered DDL as **`0021_seasonal_budget_model.sql`**. Do not reuse 0019 — two different migrations under one number is a trap for whoever reads the folder next.
+3. If Slice 0 found the columns already present, the SQL must be written so re-running it is harmless (`IF NOT EXISTS` on the table and columns).
+4. Run `pnpm --filter @workspace/db verify` after the push and attach the output.
+
+## Slice 2 — Server
+
+Re-land, in this order: `generate-budget-months.ts`, the `storage.ts` additions, `budget-routes.ts`, `customer-routes.ts`, then the alert-service and financial-pulse cap-resolution changes.
+
+Two points that the drift makes worth checking by hand rather than by patch:
+
+- `budget-alert-service.ts` resolves the cap **per month** after this change, not from a flat column. Alerts will begin firing against monthly allocations. Confirm the shared `computeCustomerSpend` (`budget-spend.ts`, Task #1864 — this survived the rollback and is still in main) is the spend side of that comparison, so alerts and the page cannot disagree.
+- `financial-pulse.ts` has drifted +107/-48. Re-apply its cap-parsing change against the current code rather than restoring the old block.
+
+`monthlyBudgetCap` and `annualBudgetCap` are retired per the original spec: migrate their values, stop reading them, drop the columns in a later ticket. Do not drop them in this one.
+
+## Slice 3 — Customer profile editor
+
+`customer-form.tsx` and `customer-profile.tsx` are byte-identical to their pre-rollback state, so the `BudgetAndAlertsCard` rewrite re-applies cleanly: annual goal input, curve selector (company default or custom), the seven-cell Apr–Oct month grid with per-month overrides, and the drift notice when months no longer total the goal.
+
+**Rule: budget editing lives here and nowhere else.** The status page restored in the follow-on ticket is read-only, and the bulk entry tool specced separately writes through this same path.
+
+## Slice 4 — Backfill
+
+Re-land `backfill-seasonal-budget.ts` and run it, per the original spec: customers with an `annualBudgetCap` migrate to `annualBudgetGoal` and generate the season from the company curve; customers with only a `monthlyBudgetCap` get manual-override rows at that flat value. Idempotent, reported per customer. If Slice 0 found existing rows, do not run it until that finding is resolved.
+
+## Multi-tenancy (Rule 1)
+
+`customer_budget_months` carries `companyId` NOT NULL, unique on `(companyId, customerId, year, month)`, indexed by `companyId`. Generation, regeneration, reads and the roll-up all resolve scope from the customer's own company, never from caller input. The backfill runs per company. A cross-company read returns 404, not 403.
+
+## Decisions
+
+- **Recover from git history, do not re-implement** (decided).
+- **Re-apply as a merge onto current main; no `git revert`** (decided).
+- **Migration renumbered to 0021** (decided).
+- **Production preflight before any code change** (decided).
+- **All budget editing stays in the customer profile** (decided) — carried forward from #1865.
+- **Old cap columns retired but not dropped in this ticket** (decided).
+
+## Done looks like
+
+- A customer's 2026 annual goal is entered once in the customer profile and produces the seven monthly figures the spreadsheet produces: $7,500 → 0 / 750 / 1,500 / 1,500 / 1,500 / 1,500 / 750.
+- A single month can be overridden without changing the annual goal, and the drift notice appears.
+- `GET /api/customers/:id/budget-usage` reports against the current month's allocation with season-to-date alongside.
+- A customer with no goal reads as **unset** everywhere — never zero, never over.
+- Budget alerts fire against monthly allocations using the same spend figure the API reports.
+- Nothing unrelated to budgets was reverted by this change.
+
+## Tests
+
+Restore `seasonal-budget.test.ts` (535 lines) and the updated budget-route, alert-service and financial-pulse suites from `5d32d82b` and run them against current main. The original spec's test list stands in full — rounding to the last season month, override preservation across regeneration, curve validation, unset handling, season-to-date arithmetic, goal-format parsing, backfill idempotency, and company isolation on generation, reads and roll-up.
+
+Add one test this restore specifically needs: **the migration is idempotent** — applying the schema against a database that already has the columns and table succeeds and changes nothing.
+
+Register the suites as **validation commands**, not workflows — this repo is past its workflow cap.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] Slice 0 preflight output posted before any code change.
+- [ ] `file:line` for the schema additions, the generation service, the storage methods, the routes, and the profile editor.
+- [ ] `pnpm --filter @workspace/db verify` output after the push.
+- [ ] Screenshot: a customer profile showing annual goal, curve selector, seven month cells with one override, and the drift notice.
+- [ ] Output proving a $7,500 goal reproduces the spreadsheet row exactly.
+- [ ] Backfill output per customer.
+- [ ] Test output for rounding, override preservation, unset, idempotent migration, and company isolation.
+- [ ] Diff proof that no file outside the budget surface was reverted.
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+
+- Recovery source: commit `5d32d82b` (`git show 5d32d82b --stat`)
+- Rollback to understand: commit `109fd0df` (2026-08-06)
+- Original spec: `BUILD - Seasonal Budget Model (Annual Goal Spread Across Apr-Oct).md`
+- `lib/db/src/schema/schema.ts`, `lib/db/migrations/` (next free number is 0021)
+- `artifacts/api-server/src/services/generate-budget-months.ts`, `src/scripts/backfill-seasonal-budget.ts`, `src/storage.ts`, `src/routes/budget-routes.ts`, `src/routes/customer-routes.ts`, `src/services/budget-alert-service.ts`, `src/routes/financial-pulse.ts`, `src/financial-pulse-math.ts`, `src/budget-spend.ts` (already in main — do not duplicate)
+- `artifacts/irrigopro/src/components/customer-form.tsx`, `src/pages/customer-profile.tsx`

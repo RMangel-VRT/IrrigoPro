@@ -1,0 +1,131 @@
+# BUILD — Annual Budget Goal Bulk Paste Entry
+
+**What & Why**
+
+The seasonal budget model needs one number per customer — the 2026 annual goal — and the curve generates the rest. Roughly 50 customers need that number before the Budget Status page shows anything but Unset.
+
+The original `BUILD - Seasonal Budget Model` spec ruled out an importer explicitly: *"No import. The 2026 goals are entered by hand in the customer profile (decided). There is no CSV importer, no sheet parser, and no bulk-paste tool in this ticket — do not build one."*
+
+**That decision is reversed (Randy, 2026-09-02), for reasons that did not apply when it was made.** The goals live in a spreadsheet that is re-keyed every January, the season is two months from ending so the manual path costs a day the business does not have, and the same fifty numbers will need entering again next April. A tool that was not worth building for one season is worth building for every season.
+
+The reversal is narrow. This does **not** reopen CSV upload, a sheet parser, or per-customer custom vocabulary. It is a paste box.
+
+## What it is
+
+One screen. The user copies two columns out of the 2026 spreadsheet — customer name and annual goal — pastes them, sees exactly what will change, and confirms.
+
+## Where it lives (Rule 3, and the edit-in-one-place rule)
+
+**Not on the Budget Status page.** That page is read-only by standing rule, and adding a write control there would break it.
+
+New route `/admin/budget-goals`, registered in nav for `super_admin` and `company_admin` only. It is a seasonal administrative task, not day-to-day work: the irrigation manager and the billing manager do not need it, and the bookkeeper must not have it.
+
+**This does not create a second editor.** The rule is that a customer's budget is edited in the customer profile, and that holds: this tool writes `annualBudgetGoal` and nothing else, through the **same service path** the profile editor uses (`generate-budget-months`), with the same validation and the same regeneration semantics. It is a bulk entry point for one field, not a parallel form. Every row in the preview links to that customer's profile budget anchor.
+
+## Slice 1 — Parse and match
+
+A textarea accepting tab-separated or comma-separated rows, two columns: customer name, annual goal. A header row is detected and skipped. Blank lines are ignored.
+
+**Goal parsing** reuses the profile editor's parser, which already accepts `14000`, `14,000` and `$14,000.00` and must produce the same value here. Do not write a second parser — a bulk tool that rounds differently from the form is how two surfaces start disagreeing.
+
+**Name matching** is exact after trimming and case-folding, **scoped to the caller's company**. No fuzzy matching and no "did you mean" — a budget silently assigned to the wrong HOA is worse than a row the user has to fix by hand.
+
+Every input row resolves to exactly one of:
+
+- **Matched** — one customer in this company with that name.
+- **Unmatched** — no customer with that name. Reported with the pasted text so the user can correct it. **Never creates a customer.**
+- **Ambiguous** — more than one customer with that name in this company. Reported and skipped; the user resolves it in the profile.
+- **Invalid** — the goal will not parse, is negative, or is zero. Reported and skipped.
+
+## Slice 2 — Preview before write
+
+Nothing is written until the user confirms a preview that shows, per matched row:
+
+- Customer name
+- Current annual goal (or "not set")
+- New annual goal
+- **What the months will become** — the seven generated Apr–Oct figures
+- A marker where the customer has **manual month overrides** that regeneration will preserve, so the user can see that this customer's months will not be a clean curve afterward
+
+Plus counts: matched, unmatched, ambiguous, invalid, and unchanged (pasted goal equals the current one — skipped, not rewritten).
+
+The unmatched and ambiguous rows are shown **above** the confirm button, not below it. The point of the preview is that the user notices them.
+
+## Slice 3 — Write
+
+On confirm, for each matched row with a changed goal, in one transaction per customer:
+
+1. Set `annualBudgetGoal`.
+2. Regenerate `customer_budget_months` for the target year through `generate-budget-months`, **preserving `isManualOverride = true` rows** exactly as the profile editor does.
+3. Record an audit entry per customer — actor, before → after, and that it came from bulk entry (Rule 6: the change leaves a trace).
+
+**Year selector**, defaulting to the current year, so 2027 can be loaded before the season starts.
+
+**Idempotent.** Pasting the same block twice writes nothing the second time and reports every row as unchanged.
+
+**Partial success is reported, not hidden.** If eight of fifty rows fail, the forty-two succeed and the failures are listed with their reason. Do not roll the whole batch back — the user would have to re-paste and re-check everything to fix one typo.
+
+## Slice 4 — Result
+
+After the write, a summary listing each customer changed with its before and after goal, and the rows that did not apply and why. The summary stays on screen until dismissed and is copyable, so the user can paste it back into their spreadsheet as a record of what was entered.
+
+## Multi-tenancy (Rule 1)
+
+Every name lookup, write and regeneration is scoped by `companyId` from `req.authenticatedUserCompanyId`, never from the paste. A customer name that exists in another company is **unmatched**, not matched — this is the single most important test in this ticket. `super_admin` passes an explicit company and the screen requires one to be selected before the paste box is enabled.
+
+## Decisions
+
+- **Paste box only** (decided) — no file upload, no CSV parser, no sheet integration.
+- **Two columns: name and annual goal** (decided) — not thresholds, not curves, not per-month figures. Those stay in the profile.
+- **Exact name matching, company-scoped; no fuzzy matching** (decided).
+- **Never creates a customer** (decided).
+- **Preview and confirm before any write** (decided).
+- **Manual month overrides are preserved and flagged in the preview** (decided).
+- **Partial success; failures reported, batch not rolled back** (decided).
+- **`super_admin` and `company_admin` only** (decided) — not the manager, not the bookkeeper.
+- **Reuses the profile editor's goal parser and the shared generation service** (decided) — no second implementation.
+
+## Done looks like
+
+- Fifty customers get their 2026 goals from one paste and one confirm.
+- The user sees exactly what will change before anything changes, including unmatched rows.
+- A customer with a hand-overridden July keeps it, and the preview says so beforehand.
+- Pasting the same block twice changes nothing.
+- A name belonging to another company never matches.
+- Every changed customer has an audit entry showing where the number came from.
+- The customer profile remains the only place a budget is edited field by field.
+
+## Tests
+
+- Parsing: tab-separated and comma-separated input; a header row is skipped; blank lines ignored; `14000`, `14,000` and `$14,000.00` all produce 14000 and match the profile editor's parser output exactly.
+- Matching: exact match after trim and case-fold; leading/trailing whitespace tolerated; two customers with the same name report ambiguous and write nothing; an unknown name reports unmatched and creates nothing.
+- **Tenant isolation:** a name that exists only in company B is unmatched for a company A user; a `super_admin` scoped to company A gets the same result.
+- Preview: generated months shown match what the profile editor would generate for the same goal; a customer with a manual override is flagged; an unchanged goal is counted as unchanged and not rewritten.
+- Write: overrides preserved through regeneration; audit entry recorded per changed customer with before and after; the same paste applied twice is a no-op.
+- Partial failure: a batch with valid and invalid rows writes the valid ones and reports the rest.
+- Roles: `company_admin` and `super_admin` reach the page; `billing_manager`, `irrigation_manager`, `bookkeeper` and `field_tech` are refused server-side and see no nav entry.
+- Rule 3: the route is registered for exactly the roles whose nav shows it.
+
+Register the suites as **validation commands**, not workflows — this repo is past its workflow cap.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the route and its nav registration, the parser reuse, the matcher, the preview builder, the write path, and the audit call.
+- [ ] Screenshot: the preview showing matched, unmatched and ambiguous rows together, with one customer flagged for manual overrides.
+- [ ] Screenshot: the result summary after a real paste.
+- [ ] Screenshot: Budget Status page after the paste, showing real bars instead of Unset — this is what the whole ticket is for.
+- [ ] Captured response proving a cross-company name is unmatched.
+- [ ] Test output for idempotency, override preservation, and the role matrix.
+- [ ] Grep proof that the goal parser is shared with the profile editor and not reimplemented.
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+
+- Prerequisite: `RESTORE - Seasonal Budget Model (Re-land Task #1865 After the Aug 6 Rollback).md`
+- Original decision being reversed: `BUILD - Seasonal Budget Model (Annual Goal Spread Across Apr-Oct).md` ("No import")
+- `artifacts/api-server/src/services/generate-budget-months.ts` (shared generation — reuse, do not fork)
+- `artifacts/irrigopro/src/components/customer-form.tsx` (`BudgetAndAlertsCard`, goal parser, anchor `id="budget-and-alerts"` — link target and parser source)
+- `artifacts/api-server/src/routes/budget-routes.ts` (new bulk endpoint alongside the existing reads)
+- `artifacts/irrigopro/src/App.tsx`, `src/components/layout/nav-config.ts` (new route and nav entry, admin only)
+- `lib/shared/src/roles.ts` (role gate for the new endpoint)
+- `audit_log` via `recordAuditEvent` (Rule 6)

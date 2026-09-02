@@ -1,0 +1,133 @@
+# RESTORE — Budget Status Page, Manager Workspace Card, Crew View (re-land Task #1866)
+
+**What & Why**
+
+Task #1866 was built and merged as commit `608393a0` on 2026-08-03: the Budget Status page, the shared budget bar, the Manager Workspace card, the crew view, and the role changes that let a manager and a crew see any of it. On 2026-08-06 the checkpoint rollback `109fd0df` deleted all of it.
+
+The business need has not changed and is now urgent. The irrigation manager is texting crews their day before 6am with no data to plan from, and told us so directly. This page is the answer that was already built.
+
+**The original spec is at the project root and remains authoritative:** `BUILD - Budget Status Page + Manager Workspace Card (Read-Only).md`. Its slices, decisions, tests and acceptance criteria stand in full. This document covers only what recovery adds.
+
+## Prerequisite
+
+Ships **after** `RESTORE - Seasonal Budget Model (Re-land Task #1865)`. Without the monthly allocation there is no track to draw a bar against, and every row renders Unset. This is a hard dependency, not a preference.
+
+Task #1864's `computeCustomerSpend` survived the rollback and is already in main — do not re-create it.
+
+## The work is not lost; do not rewrite it
+
+Everything deleted exists intact at `608393a0`. Recover from there.
+
+- `artifacts/irrigopro/src/components/budget/BudgetBar.tsx` (232 lines)
+- `artifacts/irrigopro/src/components/budget/BudgetStatusCard.tsx` (162 lines)
+- `artifacts/irrigopro/src/pages/budget-status.tsx` (381 lines)
+- `artifacts/api-server/src/routes/budget-status-1866.test.ts` (619 lines)
+- `artifacts/api-server/src/routes/budget-routes.ts` — the roll-up read and the tech-scoped read
+- `artifacts/irrigopro/src/pages/manager-workspace.tsx` — `import { BudgetStatusCard }` at `:24`, `<BudgetStatusCard />` at `:439-440`
+- `artifacts/irrigopro/src/pages/field-tech-dashboard.tsx` — `CrewBudgetSection`, `serverStatusToBudgetStatus`, the `CrewBudgetRow` / `CrewBudgetResponse` types
+- `artifacts/irrigopro/src/App.tsx` — `BudgetStatusPage` lazy import and the `/budget-status` route in each role block
+- `artifacts/irrigopro/src/components/layout/nav-config.ts` — the "Budget Status" leaf
+
+## Merge notes
+
+`manager-workspace.tsx` and `field-tech-dashboard.tsx` are **byte-identical** to their pre-rollback state and re-apply cleanly.
+
+`App.tsx` (+50/-1) and `nav-config.ts` (+87/-3) have drifted — the bookkeeper role and the location-report group landed since. Re-apply the route and nav entries by hand against current structure; do not restore whole files.
+
+At `608393a0` the nav leaf appeared in three places, and each must be re-placed in its current equivalent:
+
+- the billing group, between Manager Workspace and Financial Pulse
+- `managerNav`, as the second item directly under Manager Workspace
+- the admin group, between Manager Workspace and Financial Pulse
+
+The route was registered in three role blocks in `App.tsx`. Current `App.tsx` has more blocks than it did in August. **Register `/budget-status` in every block whose role can reach the nav entry** — a nav item pointing at an unregistered route is a Rule 3 orphan in the other direction.
+
+The bookkeeper is a role that did not exist when #1866 was written. **The bookkeeper does not get Budget Status.** `bookkeeperNav` is deliberately not `billingManagerNav`, and the role matrix asserts the bookkeeper is outside `CAN_VIEW_BUDGETS`. Do not add the leaf to their nav and do not widen that capability.
+
+## Slice 4 note — the role change, restated
+
+The original Slice 4 gives `irrigation_manager` full budget access and `field_tech` a server-side-restricted view returning `{ customerId, customerName, status, fillPercent }` and nothing else. Re-land it exactly as specced.
+
+`CAN_VIEW_BUDGETS` (`lib/shared/src/roles.ts:189-195`) exists in main and currently mirrors the old allowlist. Either add `irrigation_manager` there and wire `budget-routes.ts` to `hasCapability`, or widen the local allowlist — pick one and say which. Do not leave the capability and the route disagreeing.
+
+Financial Pulse access for the irrigation manager is handled by its own ticket (`FIX - Irrigation Manager Financial Pulse Access`) and is not part of this change.
+
+## The acceptance target already exists
+
+Three screenshots of the working build were captured before the rollback and are recovered at `screenshots/recovered-1866/`:
+
+- `budget-status-screenshot.jpg` — the page with its company roll-up, month selector, status filters and per-customer rows
+- `manager-workspace-screenshot.jpg` — the card between Needs Approval and the launchpad tiles
+- `crew-phone-screenshot.jpg` — the phone-width crew view, four customers, no dollar figures
+
+**Use these as the visual acceptance target.** The restored build should look like them.
+
+Note what they show: every customer reads **Unset**, monthly allocation $0, "0 customers set", "No budgeted customers this month". That is correct behavior for an empty registry, and it is why nobody noticed the feature disappear. The page is only useful once annual goals are entered — see the bulk-entry ticket and the data-entry step below.
+
+## Data entry is part of shipping this
+
+Restoring the code does not give the manager anything. Roughly 50 customers need a 2026 annual goal entered before a single bar renders. Sequence:
+
+1. This restore ships.
+2. Goals are entered — by hand in the customer profile, or with the tool from `BUILD - Annual Budget Goal Bulk Paste Entry`.
+3. Only then is the page verified against a customer in each of Go / Slow down / Stop / Unset.
+
+The Rule 7 screenshot for this ticket must show **real allocations**, not the all-Unset state the recovered screenshots show. A restored page that renders Unset for everyone proves the code is back; it does not prove the feature works.
+
+## Multi-tenancy (Rule 1)
+
+Unchanged from the original spec and must be re-verified, not assumed. Every read is company-scoped from the caller's company, including the roll-up header, which must never aggregate across companies. `super_admin` passes an explicit company. The tech endpoint is scoped identically — a restricted payload is still a tenant-scoped one.
+
+## Decisions
+
+- **Recover from `608393a0`; do not re-implement** (decided).
+- **Route and nav re-applied by hand against drifted files** (decided).
+- **The bookkeeper does not get Budget Status** (decided) — a role that postdates the original spec.
+- **Read-only everywhere; editing stays in the customer profile** (decided) — carried forward.
+- **Recovered screenshots are the visual acceptance target** (decided).
+- **Verification requires entered budget goals, not an empty registry** (decided).
+
+## Done looks like
+
+- A manager opens Manager Workspace and sees which customers are over budget without clicking anything.
+- `/budget-status` is reachable from the sidebar for admin, billing manager and irrigation manager, and shows every customer ranked by budget risk against a company roll-up.
+- A crew sees Go / Slow down / Stop per customer on a phone with no dollar figures anywhere.
+- Work done but not yet billed is its own bar segment — the reason this was raised in the first place.
+- The bookkeeper cannot reach the page and is not offered it in nav.
+- Nothing on either surface edits a budget; every row links to the customer profile budget anchor.
+
+## Tests
+
+Restore `budget-status-1866.test.ts` (619 lines) from `608393a0` and run it against current main. The original spec's test list stands in full — bar clamping, threshold boundaries at 74.9 / 75 / 100, Unset exclusion from the over-cap count, roll-up arithmetic and company isolation, the tech endpoint asserted on the response body for absence of monetary fields, card-and-page parity, and the month selector.
+
+Add two the restore needs:
+
+- **Route and nav parity:** every role whose nav shows the Budget Status leaf can load `/budget-status`; every role whose nav does not, cannot. Asserted per role, bookkeeper included.
+- **Bookkeeper exclusion:** `bookkeeper` is refused by the budget reads and `bookkeeperNav` contains no Budget Status entry.
+
+Register the suites as **validation commands**, not workflows — this repo is past its workflow cap.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the shared bar, the page and its route registrations, each nav entry, the Manager Workspace card mount, the crew section, the tech endpoint, and the role change.
+- [ ] Screenshot: Budget Status page with **entered budgets**, showing at least one customer in each of Go / Slow down / Stop / Unset — compared side by side with `screenshots/recovered-1866/budget-status-screenshot.jpg`.
+- [ ] Screenshot: Manager Workspace card with real counts.
+- [ ] Screenshot: crew view at phone width, no dollar figures visible.
+- [ ] Captured tech-endpoint response body proving no monetary fields are present.
+- [ ] Screenshot or route test showing the bookkeeper cannot reach the page.
+- [ ] Grep proof that neither surface contains a budget edit control.
+- [ ] Test output for clamping, threshold boundaries, unset, and route/nav parity.
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+
+- Recovery source: commit `608393a0` (`git show 608393a0 --stat`)
+- Rollback to understand: commit `109fd0df` (2026-08-06)
+- Original spec: `BUILD - Budget Status Page + Manager Workspace Card (Read-Only).md`
+- Visual target: `screenshots/recovered-1866/`
+- `artifacts/irrigopro/src/components/budget/BudgetBar.tsx`, `BudgetStatusCard.tsx`, `src/pages/budget-status.tsx`
+- `artifacts/irrigopro/src/App.tsx`, `src/components/layout/nav-config.ts` (`managerNav` `:256`)
+- `artifacts/irrigopro/src/pages/manager-workspace.tsx`, `src/pages/field-tech-dashboard.tsx`
+- `artifacts/api-server/src/routes/budget-routes.ts`, `src/routes/budget-status-1866.test.ts`
+- `lib/shared/src/roles.ts` (`CAN_VIEW_BUDGETS` `:189-195`)
+- `artifacts/api-server/src/routes/bookkeeper-role-matrix.test.ts`

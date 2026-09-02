@@ -1,0 +1,13 @@
+Three things in #1993, then back to the Action Board.
+
+I was wrong about customer-profile.tsx. I listed it as byte-identical to its pre-rollback state without actually checking it — I ran that comparison on eleven files and that one wasn't among them, and I asserted it anyway. It drifted +112/-49 in the auth-context role refactor. The correction is right, and so is the fix: the whole #1865 change to that file is one line of copy inside BudgetCard.
+
+The storage.ts catch is better than my spec. I flagged +770/-174 of drift as a merge hazard. It's not a hazard at all — those 79 recovered lines are one self-contained startup-DDL method, applySeasonalBudgetSchema, and re-landing it would create a second source of truth for DDL that the pushed schema already owns. Correctly dropped.
+
+One correction that isn't right, and it matters more than the ticket. The #1865 spec is at the project root — 10,896 bytes, dated Jul 31, I read it this morning. But it isn't in git. There are 202 markdown files at the project root and exactly 10 are tracked. .gitignore doesn't exclude them; they were just never added.
+
+So from Replit's side the file genuinely doesn't exist. It only ever sees a slice doc as the attached_assets/Pasted--*.txt copy created when you paste it in. That's why the correction reads the way it does.
+
+Two consequences worth acting on. Every "Relevant files" line I write pointing at a project-root .md is a dead reference for the builder — I'll cite the attached_assets copy or quote inline from now on. And you may want to just commit the 192 untracked docs, so the specs live with the code they describe instead of only in iCloud and in pasted text. Your call; it's a one-time git add.
+
+One thing from the preflight worth folding into the #1866 restore. 2,064 customers across 4 companies. #1866's page lists every customer, worst-first, with "hide customers with no budget set" as an off-by-default toggle. Against fifty customers that's fine; against your real list it's hundreds of Unset rows burying the dozen that matter. The toggle should default on, with the count of hidden customers shown so nobody thinks the page is broken. Small amendment, worth catching before it's built rather than after.
