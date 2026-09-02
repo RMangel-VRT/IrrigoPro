@@ -1,0 +1,118 @@
+# BUILD — Annual budget goal bulk paste entry
+
+**Revised 2026-09-02, after Task #1993 merged.** The earlier version of this ticket was written against a codebase that had none of the seasonal budget model in it. It now does, so the pieces this ticket said to "reuse when they arrive" are real and can be named exactly. Prerequisites are satisfied; this is buildable now.
+
+## What & Why
+
+The seasonal budget model needs one number per customer — the annual goal — and the season curve generates the rest. Roughly 50 customers need that number before any budget reporting shows anything but "Unset", and Task #1995 (the Budget Status page restore) is blocked on exactly that data.
+
+The goals live in a spreadsheet that gets re-keyed every January. A tool that was not worth building for one season is worth building for every season.
+
+The original Seasonal Budget Model spec ruled out an importer explicitly. **That decision is reversed (Randy, 2026-09-02).** The reversal is narrow: this is a paste box, not a CSV upload, not a sheet parser, not per-customer custom vocabulary.
+
+**This does not create a second budget editor.** A customer's budget is still edited field by field in the customer profile. This tool writes the annual goal and nothing else, through the same parser and the same generation service the profile editor uses.
+
+## What already exists — reuse it, do not rebuild it
+
+Per the standing rule that every change is subtraction plus addition and never a second copy:
+
+| Need | What exists today | What this ticket does |
+|---|---|---|
+| Goal parsing (`14000`, `14,000`, `$14,000.00`) | `parseBudgetGoalInput`, **exported from `artifacts/irrigopro/src/components/customer-form.tsx:30`** | **Move it**, see Step 1 |
+| Month generation from a goal | `generateBudgetMonths` (`services/generate-budget-months.ts:95`), with `distributeGoal` :67, `resolveEffectiveCurve` :34, `validateCurve` :43, `DEFAULT_SEASON_CURVE` :24 | Call it. Do not reimplement distribution or rounding. |
+| Per-month override handling | `applyMonthOverride` :187, `resetMonthOverride` :223 | Call `generateBudgetMonths`, which already preserves override rows |
+| Audit trail | `recordAuditEvent(req, evt, opts)` (`routes/audit-log.ts:42`), `opts.tx` accepts the transaction | Call it inside the write transaction |
+| Company scoping | the customer-list scoping helper already used by the customers routes | Route the lookup through it |
+
+**There is no second implementation to write.** If the build produces a second parser, a second distribution function, or a second month-writing path, it is wrong.
+
+## The parser problem (read before Step 2)
+
+`parseBudgetGoalInput` is exported, but it lives inside `customer-form.tsx` — a React component file. A server endpoint must not import from there; it would pull React into the server bundle.
+
+The server does not parse the goal at all today. The customer update route accepts whatever number the client already parsed, which is why the parser has stayed in the component. A bulk endpoint receiving raw pasted text **must** parse server-side, so the parser has to move.
+
+**Move it to `lib/shared/src/budget-goal.ts`**, matching the convention of `estimate-number.ts`, `invoice-aging.ts` and `work-order-labor-hours.ts` in that folder. Export it from the package index. `customer-form.tsx` then imports it instead of defining it. The function body does not change — this is a move, not a rewrite, and the existing form behaviour must be byte-for-byte identical afterwards.
+
+## Where it lives
+
+New route `/admin/budget-goals`, in nav for **super admin and company admin only**. It is a seasonal administrative task: the irrigation manager, billing manager, bookkeeper and field tech get no nav entry and are refused server-side.
+
+**Not on the Budget Status page** — that page is read-only by standing rule, and a write control there would break it.
+
+## Done looks like
+
+- Fifty customers get their annual goals from one paste and one confirm.
+- The user sees exactly what will change before anything changes, including the rows that will not apply.
+- A customer with a hand-overridden month keeps it, and the preview says so beforehand.
+- Pasting the same block twice changes nothing and reports every row as unchanged.
+- A customer name belonging to another company never matches — it reports as unmatched.
+- No customer is ever created by this tool.
+- Every changed customer has an audit entry with actor, before, after, and the bulk-entry origin.
+- A partial batch applies its good rows and lists the bad ones with reasons; it does not roll the whole batch back.
+- The customer profile still parses goals identically, using the moved parser.
+
+## Out of scope
+
+- File upload, CSV parsing, spreadsheet integration. Paste box only.
+- Any field other than the annual goal — not thresholds, not curves, not per-month figures.
+- Fuzzy name matching or "did you mean" suggestions. A budget silently assigned to the wrong HOA is worse than a row the user fixes by hand.
+- Creating customers.
+- Any write control on the Budget Status page.
+- Whole-batch rollback on partial failure.
+- Changing how `generateBudgetMonths` distributes or rounds.
+
+## Steps
+
+1. **Move the parser.** `parseBudgetGoalInput` from `customer-form.tsx:30` to `lib/shared/src/budget-goal.ts`, exported through the package index. The form imports it. Delete the original definition — do not leave a copy behind. Grep proof that exactly one definition exists.
+
+2. **Add the capability.** A new capability in `lib/shared/src/roles.ts` covering super admin and company admin, and gate the new endpoints on it. Gate on the capability, never on role strings; an unknown or null role resolves to false. The existing bookkeeper role-matrix test must still pass.
+
+3. **Parse and match, as a pure module.** Pasted text in, and each row out as exactly one of **matched**, **unmatched**, **ambiguous**, or **invalid**. Accept tab- or comma-separated two-column rows, detect and skip a header row, ignore blank lines, match names exactly after trimming and case-folding, and treat a duplicate name within the company as ambiguous rather than guessing. Pure — no database, no HTTP.
+
+4. **Scope every lookup by the caller's company.** Resolve the company from the authenticated request, never from anything in the pasted text, and route the lookup through the same tenant-scoping helper the customer list uses. A super admin passes an explicit company, and the paste box stays disabled until one is chosen.
+
+5. **Preview endpoint.** Per matched row: customer name, current goal or "not set", new goal, the seven season figures `generateBudgetMonths` would produce, and a marker where manual month overrides exist that regeneration will preserve. Plus counts for matched, unmatched, ambiguous, invalid, and unchanged. Generate the preview figures by calling the real service in dry-run form, not by recomputing the curve.
+
+6. **Confirm interlock.** The preview issues a token the write endpoint requires and validates against the exact row set previewed, so "a human saw this list" is enforced at the API boundary rather than by the dialog. A paste whose content changed after preview must be re-previewed.
+
+7. **Write path.** For each matched row whose goal actually changed, in one transaction per customer: set the annual goal, call `generateBudgetMonths` for the target year (which preserves `isManualOverride` rows), and record an audit entry passing the transaction so the audit row lives or dies with the write. Skip unchanged rows entirely. A failing customer fails alone and carries its reason forward.
+
+8. **Admin screen.** Year selector defaulting to the current year, company selector for super admins, paste textarea, preview. Unmatched and ambiguous rows appear **above** the confirm button — the point of the preview is that the user notices them. Each row links to that customer's profile budget anchor.
+
+9. **Nav registration.** Register the route and its nav entry for exactly the two admin roles, and keep nav visibility and the server guard in agreement so no role sees a link it cannot use.
+
+10. **Result summary.** After the write, each customer changed with before and after, plus the rows that did not apply and why. Stays on screen until dismissed, and is copyable so the user can paste it back into the spreadsheet as a record.
+
+11. **Tests, registered as validation commands.** Parsing across both separators, header skip, blank lines, and all three money formats. **The moved parser produces identical results to the pre-move behaviour** — assert against the existing customer-form budget preview suite, which must pass unchanged. Exact matching with whitespace tolerance; ambiguous duplicates write nothing; unknown names create nothing. **Tenant isolation — a name that exists only in company B is unmatched for a company A user, and a super admin scoped to company A gets the same result** (the single most important test here). Preview months match what the profile editor generates for the same goal. Override preservation through regeneration; one audit entry per changed customer; the same paste twice is a no-op. A mixed batch writes its valid rows. The full role matrix on both the nav entry and the server guard. Register as validation commands, not workflows — this repo is past its workflow cap.
+
+## Notes for the executor
+
+- If the year or company selector is a Radix Select, a sentinel value with no rendered option shows neither the value nor the placeholder and reads as broken — seed the option list first.
+- Page tests need wouter's search hook wired or query params read as absent, and jsdom mounts both the desktop and mobile shells, duplicating testids.
+- `recordAuditEvent` is best-effort by default and swallows its own failures; pass the transaction and strict mode so the audit row is not silently lost.
+- `generateBudgetMonths` already puts the rounding remainder on the last season month so the generated months sum exactly to the goal. Do not adjust totals afterwards.
+- This ticket unblocks Task #1995, which is waiting on real budget data. Landing it means fifty goals can be entered in one paste instead of fifty visits to the customer profile.
+
+## Definition of Done (attach proof — Rule 7)
+
+- [ ] `file:line` for the moved parser, its import in the form, the capability, the matcher, the preview endpoint, the interlock, the write path, and the audit call.
+- [ ] **Grep proof that `parseBudgetGoalInput` is defined in exactly one place** and that no second parser, distribution function, or month-writing path was added.
+- [ ] Screenshot of the preview showing matched, unmatched and ambiguous rows together, with one customer flagged for manual overrides.
+- [ ] Screenshot of the result summary after a real paste.
+- [ ] Captured response proving a cross-company name is unmatched.
+- [ ] The existing customer-form budget preview suite passing unchanged after the parser move.
+- [ ] Test output for idempotency, override preservation, and the role matrix.
+- [ ] Deployed; commit message matches the diff.
+
+## Relevant files
+
+- `artifacts/irrigopro/src/components/customer-form.tsx` (`parseBudgetGoalInput` :30 — moved; `annualBudgetGoal` field :989; budget card :916)
+- `lib/shared/src/` (new `budget-goal.ts`; convention: `estimate-number.ts`, `invoice-aging.ts`, `work-order-labor-hours.ts`)
+- `lib/shared/src/roles.ts` (new capability)
+- `artifacts/api-server/src/services/generate-budget-months.ts` (`generateBudgetMonths` :95, `distributeGoal` :67, `resolveEffectiveCurve` :34, `DEFAULT_SEASON_CURVE` :24)
+- `artifacts/api-server/src/routes/budget-routes.ts` (new bulk endpoints alongside the existing reads)
+- `artifacts/api-server/src/routes/audit-log.ts` (`recordAuditEvent` :42)
+- `artifacts/api-server/src/routes/bookkeeper-role-matrix.test.ts` (must still pass)
+- `artifacts/irrigopro/src/App.tsx`, `src/components/company-admin-app.tsx`, `src/components/layout/nav-config.ts`
+- `artifacts/irrigopro/src/components/customer-form-budget-preview.test.tsx` (must pass unchanged after the move)
