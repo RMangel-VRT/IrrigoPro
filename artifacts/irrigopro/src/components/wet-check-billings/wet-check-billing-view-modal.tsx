@@ -30,6 +30,7 @@ import { safeGet } from "@/utils/safeStorage";
 import { WcbLaborRateEdit } from "./wcb-labor-rate-edit";
 import { ActivityFeed } from "@/components/billing-workspace/activity-feed";
 import { RateModeToggle } from "@/components/billing-workspace/rate-mode-toggle";
+import { canEditWetCheckBillingFields } from "./wet-check-billing-permissions";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -46,23 +47,6 @@ function getUserRole(): string | null {
 function canSeePricing(): boolean {
   const role = getUserRole();
   return role !== "field_tech";
-}
-
-function canEditZoneLabor(): boolean {
-  const role = getUserRole();
-  return role === "billing_manager" || role === "company_admin" || role === "super_admin";
-}
-
-/**
- * Returns true when the WCB is unlocked and the current user has the billing-
- * manager tier needed to edit labor fields (rate and zone hours).
- * Locked = status "billed" OR invoiceId != null.
- */
-function canEditLaborFields(wcb: WetCheckBilling): boolean {
-  if (!canEditZoneLabor()) return false;
-  if (wcb.invoiceId != null) return false;
-  if (wcb.status === "billed") return false;
-  return true;
 }
 
 /**
@@ -186,7 +170,8 @@ export function WetCheckBillingViewModal({
     ? { ...data.wetCheckBilling, customer: data.customer ?? undefined }
     : undefined;
   const view = data?.view ?? null;
-  const showEditAffordances = !!wcb && !!view && canEditLaborFields(wcb);
+  const canEditSnapshotFields = !!wcb && canEditWetCheckBillingFields(getUserRole(), wcb);
+  const showEditAffordances = !!view && canEditSnapshotFields;
 
   function handleViewOriginating(e: React.MouseEvent) {
     e.preventDefault();
@@ -290,7 +275,8 @@ export function WetCheckBillingViewModal({
                   view={view}
                   canSeePricing={canSeePricing()}
                   wcbId={wcb.id}
-                  canEditLabor={canEditLaborFields(wcb)}
+                  canEditLabor={canEditSnapshotFields}
+                  canEditQuantity={canEditSnapshotFields}
                   laborRate={appliedRate}
                 />
                 {/* Task #1097 — activity log for this WCB */}

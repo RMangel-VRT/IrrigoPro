@@ -53,6 +53,7 @@ import type { WetCheckBillingView } from "@/components/billing/wet-check-billing
 import { ActivityFeed } from "@/components/billing-workspace/activity-feed";
 import { WcbLaborRateEdit } from "@/components/wet-check-billings/wcb-labor-rate-edit";
 import { RateModeToggle } from "@/components/billing-workspace/rate-mode-toggle";
+import { canEditWetCheckBillingFields } from "@/components/wet-check-billings/wet-check-billing-permissions";
 import { safeGet } from "@/utils/safeStorage";
 import { isNeedsReview } from "@/lib/finding-save-payload";
 import { isInspectionOriginEstimate } from "@/lib/estimate-zone-grouping";
@@ -83,18 +84,6 @@ function canSeePricing(): boolean {
 function canRevertInspectionApproval(): boolean {
   const role = getUserRole();
   return role === "company_admin" || role === "super_admin";
-}
-
-function canEditZoneLabor(): boolean {
-  const role = getUserRole();
-  return role === "billing_manager" || role === "company_admin" || role === "super_admin";
-}
-
-function canEditLaborFields(wcb: WetCheckBilling): boolean {
-  if (!canEditZoneLabor()) return false;
-  if (wcb.invoiceId != null) return false;
-  if (wcb.status === "billed") return false;
-  return true;
 }
 
 // ── Snapshot status helpers ───────────────────────────────────────────────────
@@ -212,7 +201,8 @@ function SnapshotSection({ wetCheckId, wcbId, onApproveSuccess }: SnapshotSectio
     : undefined;
   const view = data?.view ?? null;
 
-  const showEditAffordances = !!wcb && !!view && canEditLaborFields(wcb);
+  const canEditSnapshotFields = !!wcb && canEditWetCheckBillingFields(getUserRole(), wcb);
+  const showEditAffordances = !!view && canEditSnapshotFields;
   const appliedRate = String(wcb?.appliedLaborRate ?? wcb?.laborRate ?? "0");
 
   const [approveError, setApproveError] = useState<string | null>(null);
@@ -297,7 +287,8 @@ function SnapshotSection({ wetCheckId, wcbId, onApproveSuccess }: SnapshotSectio
           view={view}
           canSeePricing={canSeePricing()}
           wcbId={wcb.id}
-          canEditLabor={canEditLaborFields(wcb)}
+          canEditLabor={canEditSnapshotFields}
+          canEditQuantity={canEditSnapshotFields}
           laborRate={appliedRate}
         />
       ) : (

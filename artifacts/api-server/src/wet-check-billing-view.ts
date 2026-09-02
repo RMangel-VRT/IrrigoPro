@@ -17,12 +17,15 @@ import type {
   WetCheckZoneRecord,
   IssueTypeConfig,
 } from "@workspace/db";
+import { resolveIssueTypeKey } from "./seeds/issue-type-configs";
 
 // Minimal WCB snapshot fields needed for snapshot-first totals (Slice 4c).
 export interface WcbSnapshot {
   partsSubtotal: string | null | undefined;
   laborSubtotal: string | null | undefined;
   totalAmount: string | null | undefined;
+  status?: string | null;
+  invoiceId?: number | null;
 }
 
 // ─── Public interfaces ───────────────────────────────────────────────────────
@@ -50,6 +53,8 @@ export interface WcvLineItem {
   notes: string | null;
   /** URLs of photos attached to this finding. Empty when no photos. */
   findingPhotoUrls: string[];
+  /** Catalog default labor per unit, used to preview quantity corrections. */
+  catalogLaborHours?: string;
 }
 
 /** All findings for a single controller zone. */
@@ -99,6 +104,8 @@ export interface WetCheckBillingView {
    * Undefined on the legacy billing-sheet path. Both may coexist during migration.
    */
   wetCheckBillingId?: number;
+  wetCheckBillingStatus?: string | null;
+  wetCheckBillingInvoiceId?: number | null;
   billingNumber: string;
   customerId: number;
   customerName: string;
@@ -181,6 +188,16 @@ function titleCase(issueType: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+/** Shared parts calculation used by both the view and atomic WCB mutations. */
+export function computeWetCheckBillingPartsSubtotal(
+  findings: Array<Pick<WetCheckFinding, "noPartNeeded" | "partPrice" | "quantity">>,
+): number {
+  return findings.reduce((sum, finding) => {
+    if (finding.noPartNeeded) return sum;
+    return sum + toNum(finding.partPrice) * (finding.quantity ?? 0);
+  }, 0);
+}
+
 // ─── Pure assembler ──────────────────────────────────────────────────────────
 
 export function buildWetCheckBillingView(
@@ -198,8 +215,11 @@ export function buildWetCheckBillingView(
 
   // ── issueType → displayLabel lookup ─────────────────────────────────────
   const labelMap = new Map<string, string>();
+  const catalogLaborMap = new Map<string, string | null>();
   for (const cfg of issueTypeConfigs) {
-    labelMap.set(cfg.issueType, cfg.displayLabel);
+    const key = resolveIssueTypeKey(cfg.issueType);
+    labelMap.set(key, cfg.displayLabel);
+    catalogLaborMap.set(key, cfg.defaultLaborHours);
   }
 
   // ── zoneRecordId → zone record lookup ───────────────────────────────────
@@ -251,10 +271,11 @@ export function buildWetCheckBillingView(
     const repairLaborHoursNum = toNum(zr.repairLaborHours);
     const zoneLabor = repairLaborHoursNum * laborRateNum;
 
-    let zoneParts = 0;
+    const zoneParts = computeWetCheckBillingPartsSubtotal(sorted);
 
     const lineItems: WcvLineItem[] = sorted.map((f) => {
-      const issueDisplayLabel = labelMap.get(f.issueType) ?? titleCase(f.issueType);
+      const issueKey = resolveIssueTypeKey(f.issueType);
+      const issueDisplayLabel = labelMap.get(issueKey) ?? titleCase(f.issueType);
       const unitPrice = toNum(f.partPrice);
       const qty = f.quantity ?? 0;
       const partsTotal = f.noPartNeeded ? 0 : unitPrice * qty;
@@ -264,8 +285,6 @@ export function buildWetCheckBillingView(
       const laborHoursNum = toNum(f.laborHours);
       const laborTotal = laborHoursNum * laborRateNum;
       const lineTotal = partsTotal + laborTotal;
-
-      zoneParts += partsTotal;
 
       return {
         findingId: f.id,
@@ -281,6 +300,7 @@ export function buildWetCheckBillingView(
         noPartNeeded: f.noPartNeeded,
         notes: f.notes ?? null,
         findingPhotoUrls: findingPhotoMap.get(f.id) ?? [],
+        catalogLaborHours: fmt(toNum(catalogLaborMap.get(issueKey))),
       };
     });
 
@@ -368,6 +388,8 @@ export function buildWetCheckBillingView(
 
   return {
     billingSheetId: bs.id,
+    wetCheckBillingStatus: wcb?.status,
+    wetCheckBillingInvoiceId: wcb?.invoiceId,
     billingNumber: bs.billingNumber,
     customerId: customer.id,
     customerName: customer.name,

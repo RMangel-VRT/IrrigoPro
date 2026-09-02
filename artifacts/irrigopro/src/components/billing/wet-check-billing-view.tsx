@@ -14,6 +14,7 @@ import { format } from "date-fns";
 import { Wrench, MapPin, ClipboardList, DollarSign, CloudSun, Camera, Info } from "lucide-react";
 import { Separator } from "@/components/ui/separator";
 import { ZoneLaborEditInline } from "@/components/wet-check-billings/zone-labor-edit-inline";
+import { FindingQuantityEditInline } from "@/components/wet-check-billings/finding-quantity-edit-inline";
 import { EditableField } from "@/components/ui/editable-field";
 import { authedPhotoSrc } from "@/lib/queryClient";
 
@@ -36,6 +37,8 @@ export interface WcvLineItem {
   notes: string | null;
   /** URLs of photos attached to this finding. Empty when no photos. */
   findingPhotoUrls: string[];
+  /** Catalog default labor per unit, used to preview quantity corrections. */
+  catalogLaborHours?: string;
 }
 
 export interface WcvZone {
@@ -67,7 +70,7 @@ export interface WcvInspection {
 }
 
 export interface WetCheckBillingView {
-  billingSheetId: number;
+  billingSheetId?: number;
   /**
    * Set when the findings for this billing sheet originate from a
    * wet_check_billings row (WCB flow). When present, rate-mode mutations
@@ -75,6 +78,8 @@ export interface WetCheckBillingView {
    * rather than the billing-sheet endpoint.
    */
   wetCheckBillingId?: number;
+  wetCheckBillingStatus?: string | null;
+  wetCheckBillingInvoiceId?: number | null;
   billingNumber: string;
   customerId: number;
   customerName: string;
@@ -169,13 +174,17 @@ function ZoneSection({
   canSeePricing,
   wcbId,
   canEditLabor,
+  canEditQuantity,
   laborRate,
+  billingSheetId,
 }: {
   zone: WcvZone;
   canSeePricing: boolean;
   wcbId?: number;
   canEditLabor?: boolean;
+  canEditQuantity?: boolean;
   laborRate?: string;
+  billingSheetId?: number;
 }) {
   const visibleItems = zone.lineItems.filter(shouldShowLineItem);
   const repairLaborNum = toNum(zone.repairLaborHours);
@@ -272,7 +281,19 @@ function ZoneSection({
                       {canSeePricing && (
                         <>
                           <td className="py-2 px-2 text-center text-gray-700 text-sm">
-                            {item.noPartNeeded ? "—" : item.quantity}
+                            {item.noPartNeeded ? "—" : wcbId != null ? (
+                              <FindingQuantityEditInline
+                                wcbId={wcbId}
+                                item={item}
+                                zoneLabel={zone.zoneLabel}
+                                zoneLaborHours={zone.repairLaborHours}
+                                laborRate={laborRate ?? "0"}
+                                allItems={zone.lineItems}
+                                canEdit={!!canEditQuantity}
+                                laborWasManual={zone.repairLaborManuallySet}
+                                billingSheetId={billingSheetId}
+                              />
+                            ) : item.quantity}
                           </td>
                           <td className="py-2 px-2 text-right text-gray-700 text-sm">
                             {item.noPartNeeded ? "—" : currency(item.unitPrice)}
@@ -340,6 +361,8 @@ interface WetCheckBillingViewProps {
   wcbId?: number;
   /** True when the current user can edit zone labor (billing_manager+ on unlocked WCB). */
   canEditLabor?: boolean;
+  /** True when the current user can edit part-backed finding quantities. */
+  canEditQuantity?: boolean;
   /** Applied labor rate for the inline dollar-value calculation, e.g. "80.00". */
   laborRate?: string;
   /** True when the current user can edit inspection notes. */
@@ -353,6 +376,7 @@ export function WetCheckBillingViewComponent({
   canSeePricing,
   wcbId,
   canEditLabor,
+  canEditQuantity,
   laborRate,
   canEditInspectionNotes,
   onSaveInspectionNotes,
@@ -479,7 +503,9 @@ export function WetCheckBillingViewComponent({
                 canSeePricing={canSeePricing}
                 wcbId={wcbId}
                 canEditLabor={canEditLabor}
+                canEditQuantity={canEditQuantity ?? canEditLabor}
                 laborRate={laborRate}
+        billingSheetId={view.billingSheetId}
               />
             ))}
           </div>

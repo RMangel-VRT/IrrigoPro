@@ -168,6 +168,7 @@ import bcrypt from "bcrypt";
 import { processEstimatePayload, type EstimatePayloadInput } from "./estimate-payload";
 import { computeBillingSheetTotal } from "./billing-sheet-total";
 import { applyNoPartNeededInvariant } from "./storage/wet-check-finding-invariants";
+import { computeWetCheckBillingPartsSubtotal } from "./wet-check-billing-view";
 import { humanizeIssueType } from "./inspection-issue-labels";
 import { buildInspectionEstimateItems } from "./inspection-estimate-items";
 import {
@@ -1141,6 +1142,20 @@ export interface IStorage {
     repairLaborHours: string,
     companyId: number,
   ): Promise<{ before: { zoneRecord: WetCheckZoneRecord; wcb: WetCheckBilling }; updated: { zoneRecord: WetCheckZoneRecord; wcb: WetCheckBilling } } | undefined>;
+
+  /**
+   * Corrects a part-backed finding quantity inside an unlocked WCB and atomically
+   * realigns catalog labor plus all stored snapshot totals.
+   */
+  setWcbFindingQuantity(
+    wcbId: number,
+    findingId: number,
+    quantity: number,
+    companyId: number,
+  ): Promise<{
+    before: { finding: WetCheckFinding; zoneRecord: WetCheckZoneRecord; wcb: WetCheckBilling };
+    updated: { finding: WetCheckFinding; zoneRecord: WetCheckZoneRecord; wcb: WetCheckBilling };
+  } | undefined>;
 
   /** Task #1027 — billing-manager-tier reset of zone repair labor on a finalised WCB. */
   resetWcbZoneRepairLabor(
@@ -5814,7 +5829,19 @@ export class DatabaseStorage implements IStorage {
     // billing-sheet one.
     const wcbIdFromFindings = findings[0]?.wetCheckBillingId ?? null;
     if (wcbIdFromFindings != null) {
-      return { ...view, wetCheckBillingId: wcbIdFromFindings };
+      const [linkedWcb] = await db
+        .select({
+          status: wetCheckBillings.status,
+          invoiceId: wetCheckBillings.invoiceId,
+        })
+        .from(wetCheckBillings)
+        .where(eq(wetCheckBillings.id, wcbIdFromFindings));
+      return {
+        ...view,
+        wetCheckBillingId: wcbIdFromFindings,
+        wetCheckBillingStatus: linkedWcb?.status,
+        wetCheckBillingInvoiceId: linkedWcb?.invoiceId,
+      };
     }
     return view;
   }
@@ -5922,6 +5949,8 @@ export class DatabaseStorage implements IStorage {
         partsSubtotal: wcb.partsSubtotal,
         laborSubtotal: wcb.laborSubtotal,
         totalAmount: wcb.totalAmount,
+        status: wcb.status,
+        invoiceId: wcb.invoiceId,
       },
     });
 
@@ -10056,6 +10085,128 @@ export class DatabaseStorage implements IStorage {
       return {
         before: { zoneRecord: beforeZoneRow, wcb },
         updated: { zoneRecord: zoneRow, wcb: updatedWcb },
+      };
+    });
+  }
+
+  async setWcbFindingQuantity(
+    wcbId: number,
+    findingId: number,
+    quantity: number,
+    companyId: number,
+  ): Promise<{
+    before: { finding: WetCheckFinding; zoneRecord: WetCheckZoneRecord; wcb: WetCheckBilling };
+    updated: { finding: WetCheckFinding; zoneRecord: WetCheckZoneRecord; wcb: WetCheckBilling };
+  } | undefined> {
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 999) {
+      throw new Error("Quantity must be a whole number from 1 through 999");
+    }
+
+    return db.transaction(async (tx) => {
+      // Serialize all quantity corrections and terminal-state transitions that
+      // update this WCB row before reading lock state or replacing aggregates.
+      await tx.execute(sql`
+        SELECT id FROM wet_check_billings
+        WHERE id = ${wcbId}
+        FOR UPDATE
+      `);
+      const [wcb] = await tx.select().from(wetCheckBillings).where(eq(wetCheckBillings.id, wcbId));
+      if (!wcb) return undefined;
+
+      // The WCB's wet check is the tenant anchor. Returning undefined for a
+      // mismatch prevents callers from learning whether another tenant owns it.
+      const [wc] = await tx.select().from(wetChecks).where(eq(wetChecks.id, wcb.wetCheckId));
+      if (!wc || wc.companyId !== companyId) return undefined;
+
+      if (wcb.invoiceId != null) {
+        throw new Error(`Wet check billing ${wcbId} is already invoiced and cannot be edited`);
+      }
+      if (wcb.status === "billed") {
+        throw new Error(`Wet check billing ${wcbId} is billed and cannot be edited`);
+      }
+
+      const [finding] = await tx.select().from(wetCheckFindings).where(eq(wetCheckFindings.id, findingId));
+      if (
+        !finding ||
+        finding.wetCheckBillingId !== wcbId ||
+        finding.wetCheckId !== wcb.wetCheckId
+      ) {
+        return undefined;
+      }
+      if (finding.noPartNeeded || finding.partId == null) {
+        throw new Error(`Finding ${findingId} is labor-only and quantity cannot be edited`);
+      }
+
+      const [beforeZone] = await tx
+        .select()
+        .from(wetCheckZoneRecords)
+        .where(eq(wetCheckZoneRecords.id, finding.zoneRecordId));
+      if (!beforeZone || beforeZone.wetCheckId !== wcb.wetCheckId) return undefined;
+
+      const [updatedFinding] = await tx
+        .update(wetCheckFindings)
+        .set({ quantity, updatedAt: new Date() })
+        .where(
+          and(
+            eq(wetCheckFindings.id, findingId),
+            eq(wetCheckFindings.wetCheckBillingId, wcbId),
+          ),
+        )
+        .returning();
+      if (!updatedFinding) return undefined;
+
+      // Clear the manual flag first: the catalog recompute deliberately returns
+      // early while repairLaborManuallySet remains true.
+      await tx
+        .update(wetCheckZoneRecords)
+        .set({ repairLaborManuallySet: false })
+        .where(eq(wetCheckZoneRecords.id, finding.zoneRecordId));
+      await this._recomputeZoneRepairLaborIfAuto(tx, finding.zoneRecordId, companyId);
+
+      const [updatedZone] = await tx
+        .select()
+        .from(wetCheckZoneRecords)
+        .where(eq(wetCheckZoneRecords.id, finding.zoneRecordId));
+      if (!updatedZone) return undefined;
+
+      const findings = await tx
+        .select()
+        .from(wetCheckFindings)
+        .where(eq(wetCheckFindings.wetCheckBillingId, wcbId));
+      const partsSubtotal = computeWetCheckBillingPartsSubtotal(findings);
+
+      const allZoneIds = Array.from(new Set(findings.map((row) => row.zoneRecordId)));
+      const allZoneRows = allZoneIds.length > 0
+        ? await tx
+            .select({ repairLaborHours: wetCheckZoneRecords.repairLaborHours })
+            .from(wetCheckZoneRecords)
+            .where(inArray(wetCheckZoneRecords.id, allZoneIds))
+        : [];
+      const repairHours = allZoneRows.reduce(
+        (sum, row) => sum + (parseFloat(String(row.repairLaborHours ?? "0")) || 0),
+        0,
+      );
+      const totalHours = (parseFloat(String(wc.totalLaborHours ?? "0")) || 0) + repairHours;
+      const snapshotRate = parseFloat(String(wcb.appliedLaborRate ?? wcb.laborRate ?? "0")) || 0;
+      const laborSubtotal = totalHours * snapshotRate;
+      const totalAmount = partsSubtotal + laborSubtotal;
+
+      const [updatedWcb] = await tx
+        .update(wetCheckBillings)
+        .set({
+          partsSubtotal: partsSubtotal.toFixed(2),
+          totalHours: totalHours.toFixed(2),
+          laborSubtotal: laborSubtotal.toFixed(2),
+          totalAmount: totalAmount.toFixed(2),
+          updatedAt: new Date(),
+        })
+        .where(eq(wetCheckBillings.id, wcbId))
+        .returning();
+      if (!updatedWcb) return undefined;
+
+      return {
+        before: { finding, zoneRecord: beforeZone, wcb },
+        updated: { finding: updatedFinding, zoneRecord: updatedZone, wcb: updatedWcb },
       };
     });
   }

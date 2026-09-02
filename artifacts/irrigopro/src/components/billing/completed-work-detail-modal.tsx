@@ -42,6 +42,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import type { WorkOrder, BillingSheet, WorkOrderItem, BillingSheetItem, Customer } from "@workspace/db/schema";
 import { WetCheckBillingViewComponent, type WetCheckBillingView } from "@/components/billing/wet-check-billing-view";
+import { canEditWetCheckBillingFields } from "@/components/wet-check-billings/wet-check-billing-permissions";
 import {
   InspectionZoneChecklist,
   isInspectionOriginWorkOrder,
@@ -902,6 +903,11 @@ export function CompletedWorkDetailModal({
     staleTime: 60_000,
     retry: false,
   });
+  const canEditWetCheckSnapshot = !!wetCheckView?.wetCheckBillingId &&
+    canEditWetCheckBillingFields(userRole, {
+      status: wetCheckView.wetCheckBillingStatus,
+      invoiceId: wetCheckView.wetCheckBillingInvoiceId,
+    });
 
   const isWorkOrder = type === "work_order";
   const wo = isWorkOrder ? (data as WorkOrder) : null;
@@ -1732,9 +1738,10 @@ export function CompletedWorkDetailModal({
               <WetCheckBillingViewComponent
                 view={wetCheckView}
                 canSeePricing={canSeePricing}
-                wcbId={id}
-                canEditLabor={canInlineEdit}
-                laborRate={bs?.laborRate ?? undefined}
+                wcbId={wetCheckView.wetCheckBillingId}
+                canEditLabor={canEditWetCheckSnapshot}
+                canEditQuantity={canEditWetCheckSnapshot}
+                laborRate={wetCheckView.laborRate}
                 canEditInspectionNotes={canInlineEdit}
                 onSaveInspectionNotes={async (notes) => {
                   await apiRequest(

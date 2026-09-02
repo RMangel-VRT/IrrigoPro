@@ -10453,6 +10453,85 @@ export async function registerRoutes(app: Express): Promise<Server> {
       .regex(/^\d+(\.\d{1,2})?$/, "Must be a non-negative decimal with up to 2 places")
       .refine((v) => parseFloat(v) >= 0, "Must be non-negative"),
   });
+
+  const wcbFindingQuantityBody = z.object({
+    findingId: z.coerce.number().int().positive(),
+    quantity: z.coerce.number().int().min(1).max(999),
+  });
+
+  app.patch("/api/wet-check-billings/:id/finding-quantity", requireAuthentication, async (req, res) => {
+    const cid = requireCompanyId(req, res); if (!cid) return;
+    const role = req.authenticatedUserRole;
+    if (role !== "billing_manager" && role !== "company_admin" && role !== "super_admin") {
+      res.status(403).json({ message: "Forbidden" }); return;
+    }
+    const parsed = wcbFindingQuantityBody.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ message: "Invalid body", issues: parsed.error.issues }); return;
+    }
+    const wcbId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(wcbId)) { res.status(400).json({ message: "Invalid id" }); return; }
+
+    try {
+      const result = await storage.setWcbFindingQuantity(
+        wcbId,
+        parsed.data.findingId,
+        parsed.data.quantity,
+        cid,
+      );
+      if (!result) { res.status(404).json({ message: "Not found" }); return; }
+
+      // Activity is best effort: the financial correction has already committed.
+      try {
+        const beforeHours = String(result.before.zoneRecord.repairLaborHours ?? "0.00");
+        const afterHours = String(result.updated.zoneRecord.repairLaborHours ?? "0.00");
+        const issueLabel = result.updated.finding.issueType
+          .replace(/_/g, " ")
+          .replace(/\b\w/g, (letter) => letter.toUpperCase());
+        const zoneLabel = `${result.updated.zoneRecord.controllerLetter}-${result.updated.zoneRecord.zoneNumber}`;
+        const laborWasManual = !!result.before.zoneRecord.repairLaborManuallySet;
+        await recordLifecycleAudit(req, {
+          resource: "wet_check_billing",
+          action: "wet_check_billing.finding_quantity_edited",
+          targetId: wcbId,
+          before: {
+            findingId: result.before.finding.id,
+            issueType: result.before.finding.issueType,
+            quantity: result.before.finding.quantity,
+            zoneLaborHours: beforeHours,
+            laborWasManual,
+          },
+          after: {
+            findingId: result.updated.finding.id,
+            issueType: result.updated.finding.issueType,
+            quantity: result.updated.finding.quantity,
+            zoneLaborHours: afterHours,
+            laborWasManual: !!result.updated.zoneRecord.repairLaborManuallySet,
+          },
+          summary: `Zone ${zoneLabel} ${issueLabel} qty ${result.before.finding.quantity} → ${result.updated.finding.quantity} (labor ${beforeHours}h → ${afterHours}h)`,
+          companyId: cid,
+          extra: {
+            wetCheckId: result.updated.wcb.wetCheckId,
+            findingId: result.updated.finding.id,
+            zoneRecordId: result.updated.zoneRecord.id,
+          },
+        });
+      } catch (auditErr) {
+        console.error("[audit] wet_check_billing.finding_quantity_edited", auditErr);
+      }
+
+      res.json(result.updated);
+    } catch (e: any) {
+      const { status, message } = classifyAndLog(req, e, {
+        op: "setWcbFindingQuantity",
+        ctx: { cid, wcbId, findingId: parsed.data.findingId },
+        fallbackStatus: 400,
+        fallbackMessage: "Couldn't save finding quantity",
+      });
+      res.status(status).json({ message });
+    }
+  });
+
   app.patch("/api/wet-check-billings/:id/zone-labor", requireAuthentication, async (req, res) => {
     const cid = requireCompanyId(req, res); if (!cid) return;
     const role = req.authenticatedUserRole;
