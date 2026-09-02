@@ -1,0 +1,103 @@
+# AMENDMENT to #2000 — Edit WC Repair Quantity
+
+**Source:** Review of #2000 against the merged code, 2026-09-02.
+**Status:** Three corrections and one set of pinned values, before #2000 is built. Everything else in that ticket stands — the file citations are accurate, the scope boundaries are right, and mode parity and the proof requirement survived intact.
+
+---
+
+## Correction 1 — Step 6 inherits a wrong id on the completed-work surface
+
+**Decided 2026-09-02.**
+
+### The defect
+
+`completed-work-detail-modal.tsx:1735` passes `wcbId={id}`. On that component `id` is a **billing sheet id**, not a WC Snapshot id — the same `id` fetches `/api/billing-sheets/${id}/wet-check-view` at line 894 and keys `["/api/billing-sheets", id, "items"]` at line 884.
+
+The other two surfaces pass the real thing: `wet-check-billing-view-modal.tsx:141` and `:292`, and `CombinedReviewSurface.tsx:177` and `:299`, all pass `wcbId={wcb.id}` off an actual `WetCheckBilling` row.
+
+So any mutation URL built from the `wcbId` prop resolves, on that one surface, to `/api/wet-check-billings/<a billing sheet id>/…`. Two ids from two different tables, colliding in one prop name.
+
+This is not new damage. The zone-labor pencil already sits behind that prop, which means **zone-labor editing is already broken on the completed-work surface** and has been since it shipped. #2000 as written would wire the quantity editor to the same prop and inherit the same fault, then bury it: the new endpoint verifies `finding.wetCheckBillingId === wcbId` before touching anything, so a mismatched id returns 404 rather than editing a stranger's record. It fails safe and it fails silently. The manager sees a pencil, clicks it, saves, and gets "couldn't save" with no explanation — or, worse, the id happens to resolve to a real WCB belonging to the same company and the save is refused at the finding-scope check instead, which reads identically from the outside.
+
+### The change
+
+**The payload already carries the correct value.** `WetCheckBillingView.wetCheckBillingId` (client type `wet-check-billing-view.tsx:77`, server `wet-check-billing-view.ts:101`) exists precisely for this, and its own doc comment says so: set when the findings originate from a `wet_check_billings` row, and mutations should target it rather than the billing-sheet endpoint.
+
+- `completed-work-detail-modal.tsx:1735` passes `wcbId={wetCheckView.wetCheckBillingId}`, not `id`.
+- When `wetCheckBillingId` is absent from the payload, **no editor renders on that surface** — neither quantity nor zone labor. An absent value means these findings did not come through the WCB flow and there is no snapshot to mutate. Render read-only rather than guessing.
+- Fixing zone labor here is in scope for #2000. It is a one-line change on the same line, and leaving a known-broken editor next to a newly-correct one is the worse outcome.
+
+### Tests
+
+- The completed-work surface renders the quantity and zone-labor editors only when the payload carries `wetCheckBillingId`, and renders read-only when it does not.
+- A save from that surface reaches `/api/wet-check-billings/<the WCB id>/finding-quantity` — assert the URL, not just that the mutation fired.
+- A regression test that the prop is never fed a billing-sheet id: the three call sites all pass a value that came from a `WetCheckBilling` row or from `view.wetCheckBillingId`.
+
+---
+
+## Correction 2 — There is no single lock predicate to reuse
+
+**Decided 2026-09-02.**
+
+### The contradiction
+
+Step 6 says to "reuse the existing zone-labor lock predicate." No such single thing exists.
+
+`canEditZoneLabor()` and `canEditLaborFields(wcb)` are **duplicated verbatim** in two files:
+
+- `wet-check-billing-view-modal.tsx:51` and `:61`
+- `CombinedReviewSurface.tsx:88` and `:93`
+
+Identical bodies, no import between them. The third surface, `completed-work-detail-modal.tsx:1736`, uses `canInlineEdit` — an unrelated predicate built from different inputs (`:1143`).
+
+Told to "reuse the existing predicate," a builder facing two identical copies and one impostor will write a third copy. That is how there came to be two.
+
+### The change
+
+**Extract one exported helper and have all three surfaces import it.**
+
+- New shared module — `lib/wcb-permissions.ts` or beside the snapshot component; one home, not three.
+- It exports the role check and the lock check: billing_manager / company_admin / super_admin, and unlocked meaning `invoiceId == null` and `status !== "billed"`.
+- Both duplicate definitions are **deleted**, not left in place. A superseded copy that still compiles is a copy that will drift (Rule 7 — deprecated means removed).
+- The completed-work surface adopts the shared helper for the snapshot editors specifically. Its `canInlineEdit` governs other fields in that modal and keeps doing so; it is not the snapshot lock and must not be used as one.
+
+Quantity and zone labor sit on adjacent rows of the same zone block. They must never disagree about whether that block is locked, and the only way to guarantee that is one predicate.
+
+### Tests
+
+- One assertion that the three surfaces resolve editability from the same exported function.
+- A billed WCB and an invoiced WCB each render both editors read-only on all three surfaces.
+
+---
+
+## Correction 3 — The manual flag must be cleared before the recompute, and the ticket must say why
+
+**Decided 2026-09-02.**
+
+Step 2 lists "discard any manual zone-labor override" ahead of "rerun catalog-based zone labor." The order is correct and the reason is unstated, which makes it the single most re-orderable line in the ticket.
+
+`_recomputeZoneRepairLaborIfAuto` (`storage.ts:9843`) begins with an early return:
+
+```ts
+if (zr.repairLaborManuallySet) return; // human override — leave it alone
+```
+
+`storage.ts:9853`. Clear the flag after calling the helper and the helper does nothing: the finding's new quantity is saved, parts move, and zone labor keeps the stale manual value. Every total downstream is then computed from a quantity nobody agrees with. The transaction commits, no error is raised, and the defect surfaces later as a zone whose labor does not match its parts.
+
+**State it as a requirement, not an ordering:** clear `repairLaborManuallySet` on the zone record, *then* call the recompute helper, *in that order, because the helper returns early on that flag.*
+
+Add a test that specifically defeats the wrong order: a zone starting with `repairLaborManuallySet = true` and hand-entered hours must, after a quantity edit, carry catalog-derived hours and a false flag. Asserting only that the flag ends false would pass under the broken order.
+
+---
+
+## Pinned values
+
+Four things #2000 leaves to interpretation. Pin them; a builder filling these in by guess produces something that has to be corrected after the fact.
+
+**Route.** `PATCH /api/wet-check-billings/:id/finding-quantity`, body `{ findingId: number, quantity: number }`. Registered beside the zone-labor pair in `routes/routes.ts`, following that handler's shape: `requireAuthentication`, `requireCompanyId`, the three-role check, a zod body, `classifyAndLog` on the catch.
+
+**Audit action.** `wet_check_billing.finding_quantity_edited`, `targetId = wcbId`. The exact string matters: `routes/audit-coverage.test.ts` asserts by searching the routes source for the literal action name, so an improvised name silently skips coverage. Before/after carry `{ findingId, issueType, quantity, zoneLaborHours, laborWasManual }`; the summary reads e.g. `Zone F-2 Nozzle Replace qty 192 → 2 (labor 49.30h → 1.30h)`.
+
+**Confirmation thresholds.** "Large" is not buildable. Confirm when the new quantity **exceeds 25**, or when the resulting zone labor **moves by more than 4 hours**. Constants at the top of the component, not settings. Below both thresholds the save is immediate — a manager correcting 192 down to 2 crosses the threshold on the *labor swing*, sees the numbers, and confirms; that is the intended path, not an edge case.
+
+**Tenancy.** Scope on the **wet check**, not the snapshot row: load the WCB, load its wet check, and refuse unless `wc.companyId === companyId`. This is what `setWcbZoneRepairLabor` (`storage.ts:9979`) already does and the reason it does it — the WCB row is not the tenancy anchor on this path. A WCB belonging to another company returns **404, not 403**: a 403 confirms the record exists.

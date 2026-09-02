@@ -1,0 +1,112 @@
+# BUILD — Editable Repair Quantity in the WC Snapshot
+
+**What & Why**
+
+The office cannot correct a repair quantity once a wet check reaches billing. On WC snapshot Zone F-2 a tech entered **192** Hunter I-20 rotor nozzles instead of 1 or 2. Quantity drives two numbers: parts ($645.12 at $3.36 each) and auto-computed zone labor (192 × 0.25 h = 48.00 h, which is nearly all of the zone's 49.30 h and $4,190.50). The zone reads $4,947.62 against perhaps $60 of real work.
+
+Every other number on that row is already correctable in place. Zone labor has an inline pencil. Labor rate and rate mode have an edit panel. Quantity — the input that *drives* the labor number — is plain text (`wet-check-billing-view.tsx:275`). The manager's only recourse today is to override zone labor by hand, which leaves the parts figure wrong and stamps `repairLaborManuallySet`, so the zone stops tracking the catalog from then on.
+
+This ticket makes quantity editable in the snapshot, recomputes parts and labor from the edit, and logs it to the WCB activity stream.
+
+## Mode scope (Rule 5)
+
+**Both modes.** The WC snapshot renders for service and inspection wet checks alike, and a quantity typo is equally wrong in either. Nothing here keys off dispositions, Mark Complete, or triage, so the guard needs no mode branch — but mode is still resolved server-side, and both modes are in the acceptance tests. An inspection-mode finding whose quantity is edited must recompute identically and must not acquire any service-only behavior.
+
+## Where this lands (Rule 3, and the Command Center rule)
+
+The editor goes in the **shared** snapshot component, `components/billing/wet-check-billing-view.tsx` — the one component every surface already renders:
+
+- `wet-check-billing-view-modal.tsx:292` — Command Center, Wet Check System page, Billing Workspace wet-checks tab
+- `wet-check-review/CombinedReviewSurface.tsx:296` — triage review
+- `billing/completed-work-detail-modal.tsx:1732`
+
+`pages/customer-billing.tsx` is **not modified.** It imports the modal; the modal renders the shared component. One editor, every entry point, no second copy.
+
+## Current state (confirmed in code)
+
+| Concern | Where | Today |
+|---|---|---|
+| Qty display | `wet-check-billing-view.tsx:275` | Plain text: `{item.noPartNeeded ? "—" : item.quantity}` |
+| Zone labor edit | `zone-labor-edit-inline.tsx` → `PATCH /api/wet-check-billings/:id/zone-labor` (`routes.ts:10400`) | Working; billing_manager+; blocked on billed / invoiced |
+| Auto labor formula | `storage.ts:9843` `_recomputeZoneRepairLaborIfAuto` | Sum of `issue_type_configs.defaultLaborHours × finding.quantity`; returns early when `repairLaborManuallySet` |
+| Finding edit path | `storage.ts:10188` `updateWetCheckFinding` | Gated by `assertFindingPriceEditable` (`:9777`) **and** hard-refuses any finding carrying `billingSheetId` / conversion stamps — which is every finding visible in the snapshot |
+| WCB parts total | `wetCheckBillings.partsSubtotal` column | Stored; `setWcbZoneRepairLabor` (`storage.ts:9979`) reads it and never recomputes it |
+| View parts total | `wet-check-billing-view.ts:260, 295, 338` | Re-derived from findings on every read |
+
+Two things follow. The existing finding-update path cannot be reused — it is correctly sealed for converted rows, and the snapshot shows only converted rows; this needs its own WCB-scoped mutation, exactly as zone labor did. And the stored `partsSubtotal` column and the re-derived view total are already two numbers that must agree, so a quantity edit touching only one of them creates precisely the drift the budget-spend fix was written to eliminate. Both are written in one transaction.
+
+## Decisions (locked)
+
+- **Manual labor overrides are discarded on a quantity edit.** If a zone's labor was manually set and its quantity changes, auto-compute re-runs and `repairLaborManuallySet` is cleared to `false`. The quantity is the more recent and more specific statement of what happened. The activity entry records that a manual value was replaced, so the change is visible rather than silent.
+- **Edit window mirrors zone labor exactly.** Editable through `approved_passed_to_billing`; refused once the WCB is `billed` or carries an `invoiceId`. Same guard and same two error messages, so the two editors on one row can never disagree about what is locked.
+- **Roles mirror zone labor:** `billing_manager`, `company_admin`, `super_admin`.
+- **Guardrail is office-side only.** A confirm step in the snapshot editor; the tech's capture flow is untouched by this ticket.
+
+---
+
+## Slice 1 — Server: WCB-scoped quantity mutation
+
+New storage method, modeled directly on `setWcbZoneRepairLabor` (`storage.ts:9979`):
+
+```ts
+async setWcbFindingQuantity(
+  wcbId: number,
+  findingId: number,
+  quantity: number,
+  companyId: number,
+): Promise<{ before: {...}; updated: {...} } | undefined>
+```
+
+In one `db.transaction`:
+
+1. Load the WCB, then its wet check; **refuse unless `wc.companyId === companyId`** (Rule 1 — tenancy is checked on the wet check, not the WCB row, same as the labor path).
+2. Refuse when `wcb.invoiceId != null` or `wcb.status === "billed"`.
+3. Load the finding and verify `finding.wetCheckBillingId === wcbId`. A finding on the same wet check but not on this WCB is not editable here — the same tighter-than-wet-check scoping the labor endpoint uses.
+4. Refuse when `finding.noPartNeeded === true`. Labor-only findings have no quantity; the UI renders an em dash and the server must not accept a number for them either.
+5. Capture before-state: quantity, zone `repairLaborHours`, `repairLaborManuallySet`, `wcb.partsSubtotal`, `wcb.totalAmount`.
+6. Update `wet_check_findings.quantity`.
+7. **Clear `repairLaborManuallySet` on the finding's zone record**, then call `_recomputeZoneRepairLaborIfAuto(tx, zoneRecordId, companyId)`. Because the flag is cleared first, the helper's early return no longer fires and the zone re-derives from the catalog at the new quantity.
+8. Recompute the WCB's stored `partsSubtotal` from live findings — sum of `noPartNeeded ? 0 : quantity × partPrice` over all findings with `wetCheckBillingId = wcbId`. Extract the expression the view builder already uses (`wet-check-billing-view.ts:260`) into one shared helper rather than hand-rolling a second sum (Rule 6).
+9. Recompute `totalHours` / `laborSubtotal` / `totalAmount` with the same block `setWcbZoneRepairLabor` already uses, including the `wcb.appliedLaborRate ?? wcb.laborRate` snapshot rate, so nothing reprices.
+
+Quantity validation: integer, at least 1, at most 999. Zero is not a quantity — removing a repair is a delete, which carries its own converted-row rules and is out of scope.
+
+New route in `routes/routes.ts`, beside the zone-labor pair:
+
+```
+PATCH /api/wet-check-billings/:id/finding-quantity
+Body: { findingId: number, quantity: number }
+```
+
+Same shape as `routes.ts:10400`: `requireAuthentication`, `requireCompanyId`, the three-role check, a zod body, `classifyAndLog` on the catch, and a non-fatal `recordLifecycleAudit` with action **`wet_check_billing.finding_quantity_edited`**, `targetId = wcbId`, before/after carrying `{ findingId, issueType, quantity, zoneLaborHours, laborWasManual }`, and a summary reading e.g. `Zone F-2 Nozzle Replace qty 192 → 2 (labor 49.30h → 1.30h)`. Respond with the updated WCB and zone record so the client settles without a refetch race.
+
+## Slice 2 — Client: inline quantity editor
+
+In `wet-check-billing-view.tsx`, replace the static Qty cell (`:275`) with a `FindingQuantityEditInline` component in `components/wet-check-billings/`, built to match `ZoneLaborEditInline`:
+
+- Renders the number plus a small pencil when editable, plain text otherwise. `noPartNeeded` rows keep their em dash and never become editable.
+- Editable when a new `canEditQuantity` prop is true. The modal computes it from the existing `canEditLaborFields(wcb)` helper (`wet-check-billing-view-modal.tsx:61`) — one lock predicate for both editors. `CombinedReviewSurface` and `completed-work-detail-modal` pass the same.
+- Save invalidates the same query keys `ZoneLaborEditInline` invalidates (`zone-labor-edit-inline.tsx:62`), so the zone labor row, zone subtotal, WCB totals and activity feed all refresh from one save.
+
+**Confirm step.** Before firing the mutation, if the new quantity exceeds 25 **or** the resulting zone labor moves by more than 4 hours, show a confirm naming both consequences in plain numbers: "192 nozzles at $3.36 = $645.12 in parts, and 48.00 hours of labor at $85.00 = $4,080.00. Save this quantity?" A manager correcting 192 down to 2 passes straight through; a manager about to *create* a 192 sees the money first. Both thresholds are constants at the top of the component, not settings.
+
+**Manual-override notice.** When the target zone has `repairLaborManuallySet === true`, the confirm gains a second line: "This zone's labor was set manually to 49.30 h. Saving will recalculate it from the catalog." There is no opt-out — the locked decision is that quantity wins — but the manager is told before, not after.
+
+## Slice 3 — Acceptance
+
+Server tests, in the style of `routes/zone-labor-auto-compute-routes.test.ts`:
+
+1. **Happy path** — qty 192 → 2 on a `submitted` WCB: finding quantity, zone `repairLaborHours`, zone `repairLaborManuallySet = false`, WCB `partsSubtotal`, `laborSubtotal` and `totalAmount` all updated in one call.
+2. **Manual override discarded** — zone starts `repairLaborManuallySet = true` with hand-entered hours; after the edit the flag is false and hours match the catalog computation.
+3. **Lock** — refused on `status = "billed"`, and on `invoiceId != null`.
+4. **Tenancy** — a WCB belonging to another company returns 404, not 403 (no existence leak).
+5. **Scope** — a finding on the same wet check but a different WCB returns 404.
+6. **Labor-only** — a `noPartNeeded` finding rejects any quantity with 400.
+7. **Range** — 0, -1, 1000 and non-integers rejected.
+8. **Roles** — irrigation_manager and field_tech get 403; the three allowed roles succeed.
+9. **Mode parity (Rule 5)** — the same edit on an inspection-mode wet check recomputes identically, and a service-mode WCB's disposition and triage state is byte-for-byte unchanged by a quantity edit.
+10. **Audit** — `wet_check_billing.finding_quantity_edited` lands on the WCB activity stream with before and after, and an audit-write failure does not fail the PATCH.
+
+Client tests: the pencil renders for billing_manager on an unlocked WCB and not on a billed one; `noPartNeeded` rows never show it; the confirm fires above threshold and not below; the manual-override line appears only when the zone was manually set.
+
+**Proof required (Rule 7):** a file:line map of each requirement, test output, and a screenshot of Zone F-2 in Command Center after correcting 192 → 2 — parts, zone labor and zone subtotal all moved, and the activity tab showing the entry.

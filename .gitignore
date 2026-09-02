@@ -47,3 +47,8 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Vitest writes timestamped config bundles beside the config; they are
+# machine-specific and must never be committed.
+vitest.config.ts.timestamp-*.mjs
+vite.config.ts.timestamp-*.mjs
