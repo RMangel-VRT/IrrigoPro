@@ -1,0 +1,80 @@
+# BUILD — Company Admin Work Type Registry
+
+**Source:** Post-build review of `560b2475`, 2026-09-02.
+**Severity:** P2 — not urgent once the seed migration has run, but the registry is currently unmaintainable by the people who own it.
+**Prerequisite slices:** #1972 (shipped). Independent of the other two post-build tickets; can be built in parallel.
+
+---
+
+## Why
+
+`field_work_types` drives what a tech can record and which of controller/zone/details the gate demands. It is per-company configuration — and right now a company cannot configure it.
+
+`artifacts/api-server/src/routes/field-work-type-routes.ts` exposes exactly three endpoints: two GETs and one PATCH. There is **no create endpoint and no screen anywhere in the app**. A company admin can rename a work type, reorder it, flip its requirement flags and deactivate it — but cannot add one.
+
+That has two consequences:
+
+- The only way rows ever appear is the Super Admin migration `seed-field-work-types-v1`. On 2026-09-02 that migration had not been run against production, the registry was empty, and every field tech was blocked from saving a billing sheet with no in-app remedy. The screen told them *"An administrator needs to add them,"* which no administrator could do.
+- The seven defaults are a guess at one company's vocabulary. A second tenant with different trade categories has no way to express them, which matters as soon as company two is real (see the Second-Company readiness work).
+
+Randy's decision, 2026-09-02: build the screen, and separately make an empty registry fail open rather than lock the app.
+
+---
+
+## Scope
+
+A routed company-admin page for the work-type registry, plus the one endpoint that is missing.
+
+### Server
+
+**New:** `POST /api/admin/field-work-types`
+
+- Body: `label`, `requiresController`, `requiresZone`, `requiresDetails`, `sortOrder`.
+- **The client never supplies `code`.** Derive it from the label: lowercase, non-alphanumerics to underscores, collapse repeats, trim. Reject a derived code that collides with an existing row in this company (the `uniq_field_work_type_company_code` index already enforces `(company_id, code)` per-tenant); return a clear message naming the conflicting label rather than a raw constraint error.
+- `companyId` comes from `req.authenticatedUserCompanyId`, never from the body (Rule 1).
+- Capability-gated to company admin and super admin, using `hasCapability` against a set in `lib/shared/src/roles.ts` — not a hardcoded role string list.
+
+**Existing PATCH** (`field-work-type-routes.ts:78`): wire it to the screen unchanged. It already verifies company ownership; confirm it returns **404** rather than 403 on a cross-company id (Rule 1: never leak existence).
+
+**No delete endpoint.** Deactivation is the supported lifecycle, and a type referenced by any ticket must never become removable. `active: false` already removes a type from the picker while the client still renders a stored code as `"<code> (no longer offered)"`, so historical tickets stay readable.
+
+### Client
+
+**New page** `artifacts/irrigopro/src/pages/admin/field-work-types.tsx`, routed at `/admin/work-types`.
+
+- Table of the company's types: label, code (read-only, shown so admins can match it to data exports), the three requirement flags, sort order, active state.
+- Add, and inline edit of every field except code.
+- Deactivate/reactivate as a toggle, never a delete button.
+- An explicit empty state that explains what the list does and offers to create the first type — this is the screen someone lands on when the registry is empty, so it must be the fix, not another dead end.
+- Show the requirement flags in plain language, since they are the thing that actually gates a tech: "Requires controller", "Requires zone", "Requires details". A short line of help text stating that a type requiring nothing is location-only, like Backflow and Mainline Repair.
+
+**Wire the entry point in the same change** (Rule 3): a nav leaf under the company-admin group in `components/layout/nav-config.ts`, plus the route in `App.tsx`, and confirm company admin can actually reach it by walking the UI — not by compiling.
+
+---
+
+## Guardrails
+
+- **Changing a requirement flag does not retroactively invalidate saved tickets.** The gate evaluates at save time; a ticket saved under the old flags stays valid. Existing violations surface through the Missing Location Data report, which is the intended place for them.
+- **Deactivating a type in use is allowed** and must not break any screen that renders it. Verify against a ticket carrying that code: the wizard shows `"(no longer offered)"`, the report renders the label, the PDF renders the label.
+- **Do not seed from this screen.** The Super Admin migration remains the bulk-seed path for new tenants; this page is for a company maintaining its own list.
+
+---
+
+## Tests
+
+- Create: a new type appears for that company only; a second company with the same label gets its own row and no collision.
+- Code derivation: "Controller/Clock Repair" → `controller_clock_repair`; a duplicate label is rejected with a message naming the existing type, not a database error.
+- Edit: changing `requiresZone` on a type changes what the wizard demands for the next ticket, and changes nothing about tickets already saved.
+- Deactivate: the type disappears from the wizard picker; a ticket already carrying it still renders its label everywhere; reactivating restores it.
+- Tenancy (Rule 1, required): a company admin in company A cannot list, create, edit or deactivate company B's types by id or association, and gets 404; super admin can across tenants.
+- Capability: a role without the capability gets neither the nav item nor the endpoint — verify both, so nav visibility and API access cannot drift apart.
+- Empty state: a company with zero types sees the create-first-type state, and creating one immediately unblocks the billing sheet wizard.
+
+---
+
+## Out of scope
+
+- Deleting work types.
+- Backfilling `field_work_type` onto legacy tickets.
+- Per-line-item controller/zone.
+- Changing the seeded defaults themselves — the label fix for "Controller/Clock Repair" belongs to `FIX - Location Gate Scope, Empty Registry Fail-Open, Stale Cutoff Comment.md`.

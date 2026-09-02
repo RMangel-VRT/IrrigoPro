@@ -1,0 +1,131 @@
+# FIX — Location Gate Scope, Empty-Registry Fail-Open, Stale Cutoff Comment
+
+**Source:** Post-build review of `560b2475`, 2026-09-02. Three corrections to code already merged in #1972–#1973.
+**Severity:** P1. The billing-sheet gate is live in production, and as written it exempts most of the people who use it.
+**Prerequisite slices:** #1972, #1973 (both shipped).
+
+---
+
+## Change 1 — Gate the surface, not the role
+
+### Files
+- `artifacts/api-server/src/routes/billing-sheet-location-gate.ts` (`shouldEnforceBillingLocationCreate`, `shouldEnforceBillingLocationPatch`)
+- `artifacts/irrigopro/src/components/billing/billing-sheet-wizard.tsx:1249-1255`
+
+### Problem
+
+Both server gate functions are written `role === "field_tech" && …`, and the wizard mirrors it:
+
+```ts
+const enforceBillingLocationGate =
+  isFieldTech &&
+  isLocationGateEnforced(
+    isEdit ? existing?.createdAt ?? null : new Date(),
+    BILLING_SHEET_LOCATION_GATE_EFFECTIVE_AT,
+  );
+```
+
+That role condition was not in the spec and was not requested. It means an irrigation manager, company admin or billing manager can create or edit a billing sheet with no pin, no work type, no controller and no zone — and it saves clean, client and server.
+
+Two reasons that is wrong:
+
+- **Managers do field work.** The shipped spec *"Work Order — Assigned Irrigation Manager Can Complete It Like a Tech"* exists precisely because a manager on site does the same job. Under the current code, a manager filling out a billing sheet in the field produces the unanswerable record Rule 4 exists to prevent.
+- **The two surfaces disagree.** `artifacts/api-server/src/lib/work-order-location-gate.ts` has no role condition at all. Once the work-order cutoff flips, work orders will demand location from everyone while billing sheets demand it from one role — the same rule behaving differently depending on which screen you opened.
+
+### Change
+
+Remove the role condition from all three call sites. **Drop the `role` parameter from both server functions entirely** rather than widening it to a list of roles — a parameter that always passes is dead weight and invites the condition creeping back in a later edit.
+
+```ts
+export function shouldEnforceBillingLocationCreate(now: Date = new Date()): boolean;
+export function shouldEnforceBillingLocationPatch(
+  createdAt: Date | string | null | undefined,
+  patch: Record<string, unknown>,
+): boolean;
+```
+
+### Do not change
+
+`LOCATION_PATCH_KEYS` and the status-transition check (`submitted` / `pending_manager_review` / `completed`) in `shouldEnforceBillingLocationPatch`. That correctly stops someone slipping past the gate by patching a status instead of a location field, and it is good work.
+
+### Tests
+
+- An irrigation manager, company admin and billing manager each get the same 400 a field tech gets on a post-cutoff sheet missing a pin.
+- A pre-cutoff (grandfathered) sheet still saves for every role.
+- A patch carrying only `laborHours` still passes for every role — the billing workspace and Command Center inline edit must keep working.
+- The wizard blocks step 2 for every role on a new sheet, and blocks none of them on a legacy sheet.
+
+---
+
+## Change 2 — An empty work-type registry must not enforce
+
+### Files
+- `lib/db/src/field-location-policy.ts`
+- `artifacts/api-server/src/routes/billing-sheet-location-gate.ts`
+- `artifacts/api-server/src/lib/work-order-location-gate.ts`
+- `artifacts/irrigopro/src/components/location/work-location-controls.tsx:137-152`
+
+### Problem
+
+A company with zero active `field_work_types` rows cannot satisfy the gate by any action available to it. Work Type is required, the dropdown is empty, and there is no create endpoint anywhere in the app — only two GETs and a PATCH. This is not hypothetical: it happened in production on 2026-09-02 and blocked every field tech until the seed migration was run.
+
+The client already detects the state (`workTypesUnavailable`) and prints *"An administrator needs to add them"* — advice no administrator can act on.
+
+### Change
+
+**Fail open.** When the caller's company has no active work types, the gate does not apply — client and server both.
+
+This is the same principle the codebase already applies correctly one file over. `work-order-location-gate.ts` carries this comment about why its cutoff stays at 2099:
+
+> *activation belongs to the separate offline-capability task so a signal-less technician cannot be trapped by a server gate they cannot satisfy.*
+
+An empty registry is the identical trap by a different route. A requirement nobody can meet is not enforcement, it is an outage.
+
+**Surface it, do not swallow it.** When the gate is skipped because the registry is empty, record an audited event (`location_gate.skipped_empty_registry`, with the company id) so a tenant that has silently lost field capture is visible to Super Admin rather than discovered by a tech who cannot finish his day.
+
+### Tests
+
+- A company with zero active types saves a billing sheet with no pin and no work type, and the skip is audited.
+- A company with one active type enforces normally.
+- Deactivating a company's last active type moves it to the fail-open path, not to a locked one.
+- The audited event fires once per skipped evaluation and carries the company id.
+
+---
+
+## Change 3 — A comment that contradicts the code
+
+### File
+- `lib/db/src/field-location-policy.ts`
+
+```ts
+/**
+ * Tickets created before this instant are grandfathered. Both rollout
+ * surfaces intentionally ship disabled by using a far-future date.
+ */
+export const BILLING_SHEET_LOCATION_GATE_EFFECTIVE_AT = new Date("2026-09-02T00:00:00.000Z");
+export const WORK_ORDER_LOCATION_GATE_EFFECTIVE_AT   = new Date("2099-01-01T00:00:00.000Z");
+```
+
+The billing-sheet constant is live, not far-future. Rewrite the comment to state what is true: billing sheets activated 2026-09-02 with #1973; work orders remain parked at 2099 until offline work-order mutations ship, per the reasoning in `work-order-location-gate.ts`. Rule 7 — a comment claiming behavior the code does not have is a defect, not documentation.
+
+While in the seed file, change the `controller_repair` label from **"Controller Repair"** to **"Controller/Clock Repair"** (`artifacts/api-server/src/seeds/field-work-types.ts`). The code stays `controller_repair`. Randy calls them clocks; the UI should too.
+
+---
+
+## Out of scope
+
+- The company-admin work-type screen — separate ticket, `BUILD - Company Admin Work Type Registry.md`.
+- Running or fixing the seed migration — separate ticket, `FIX - Field Work Type Seed Missing + Migration Reported Success Without Committing.md`.
+- Anything touching the work-order cutoff. It stays at 2099 until the offline work is done.
+
+---
+
+## Confirmed correct — do not "fix" these back
+
+Recorded so a later pass does not undo work that is right:
+
+- **Backflow releases both controller and zone**, matching Mainline Repair. Decided 2026-09-01: backflows are tracked by location only.
+- **Work type renders before controller/zone**, and the group is hidden until a rule requires it (`resolveLocationFieldVisibility`). There is no path to entering a controller before choosing a work type — which is why `clearLocationFieldsForRule` clearing on an explicit switch is correct, and why clearing on user action rather than on mount is right.
+- **GPS provenance.** `location-picker.tsx` holds `gpsFailureRef`, sets it on every failure code, clears it on success, and stamps it onto a subsequent manual drop, so a hand-drop after a failed fix reads low confidence and a deliberate hand-drop does not. `reverseGeocode` is guarded by `canUseNetwork()`, so the pin never depends on an address lookup.
+- **Retired work-type codes** still render as `"<code> (no longer offered)"`.
+- **The customer-change clear** keyed off an explicit customer switch rather than off a controller fetch that may have failed.

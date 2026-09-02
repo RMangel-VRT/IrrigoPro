@@ -1,0 +1,67 @@
+# FIX — Field Work Type Seed Missing + Migration Reported Success Without Committing
+
+**Source:** Production check 2026-09-02 after #1972–#1975 deployed.
+**Severity:** P0 — field techs cannot save a billing sheet. Plus a P1 trust problem affecting every migration in the registry.
+**Prerequisite slices:** #1972 (shipped).
+
+---
+
+## Part A — Field techs are blocked right now (operations)
+
+The billing-sheet location gate went live at `2026-09-02T00:00:00.000Z` (`BILLING_SHEET_LOCATION_GATE_EFFECTIVE_AT`, `lib/db/src/field-location-policy.ts`). Under that gate, Work Type is required, and the list is read from `field_work_types`.
+
+**That table is empty.** The seven defaults live in `artifacts/api-server/src/seeds/field-work-types.ts` as a source-code list. Merging the commit does not write them to the database. They exist only after `seed-field-work-types-v1` ("Seed default field work types") is run from the Super Admin migrations page against the deployed server.
+
+Consequence: `checkLocationGate` returns `work_type_missing` on every evaluation, the Work Type dropdown renders disabled with *"No work types are set up for this company yet. An administrator needs to add them"*, and Continue never enables. The requirement is unsatisfiable and there is no in-app way to fix it — `field-work-type-routes.ts` exposes two GETs and one PATCH, with no create endpoint.
+
+**Action:** Super Admin → Migrations → "Seed default field work types" → Preview → acknowledge → Run. Idempotent (`onConflictDoNothing` on `(companyId, code)`); it cannot overwrite a tenant's customizations.
+
+**Verification — the completion report must state all three:**
+
+1. Re-run Preview afterwards and paste the numbers. `fieldWorkTypesMissing` must be **0** and the warning must read *"All companies already have the seven default field work types."* The green "Last run: succeeded" banner is **not** acceptable proof — see Part B for why.
+2. `SELECT company_id, count(*) FROM field_work_types GROUP BY company_id` returns 7 per company, against the production database.
+3. A screenshot of the Work Type dropdown open, populated, on a new billing sheet as a field tech (Rule 7 — confirm with a screenshot, not a commit).
+
+State which deployment and which database the migration ran against. Deployed ≠ pulled.
+
+---
+
+## Part B — The migration reported success without inserting anything
+
+Preview on 2026-09-02 returned:
+
+```
+companies                 2
+companiesMissingDefaults  2
+fieldWorkTypesMissing    14
+```
+
+14 = 2 companies × 7 defaults, i.e. **neither company had a single row** — while the same dialog displayed **"Last run: succeeded at 11:07:00 AM."**
+
+That combination should be impossible. In `run()` (`artifacts/api-server/src/lib/migrations/seed-field-work-types.ts`) the `seed-defaults` step inserts first and, on any throw, pushes a `failed` result and **returns early without ever reaching `mark-done`**. A run cannot legitimately report success and leave the table empty.
+
+So one of these is true, and we need to know which:
+
+1. **The 11:07 run executed against a different database** than the one Preview reads — a dev or preview deployment rather than production. If so, the migrations UI needs to display which environment and database it is operating on, because a Super Admin cannot currently tell.
+2. **The inserts were rolled back after the step reported success.** This repo already carries an agent memory note describing exactly this failure mode: `.agents/memory/code-execution-writes-roll-back-on-throw.md`. If that is what happened, `rowsAffected` is being computed from `.returning()` on a transaction that later rolled back, and the step result is written before the commit is durable.
+
+**Why this outranks the work types.** Every migration in `registry.ts` — eleven of them, including invoice-revision backfill, ticket-total drift repair, and the QB void repair — shares this run-then-report-then-mark pattern. If a step can report `success` with `rowsAffected` for writes that never landed, then the migrations page has been telling us work was done that was not, and any migration previously marked completed is suspect. That is a data-integrity question, not a UI nicety.
+
+### Scope
+
+1. **Determine which cause it was.** Check the app_settings marker timestamp against the deployment history, and check whether the 11:07 run's target database matches the one Preview reads.
+2. **If it is cause (2), fix the reporting contract.** A step reports `success` only after its writes are committed. `rowsAffected` reflects committed rows, never rows from a rolled-back transaction. If migrations run inside an outer transaction, the completion marker must be written in that same transaction so marker and data can never disagree.
+3. **Make the target visible.** The migrations page displays the environment and database identity it is acting on, so nobody can run a production repair against dev and read the green banner as done.
+4. **Add a self-check.** After any migration run, re-evaluate `check()` and surface a warning when a run reported success but `check()` still reports `not_started` or `partially_applied`. That mismatch is the exact signature of this bug and should be impossible to miss.
+
+### Tests
+
+- A seed run whose insert throws reports `failed`, does not write the `seedFieldWorkTypes.done` marker, and leaves `check()` at `not_started`.
+- A seed run that succeeds reports `rowsAffected` equal to the rows actually present afterwards, and `check()` flips to `completed`.
+- A simulated post-success rollback is detected by the self-check in step 4 and surfaced rather than reported as success.
+- Re-running the seed on a fully seeded company inserts 0 rows, reports success, and changes no existing labels or requirement flags.
+
+### Out of scope
+
+- Changing what any migration does. This is about whether its report can be believed.
+- Backfilling `field_work_type` onto legacy tickets.
