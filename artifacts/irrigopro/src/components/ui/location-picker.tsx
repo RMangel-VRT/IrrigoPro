@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, type ReactNode } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -58,6 +58,8 @@ export interface LocationPickerProps {
    */
   hasCustomerAddress?: boolean;
   className?: string;
+  /** Optional controls rendered inside the same location card, below the map. */
+  children?: ReactNode;
 }
 
 const PULSING_DOT_CSS = `
@@ -125,7 +127,8 @@ export function LocationPicker({
   companyFallbackAddress,
   boundaryResolved = true,
   hasCustomerAddress = false,
-  className = ""
+  className = "",
+  children,
 }: LocationPickerProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -134,6 +137,7 @@ export function LocationPicker({
   const liveLocationMarkerRef = useRef<L.Marker | null>(null);
   const watchIdRef = useRef<number | null>(null);
   const liveLocationRef = useRef<{ lat: number; lng: number } | null>(null);
+  const selectionRevisionRef = useRef(0);
 
   // Tracks what was used for the initial map centering so the reactive
   // company-fallback effect knows whether it should re-center.
@@ -244,6 +248,7 @@ export function LocationPicker({
       }
 
       map.on("click", async (e) => {
+        const selectionRevision = ++selectionRevisionRef.current;
         const { lat, lng } = e.latlng;
         if (markerRef.current) {
           map.removeLayer(markerRef.current);
@@ -256,6 +261,7 @@ export function LocationPicker({
          const address = canUseNetwork()
            ? await reverseGeocode(lat, lng)
            : undefined;
+          if (selectionRevision !== selectionRevisionRef.current) return;
           onLocationSelect({
             lat,
             lng,
@@ -427,6 +433,7 @@ export function LocationPicker({
   };
 
   const handleUseMyLocation = async () => {
+    const selectionRevision = ++selectionRevisionRef.current;
     setIsLocating(true);
     setLocationError(null);
 
@@ -453,6 +460,10 @@ export function LocationPicker({
         const address = canUseNetwork()
           ? await reverseGeocode(lat, lng)
           : undefined;
+        if (selectionRevision !== selectionRevisionRef.current) {
+          setIsLocating(false);
+          return;
+        }
         gpsFailureRef.current = null;
         onLocationSelect({
           lat,
@@ -467,6 +478,7 @@ export function LocationPicker({
         setIsLocating(false);
       },
       (error) => {
+        if (selectionRevision !== selectionRevisionRef.current) return;
         const gpsError =
           error.code === error.PERMISSION_DENIED
             ? "permission_denied"
@@ -586,6 +598,7 @@ export function LocationPicker({
               </p>
             </div>
           )}
+          {children}
         </div>
       </CardContent>
     </Card>

@@ -27,6 +27,13 @@ export interface WorkOrderLocationPatchPayload {
   workLocationLat: number | null;
   workLocationLng: number | null;
   workLocationAddress: string | null;
+  controllerLetter?: string | null;
+  zoneNumber?: number | null;
+  fieldWorkType?: string | null;
+  fieldWorkTypeDetails?: string | null;
+  workLocationSource?: "gps" | "manual" | null;
+  workLocationAccuracyM?: number | null;
+  workLocationGpsError?: string | null;
 }
 
 export interface WorkOrderCompletionPayload {

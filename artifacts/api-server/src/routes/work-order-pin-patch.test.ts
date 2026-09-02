@@ -51,7 +51,18 @@ class StubStorage {
 // This mirrors `requireWorkOrderUpdateAccess` from routes.ts exactly —
 // updating here requires updating there and vice versa.
 function buildRequireWorkOrderUpdateAccess(storage: StubStorage) {
-  const PIN_KEYS = new Set(["workLocationLat", "workLocationLng", "workLocationAddress"]);
+  const PIN_KEYS = new Set([
+    "workLocationLat",
+    "workLocationLng",
+    "workLocationAddress",
+    "controllerLetter",
+    "zoneNumber",
+    "fieldWorkType",
+    "fieldWorkTypeDetails",
+    "workLocationSource",
+    "workLocationAccuracyM",
+    "workLocationGpsError",
+  ]);
 
   return async (req: any, res: any, next: any) => {
     const userRole = req.authenticatedUserRole;
@@ -286,6 +297,27 @@ describe("PATCH /api/work-orders/:id — field-tech pin-patch branch (Task #931)
     });
 
     assert.equal(res.status, 200, `Expected 200, got ${res.status}`);
+  });
+
+  it("assigned tech may save an incomplete location subset without completing", async () => {
+    seedWorkOrder(h.storage, { id: 7, assignedTechnicianId: TECH_ID, status: "in_progress" });
+
+    const res = await fetch(`${h.baseUrl}/api/work-orders/7`, {
+      method: "PATCH",
+      headers: makeTechHeaders(),
+      body: JSON.stringify({
+        fieldWorkType: "zone_repair",
+        controllerLetter: "A",
+      }),
+    });
+
+    assert.equal(res.status, 200, `Expected 200, got ${res.status}`);
+    const body = (await res.json()) as WorkOrderRow & {
+      fieldWorkType?: string;
+      controllerLetter?: string;
+    };
+    assert.equal(body.fieldWorkType, "zone_repair");
+    assert.equal(body.controllerLetter, "A");
   });
 
   it("unassigned tech → 403 with precise message", async () => {

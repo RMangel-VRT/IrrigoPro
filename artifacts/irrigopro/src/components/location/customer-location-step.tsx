@@ -7,31 +7,23 @@
  *
  * Replaces WizardLocationStep + WoLocationStep.
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
-import { useArrayQuery } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { Form } from "@/components/ui/form";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { LocationFields } from "@/components/location/location-fields";
 import { CustomerLocationPicker } from "@/components/location/customer-location-picker";
-import { useCustomerBoundary } from "@/hooks/use-customer-boundary";
-import { MapPin, Cpu, Droplets, Briefcase } from "lucide-react";
-import type { Customer, FieldWorkType } from "@workspace/db/schema";
 import {
-  checkLocationGate,
-  type LocationGateViolation,
-} from "@workspace/db/field-location-policy";
-import type { CustomerController } from "@/lib/controller-types";
+  WorkLocationControls,
+  WorkLocationGateStatus,
+} from "@/components/location/work-location-controls";
+import { useCustomerBoundary } from "@/hooks/use-customer-boundary";
+import { MapPin, Briefcase } from "lucide-react";
+import type { Customer } from "@workspace/db/schema";
+import type { LocationGateViolation } from "@workspace/db/field-location-policy";
 
 export interface WorkLocation {
   lat: number;
@@ -99,6 +91,7 @@ export function CustomerLocationStep({
 }: Props) {
   const valueRef = useRef(value);
   valueRef.current = value;
+  const [gateViolations, setGateViolations] = useState<LocationGateViolation[]>([]);
 
   const form = useForm<AddressFormValues>({
     defaultValues: {
@@ -137,75 +130,11 @@ export function CustomerLocationStep({
     }
   }, [customer?.id, value.useDifferentAddress, form]);
 
-  const { data: controllers = [], isLoading: controllersLoading } = useArrayQuery<CustomerController>({
-    queryKey: ["/api/properties", customer?.id, "controllers"],
-    enabled: !!customer,
-  });
-  const { data: workTypes = [], isLoading: workTypesLoading } = useArrayQuery<FieldWorkType>({
-    queryKey: ["/api/field-work-types"],
-    enabled: !!customer,
-  });
-
-  const selectedController = controllers.find(
-    (c) => c.controllerLetter === value.controllerLetter,
-  );
-  const zoneCount = selectedController?.zoneCount ?? 0;
-  const selectedWorkType = workTypes.find((type) => type.code === value.fieldWorkType);
-  const gateViolations = enforceLocationGate
-    ? checkLocationGate(
-        {
-          workLocationLat: value.workLocation?.lat ?? null,
-          workLocationLng: value.workLocation?.lng ?? null,
-          fieldWorkType: value.fieldWorkType,
-          fieldWorkTypeDetails: value.fieldWorkTypeDetails,
-          controllerLetter: value.controllerLetter,
-          zoneNumber: value.zoneNumber,
-        },
-        selectedWorkType
-          ? {
-              code: selectedWorkType.code,
-              requiresController: selectedWorkType.requiresController,
-              requiresZone: selectedWorkType.requiresZone,
-              requiresDetails: selectedWorkType.requiresDetails,
-            }
-          : null,
-      )
-    : [];
   const gateComplete = gateViolations.length === 0;
-  const violationLabels: Record<LocationGateViolation, string> = {
-    pin_missing: "Pin the exact work location (use “I’m here” or click the map).",
-    work_type_missing: "Choose a work type.",
-    controller_missing: "Choose the controller.",
-    zone_missing: "Choose the zone.",
-    details_missing: "Add details for this work type.",
-  };
   const handleContinue = () => {
     if (!gateComplete) return;
     onContinue();
   };
-
-  useEffect(() => {
-    onGateStateChange?.(gateComplete, gateViolations);
-  }, [gateComplete, gateViolations.join("|"), onGateStateChange]);
-
-  useEffect(() => {
-    if (controllersLoading) return;
-    if (!value.controllerLetter) return;
-    const stillThere = controllers.some(
-      (c) => c.controllerLetter === value.controllerLetter,
-    );
-    if (!stillThere) {
-      onChange({ ...valueRef.current, controllerLetter: null, zoneNumber: null });
-    }
-  }, [controllers, controllersLoading, value.controllerLetter, onChange]);
-
-  useEffect(() => {
-    if (value.zoneNumber == null) return;
-    if (!selectedController) return;
-    if (value.zoneNumber > zoneCount) {
-      onChange({ ...valueRef.current, zoneNumber: null });
-    }
-  }, [selectedController, zoneCount, value.zoneNumber, onChange]);
 
   const handleToggleAddress = () => {
     const newUseDifferent = !value.useDifferentAddress;
@@ -344,187 +273,20 @@ export function CustomerLocationStep({
       </Card>
 
       {customer && (
-        <Card>
-          <CardContent className="p-4 sm:p-5 space-y-3">
-            <div className="flex items-center gap-2">
-              <div className="bg-blue-50 p-2 rounded-md">
-                <Briefcase className="w-4 h-4 text-blue-600" />
-              </div>
-              <h2 className="text-base font-semibold text-gray-900">
-                Work Type{" "}
-                {enforceLocationGate ? (
-                  <span className="text-red-500">*</span>
-                ) : (
-                  <span className="text-xs text-gray-500 font-normal">(optional)</span>
-                )}
-              </h2>
-            </div>
-            <Select
-              value={value.fieldWorkType ?? "__none__"}
-              onValueChange={(workType) =>
-                onChange({
-                  ...valueRef.current,
-                  fieldWorkType: workType === "__none__" ? null : workType,
-                })
-              }
-              disabled={workTypesLoading}
-            >
-              <SelectTrigger>
-                <SelectValue
-                  placeholder={workTypesLoading ? "Loading work types…" : "Select work type"}
-                />
-              </SelectTrigger>
-              <SelectContent>
-                {!enforceLocationGate && <SelectItem value="__none__">— None —</SelectItem>}
-                {workTypes.map((type) => (
-                  <SelectItem key={type.code} value={type.code}>
-                    {type.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {selectedWorkType?.requiresDetails && (
-              <div className="space-y-1">
-                <Label htmlFor="field-work-type-details" className="text-xs text-gray-600">
-                  Work type details{" "}
-                  {enforceLocationGate && <span className="text-red-500">*</span>}
-                </Label>
-                <Input
-                  id="field-work-type-details"
-                  value={value.fieldWorkTypeDetails}
-                  onChange={(e) =>
-                    onChange({ ...valueRef.current, fieldWorkTypeDetails: e.target.value })
-                  }
-                  placeholder="Describe the work"
-                />
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {customer && (
-        <Card>
-          <CardContent className="p-4 sm:p-5 space-y-3">
-            <div className="flex items-center gap-2">
-              <div className="bg-blue-50 p-2 rounded-md">
-                <Cpu className="w-4 h-4 text-blue-600" />
-              </div>
-              <h2 className="text-base font-semibold text-gray-900">
-                Controller &amp; Zone{" "}
-                <span className="text-xs text-gray-500 font-normal">
-                  {enforceLocationGate &&
-                  (selectedWorkType?.requiresController || selectedWorkType?.requiresZone)
-                    ? "(required by work type)"
-                    : "(optional)"}
-                </span>
-              </h2>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label className="text-xs text-gray-600">
-                  Controller{" "}
-                  {enforceLocationGate && selectedWorkType?.requiresController && (
-                    <span className="text-red-500">*</span>
-                  )}
-                </Label>
-                <Select
-                  value={value.controllerLetter ?? "__none__"}
-                  onValueChange={(letter) =>
-                    onChange({
-                      ...valueRef.current,
-                      controllerLetter: letter === "__none__" ? null : letter,
-                      zoneNumber: null,
-                    })
-                  }
-                  disabled={controllersLoading || controllers.length === 0}
-                >
-                  <SelectTrigger>
-                    <SelectValue
-                      placeholder={
-                        controllersLoading
-                          ? "Loading controllers…"
-                          : controllers.length === 0
-                          ? "No controllers on file"
-                          : "Select controller"
-                      }
-                    />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(!enforceLocationGate || !selectedWorkType?.requiresController) && (
-                      <SelectItem value="__none__">— None —</SelectItem>
-                    )}
-                    {controllers.map((c) => (
-                      <SelectItem key={c.controllerLetter} value={c.controllerLetter}>
-                        Controller {c.controllerLetter}{" "}
-                        <span className="text-gray-500">({c.zoneCount} zones)</span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1">
-                <Label className="text-xs text-gray-600 flex items-center gap-1">
-                  <Droplets className="w-3 h-3" /> Zone
-                  {enforceLocationGate && selectedWorkType?.requiresZone && (
-                    <span className="text-red-500">*</span>
-                  )}
-                </Label>
-                <Select
-                  value={value.zoneNumber == null ? "__none__" : String(value.zoneNumber)}
-                  onValueChange={(zone) =>
-                    onChange({
-                      ...valueRef.current,
-                      zoneNumber: zone === "__none__" ? null : Number(zone),
-                    })
-                  }
-                  disabled={!selectedController || zoneCount === 0}
-                >
-                  <SelectTrigger>
-                    <SelectValue
-                      placeholder={!selectedController ? "Pick a controller first" : "Select zone"}
-                    />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(!enforceLocationGate || !selectedWorkType?.requiresZone) && (
-                      <SelectItem value="__none__">— None —</SelectItem>
-                    )}
-                    {Array.from({ length: zoneCount }, (_, i) => i + 1).map((z) => (
-                      <SelectItem key={z} value={String(z)}>
-                        Zone {z}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+        <WorkLocationControls
+          customerId={customer.id}
+          value={value}
+          onChange={onChange}
+          enforceLocationGate={enforceLocationGate}
+          onGateStateChange={(complete, violations) => {
+            setGateViolations(violations);
+            onGateStateChange?.(complete, violations);
+          }}
+        />
       )}
 
       {enforceLocationGate && (
-        <div
-          className={
-            gateComplete
-              ? "rounded-lg border border-green-200 bg-green-50 p-3"
-              : "rounded-lg border border-red-200 bg-red-50 p-3"
-          }
-          role="status"
-          data-testid="location-gate-status"
-        >
-          {gateComplete ? (
-            <p className="text-sm font-medium text-green-800">Location details complete.</p>
-          ) : (
-            <>
-              <p className="text-sm font-semibold text-red-800">Before you continue:</p>
-              <ul className="mt-1 list-disc pl-5 text-sm text-red-700">
-                {gateViolations.map((violation) => (
-                  <li key={violation}>{violationLabels[violation]}</li>
-                ))}
-              </ul>
-            </>
-          )}
-        </div>
+        <WorkLocationGateStatus violations={gateViolations} />
       )}
 
       <div className="hidden sm:flex justify-between gap-3 pt-2">

@@ -1,5 +1,5 @@
 import { safeGet } from "@/utils/safeStorage";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { AiExpandButton, AiSuggestionCard } from "@/components/ui/ai-expand-button";
@@ -36,7 +36,17 @@ import {
   isProbablyOffline,
   patchWorkOrderLocation,
 } from "@/lib/offline/api";
+import type { WorkOrderLocationPatchPayload } from "@/lib/offline/types";
 import { buildMapsUrl } from "@/lib/maps-url";
+import {
+  WorkLocationControls,
+  type WorkLocationRequirementsValue,
+} from "@/components/location/work-location-controls";
+import {
+  WORK_ORDER_LOCATION_GATE_EFFECTIVE_AT,
+  isLocationGateEnforced,
+  type LocationGateViolation,
+} from "@workspace/db/field-location-policy";
 import {
   CheckCircle,
   Plus,
@@ -49,13 +59,10 @@ import {
   Check,
   Activity,
   User,
-  MapPin,
-  Crosshair,
   Loader2,
   Navigation,
 } from "lucide-react";
 import { PartPicker } from "@/components/parts/part-picker";
-import { ToastAction } from "@/components/ui/toast";
 import { CustomerLocationPicker } from "@/components/location/customer-location-picker";
 import { computeCompletionPrefillHours } from "./completion-prefill";
 import type { WorkOrder, Part, Customer } from "@workspace/db/schema";
@@ -115,35 +122,76 @@ export function WorkOrderCompletion({
   const { getUrl: getPhotoSignedUrl } = usePhotoSignedUrls(photoUrls, "thumb");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
-  const [pinningHere, setPinningHere] = useState(false);
 
-  // Local mirror of the work-location pin so the "Pinned work location"
-  // line in this modal refreshes the same render the user taps "I'm here",
-  // without mutating the `workOrder` prop. Initialised from the prop and
-  // only changed by the optimistic-update handler below.
-  type PinFields = {
+  type CompletionLocation = WorkLocationRequirementsValue & {
     workLocationLat: number | null;
     workLocationLng: number | null;
     workLocationAddress: string | null;
+    workLocationSource: "gps" | "manual" | null;
+    workLocationAccuracyM: number | null;
+    workLocationGpsError: string | null;
   };
-  const [livePin, setLivePin] = useState<PinFields>({
-    workLocationLat: workOrder.workLocationLat != null ? Number(workOrder.workLocationLat) : null,
-    workLocationLng: workOrder.workLocationLng != null ? Number(workOrder.workLocationLng) : null,
-    workLocationAddress: workOrder.workLocationAddress ?? null,
-  });
+  const initialCompletionLocation = (): CompletionLocation => {
+    const workLocationLat =
+      workOrder.workLocationLat != null ? Number(workOrder.workLocationLat) : null;
+    const workLocationLng =
+      workOrder.workLocationLng != null ? Number(workOrder.workLocationLng) : null;
+    const hasPin =
+      Number.isFinite(workLocationLat) && Number.isFinite(workLocationLng);
+    return {
+      workLocationLat: hasPin ? workLocationLat : null,
+      workLocationLng: hasPin ? workLocationLng : null,
+      workLocationAddress: workOrder.workLocationAddress ?? null,
+      workLocation: hasPin
+        ? {
+            lat: workLocationLat!,
+            lng: workLocationLng!,
+            address: workOrder.workLocationAddress ?? undefined,
+          }
+        : null,
+      controllerLetter: workOrder.controllerLetter ?? null,
+      zoneNumber: workOrder.zoneNumber ?? null,
+      fieldWorkType: workOrder.fieldWorkType ?? null,
+      fieldWorkTypeDetails: workOrder.fieldWorkTypeDetails ?? "",
+      workLocationSource:
+        workOrder.workLocationSource === "gps" ||
+        workOrder.workLocationSource === "manual"
+          ? workOrder.workLocationSource
+          : null,
+      workLocationAccuracyM:
+        workOrder.workLocationAccuracyM != null
+          ? Number(workOrder.workLocationAccuracyM)
+          : null,
+      workLocationGpsError: workOrder.workLocationGpsError ?? null,
+    };
+  };
+  const [completionLocation, setCompletionLocation] =
+    useState<CompletionLocation>(initialCompletionLocation);
+  const [locationViolations, setLocationViolations] =
+    useState<LocationGateViolation[]>([]);
+  const [locationGateEvaluated, setLocationGateEvaluated] = useState(false);
+  const locationRevisionRef = useRef(0);
+  const enforceLocationGate = isLocationGateEnforced(
+    workOrder.createdAt,
+    WORK_ORDER_LOCATION_GATE_EFFECTIVE_AT,
+  );
 
-  // Optimistically update the React Query caches AND the local livePin
-  // so the rendered card refreshes immediately. Cache writes are typed
-  // through WorkOrder; no `any` casts.
-  const applyOptimisticPin = (next: PinFields) => {
-    setLivePin(next);
-    // The cached WorkOrder uses Drizzle decimal columns (string | null),
-    // so we serialise the numeric pin values back to strings before
-    // merging into the cached row. No `any` casts.
+  const applyOptimisticLocation = (next: CompletionLocation) => {
+    setCompletionLocation(next);
     const cachePatch: Partial<WorkOrder> = {
       workLocationLat: next.workLocationLat != null ? String(next.workLocationLat) : null,
       workLocationLng: next.workLocationLng != null ? String(next.workLocationLng) : null,
       workLocationAddress: next.workLocationAddress,
+      controllerLetter: next.controllerLetter,
+      zoneNumber: next.zoneNumber,
+      fieldWorkType: next.fieldWorkType,
+      fieldWorkTypeDetails: next.fieldWorkTypeDetails.trim() || null,
+      workLocationSource: next.workLocationSource,
+      workLocationAccuracyM:
+        next.workLocationAccuracyM != null
+          ? String(next.workLocationAccuracyM)
+          : null,
+      workLocationGpsError: next.workLocationGpsError,
     };
     queryClient.setQueryData<WorkOrder | undefined>(
       ["/api/work-orders", workOrder.id],
@@ -158,8 +206,15 @@ export function WorkOrderCompletion({
     );
   };
 
-  const updatePinMutation = useMutation({
-    mutationFn: async (payload: { workLocationLat: number | null; workLocationLng: number | null; workLocationAddress: string | null }) => {
+  const updateLocationMutation = useMutation({
+    mutationFn: async ({
+      payload,
+    }: {
+      payload: WorkOrderLocationPatchPayload;
+      next: CompletionLocation;
+      previous: CompletionLocation;
+      revision: number;
+    }) => {
       return await patchWorkOrderLocation(workOrder.id, payload);
     },
     onSuccess: () => {
@@ -168,74 +223,6 @@ export function WorkOrderCompletion({
     },
   });
 
-  const handleImHere = () => {
-    if (typeof navigator === "undefined" || !navigator.geolocation) {
-      toast({
-        title: "Couldn't get your location",
-        description: "This device doesn't expose GPS to the browser. Try a phone instead.",
-        variant: "destructive",
-      });
-      return;
-    }
-    const previous: PinFields = livePin;
-    setPinningHere(true);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const next = {
-          workLocationLat: pos.coords.latitude,
-          workLocationLng: pos.coords.longitude,
-          workLocationAddress: null,
-        };
-        // Optimistic local update so the card refreshes immediately.
-        applyOptimisticPin(next);
-        updatePinMutation.mutate(next, {
-          onSuccess: () => {
-            setPinningHere(false);
-            toast({
-              title: isProbablyOffline()
-                ? "Work location queued"
-                : "Pin moved to your current location",
-              description: `${next.workLocationLat.toFixed(6)}, ${next.workLocationLng.toFixed(6)}`,
-              action: (
-                <ToastAction
-                  altText="Undo"
-                  onClick={() => {
-                    applyOptimisticPin(previous);
-                    updatePinMutation.mutate(previous);
-                  }}
-                >
-                  Undo
-                </ToastAction>
-              ),
-            });
-          },
-          onError: (err: unknown) => {
-            // Roll back the optimistic update.
-            applyOptimisticPin(previous);
-            setPinningHere(false);
-            const message =
-              err instanceof Error
-                ? err.message
-                : "We brought your old pin back. Please try again.";
-            toast({
-              title: "Couldn't save the new pin",
-              description: message,
-              variant: "destructive",
-            });
-          },
-        });
-      },
-      (err) => {
-        setPinningHere(false);
-        toast({
-          title: "Couldn't get your location",
-          description: err.message || "Allow location access for this site and try again.",
-          variant: "destructive",
-        });
-      },
-      { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 },
-    );
-  };
   const [completionData, setCompletionData] = useState<WorkOrderCompletionData | null>(null);
   const [partsPickerOpen, setPartsPickerOpen] = useState(false);
   const [aiSuggestion, setAiSuggestion] = useState<string | null>(null);
@@ -248,28 +235,73 @@ export function WorkOrderCompletion({
     enabled: !!workOrder.customerId,
   });
 
-  const handleLocationSelect = (location: { lat: number; lng: number; address?: string }) => {
-    const previous: PinFields = livePin;
-    const next: PinFields = {
+  const persistLocation = (
+    next: CompletionLocation,
+    previous: CompletionLocation,
+  ) => {
+    const revision = ++locationRevisionRef.current;
+    applyOptimisticLocation(next);
+    const payload: WorkOrderLocationPatchPayload = {
+        workLocationLat: next.workLocationLat,
+        workLocationLng: next.workLocationLng,
+        workLocationAddress: next.workLocationAddress,
+        controllerLetter: next.controllerLetter,
+        zoneNumber: next.zoneNumber,
+        fieldWorkType: next.fieldWorkType,
+        fieldWorkTypeDetails: next.fieldWorkTypeDetails.trim() || null,
+        workLocationSource: next.workLocationSource,
+        workLocationAccuracyM: next.workLocationAccuracyM,
+        workLocationGpsError: next.workLocationGpsError,
+    };
+    updateLocationMutation.mutate(
+      { payload, next, previous, revision },
+      {
+        onSuccess: () => {
+          if (locationRevisionRef.current === revision) {
+            applyOptimisticLocation(next);
+          }
+        },
+        onError: (err: unknown) => {
+          if (locationRevisionRef.current !== revision) return;
+          applyOptimisticLocation(previous);
+          const message =
+            err instanceof Error
+              ? err.message
+              : "We restored your previous location details. Please try again.";
+          toast({
+            title: "Couldn't save the work location",
+            description: message,
+            variant: "destructive",
+          });
+        },
+      },
+    );
+  };
+
+  const handleLocationSelect = (location: {
+    lat: number;
+    lng: number;
+    address?: string;
+    source?: "gps" | "manual";
+    accuracyM?: number | null;
+    gpsError?: string | null;
+  }) => {
+    const previous = completionLocation;
+    const next: CompletionLocation = {
+      ...completionLocation,
       workLocationLat: location.lat,
       workLocationLng: location.lng,
       workLocationAddress: location.address ?? null,
-    };
-    applyOptimisticPin(next);
-    updatePinMutation.mutate(next, {
-      onError: (err: unknown) => {
-        applyOptimisticPin(previous);
-        const message =
-          err instanceof Error
-            ? err.message
-            : "We restored your old pin. Please try again.";
-        toast({
-          title: "Couldn't save the new pin",
-          description: message,
-          variant: "destructive",
-        });
+      workLocation: {
+        lat: location.lat,
+        lng: location.lng,
+        address: location.address,
       },
-    });
+      workLocationSource: location.source ?? "manual",
+      workLocationAccuracyM: location.accuracyM ?? null,
+      workLocationGpsError: location.gpsError ?? null,
+    };
+    persistLocation(next, previous);
   };
 
   const customerBranches: string[] = Array.isArray(customer?.branches) ? customer.branches : [];
@@ -464,6 +496,18 @@ export function WorkOrderCompletion({
       return;
     }
 
+    if (
+      enforceLocationGate &&
+      (!locationGateEvaluated || locationViolations.length > 0)
+    ) {
+      toast({
+        title: "Work location incomplete",
+        description: "Complete every item in the location card before reviewing this work order.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     // Store the form data and show summary
     setCompletionData(data);
     setShowSummary(true);
@@ -471,7 +515,18 @@ export function WorkOrderCompletion({
 
   const onFinalSubmit = async () => {
     if (!completionData) return;
-    if (updatePinMutation.isPending) {
+    if (
+      enforceLocationGate &&
+      (!locationGateEvaluated || locationViolations.length > 0)
+    ) {
+      toast({
+        title: "Work location incomplete",
+        description: "Return to the form and complete every item in the location card.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (updateLocationMutation.isPending) {
       toast({
         title: "Saving work location",
         description: "Wait for the location to be saved before completing this work order.",
@@ -543,6 +598,9 @@ export function WorkOrderCompletion({
     form.reset();
     setUsedParts([]);
     setPhotos([]);
+    setCompletionLocation(initialCompletionLocation());
+    setLocationViolations([]);
+    setLocationGateEvaluated(false);
     onClose();
   };
 
@@ -725,7 +783,12 @@ export function WorkOrderCompletion({
               </Button>
               <Button 
                 onClick={onFinalSubmit}
-                disabled={isSubmitting}
+                disabled={
+                  isSubmitting ||
+                  (enforceLocationGate &&
+                    (!locationGateEvaluated ||
+                      locationViolations.length > 0))
+                }
                 className="bg-green-600 hover:bg-green-700 text-white px-6 w-full sm:w-auto min-h-[44px]"
               >
                 {isSubmitting ? "Submitting..." : "Submit Work Order"}
@@ -765,36 +828,45 @@ export function WorkOrderCompletion({
               </Card>
             )}
 
-            {/* Interactive map + location controls */}
-            <div className="space-y-2">
-              <CustomerLocationPicker
-                customerId={workOrder.customerId}
-                selectedLocation={
-                  livePin.workLocationLat != null && livePin.workLocationLng != null
-                    ? {
-                        lat: livePin.workLocationLat,
-                        lng: livePin.workLocationLng,
-                        address: livePin.workLocationAddress ?? undefined,
-                      }
-                    : null
-                }
-                onLocationSelect={handleLocationSelect}
-              />
-              {/* Get directions + I'm here — kept alongside the map */}
-              <div className="flex items-center gap-2 justify-end">
+            {/* Canonical online work-location capture */}
+            <CustomerLocationPicker
+              customerId={workOrder.customerId}
+              hasCustomerAddress={!!customer?.address}
+              selectedLocation={completionLocation.workLocation}
+              onLocationSelect={handleLocationSelect}
+            >
+              <div className="border-t pt-4">
+                <WorkLocationControls
+                  customerId={workOrder.customerId}
+                  value={completionLocation}
+                  onChange={(next) =>
+                    persistLocation(next, completionLocation)
+                  }
+                  enforceLocationGate={enforceLocationGate}
+                  onGateStateChange={(_complete, violations) =>
+                    {
+                      setLocationViolations(violations);
+                      setLocationGateEvaluated(true);
+                    }
+                  }
+                  showStatus
+                  grouped
+                />
+              </div>
+              <div className="flex items-center gap-2 justify-end border-t pt-3">
                 {(() => {
                   const mapsUrl = buildMapsUrl({
-                    lat: livePin.workLocationLat,
-                    lng: livePin.workLocationLng,
-                    address: livePin.workLocationAddress,
+                    lat: completionLocation.workLocationLat,
+                    lng: completionLocation.workLocationLng,
+                    address: completionLocation.workLocationAddress,
                     label:
-                      livePin.workLocationAddress ||
+                      completionLocation.workLocationAddress ||
                       workOrder.projectAddress ||
                       workOrder.customerName,
                   });
                   const hasPin =
-                    livePin.workLocationLat != null &&
-                    livePin.workLocationLng != null;
+                    completionLocation.workLocationLat != null &&
+                    completionLocation.workLocationLng != null;
                   if (!hasPin || !mapsUrl) return null;
                   return (
                     <Button
@@ -816,23 +888,8 @@ export function WorkOrderCompletion({
                     </Button>
                   );
                 })()}
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={handleImHere}
-                  disabled={pinningHere || updatePinMutation.isPending}
-                  className="border-blue-600 text-blue-700 hover:bg-blue-50"
-                >
-                  {pinningHere || updatePinMutation.isPending ? (
-                    <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
-                  ) : (
-                    <Crosshair className="w-3.5 h-3.5 mr-1.5" />
-                  )}
-                  I'm here
-                </Button>
               </div>
-            </div>
+            </CustomerLocationPicker>
 
             {/* Work Summary */}
             <Card>
@@ -1167,13 +1224,16 @@ export function WorkOrderCompletion({
                 disabled={
                   isSubmitting ||
                   isBranchCheckPending ||
-                  updatePinMutation.isPending
+                  updateLocationMutation.isPending ||
+                  (enforceLocationGate &&
+                    (!locationGateEvaluated ||
+                      locationViolations.length > 0))
                 }
                 className="bg-green-600 hover:bg-green-700 text-white w-full sm:w-auto min-h-[44px]"
               >
                 {isBranchCheckPending
                   ? "Loading..."
-                  : updatePinMutation.isPending
+                  : updateLocationMutation.isPending
                     ? "Saving location..."
                     : isSubmitting
                       ? "Reviewing..."

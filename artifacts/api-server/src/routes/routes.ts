@@ -70,7 +70,10 @@ import {
 import { isUnroutedFinding, wcbIsEligible } from "../lib/finding-predicates";
 import { computeBillingSheetTotal } from "../billing-sheet-total";
 import { computeDeferredItems } from "../lib/work-order-deferred-items";
-import { workOrderLocationGateError } from "../lib/work-order-location-gate";
+import {
+  getWorkOrderLocationViolations,
+  workOrderLocationGateError,
+} from "../lib/work-order-location-gate";
 import type {
   QbTokenResponse,
   QbTokenResponseValidated,
@@ -603,11 +606,24 @@ const requireWorkOrderUpdateAccess = async (req: any, res: any, next: any) => {
       }
     }
 
-    // Field techs may also patch ONLY the work-location pin fields on a work order
-    // assigned to them ("I'm here" on the completion screen). Cancelled tickets remain locked.
-    const PIN_KEYS = new Set(['workLocationLat', 'workLocationLng', 'workLocationAddress']);
-    const isPinOnlyEdit = updateKeys.length > 0 && updateKeys.every(k => PIN_KEYS.has(k));
-    if (isPinOnlyEdit) {
+    // Field techs may save any partial subset of the shared work-location card
+    // on an assigned work order. Completion is gated separately; ordinary
+    // PATCH remains permissive so each selection can be saved immediately.
+    const LOCATION_KEYS = new Set([
+      'workLocationLat',
+      'workLocationLng',
+      'workLocationAddress',
+      'controllerLetter',
+      'zoneNumber',
+      'fieldWorkType',
+      'fieldWorkTypeDetails',
+      'workLocationSource',
+      'workLocationAccuracyM',
+      'workLocationGpsError',
+    ]);
+    const isLocationOnlyEdit =
+      updateKeys.length > 0 && updateKeys.every(k => LOCATION_KEYS.has(k));
+    if (isLocationOnlyEdit) {
       try {
         const workOrder = await storage.getWorkOrder(workOrderId, fieldTechCompanyId);
         const userIdNum = parseInt(userId as string);
@@ -619,7 +635,7 @@ const requireWorkOrderUpdateAccess = async (req: any, res: any, next: any) => {
         }
         return next();
       } catch (error) {
-        console.error('Error checking work order pin edit access:', error);
+        console.error('Error checking work order location edit access:', error);
       }
     }
   }
@@ -9574,11 +9590,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
         laborMode: incomingLaborMode,
       } = req.body;
 
-      const callerCompanyIdComplete0 = (req as any).authenticatedUserRole === 'super_admin' ? null : ((req as any).authenticatedUserCompanyId ?? null);
+      const isSuperAdminComplete0 =
+        (req as any).authenticatedUserRole === 'super_admin';
+      const callerCompanyIdComplete0 = isSuperAdminComplete0
+        ? null
+        : ((req as any).authenticatedUserCompanyId ?? null);
+      if (!isSuperAdminComplete0 && callerCompanyIdComplete0 == null) {
+        res.status(404).json({ message: "Work order not found" });
+        return;
+      }
 
-      // Billing lock: prevent completing an already-billed work order
+      // Read through the caller's company scope before any completion mutation.
       const existingWoForComplete = await storage.getWorkOrder(workOrderId, callerCompanyIdComplete0);
-      if (existingWoForComplete && (existingWoForComplete.invoiceId || existingWoForComplete.status === 'billed')) {
+      if (!existingWoForComplete) {
+        res.status(404).json({ message: "Work order not found" });
+        return;
+      }
+      if (existingWoForComplete.invoiceId || existingWoForComplete.status === 'billed') {
         res.status(409).json({ message: "This record has been billed and cannot be edited." });
         return;
       }
@@ -9588,12 +9616,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const completedByUserName = completedByUser?.name || req.headers['x-user-name'];
 
       // Merge creation photos with completion photos (don't overwrite)
-      const existingWorkOrder = await storage.getWorkOrder(workOrderId, callerCompanyIdComplete0);
-      const locationGateError = existingWorkOrder
-        ? workOrderLocationGateError(existingWorkOrder)
-        : null;
+      const existingWorkOrder = existingWoForComplete;
+      const locationRule = await getFieldWorkTypeRule(
+        existingWorkOrder.companyId,
+        existingWorkOrder.fieldWorkType,
+      );
+      const locationViolations = getWorkOrderLocationViolations(
+        existingWorkOrder,
+        locationRule,
+      );
+      const locationGateError = workOrderLocationGateError(existingWorkOrder, locationRule);
       if (locationGateError) {
-        res.status(400).json({ message: locationGateError });
+        res.status(400).json({
+          message: locationGateError,
+          violations: locationViolations,
+        });
         return;
       }
 
@@ -10067,9 +10104,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(404).json({ message: "Work order not found" });
         return;
       }
-      const locationGateError = workOrderLocationGateError(existingWorkOrder);
+      const locationRule = await getFieldWorkTypeRule(
+        existingWorkOrder.companyId,
+        existingWorkOrder.fieldWorkType,
+      );
+      const locationViolations = getWorkOrderLocationViolations(
+        existingWorkOrder,
+        locationRule,
+      );
+      const locationGateError = workOrderLocationGateError(existingWorkOrder, locationRule);
       if (locationGateError) {
-        res.status(400).json({ message: locationGateError });
+        res.status(400).json({
+          message: locationGateError,
+          violations: locationViolations,
+        });
         return;
       }
 
