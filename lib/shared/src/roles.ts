@@ -192,6 +192,12 @@ export const CAN_VIEW_BUDGETS = new Set<Role>([
   "billing_manager",
 ]);
 
+/** Preview and apply annual budget goals in bulk. */
+export const CAN_MANAGE_BULK_BUDGET_GOALS = new Set<Role>([
+  "super_admin",
+  "company_admin",
+]);
+
 /**
  * See part costs, margins, labor rates, and Financial Pulse.
  * Financial Pulse intentionally diverges from this capability: irrigation

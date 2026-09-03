@@ -21,19 +21,12 @@ import { apiRequest } from "@/lib/queryClient";
 import { insertCustomerSchema } from "@workspace/db/schema";
 import type { Customer, User } from "@workspace/db/schema";
 import { composeStructuredAddress } from "@/lib/customer-address";
+import { parseBudgetGoalInput } from "@workspace/shared";
 
 const moneyOrBlank = z
   .string()
   .regex(/^(\d+(\.\d{1,2})?)?$/u, "Must be a valid amount")
   .optional();
-
-export function parseBudgetGoalInput(value: unknown): number | null {
-  if (value == null) return null;
-  const cleaned = String(value).trim().replace(/[$,\s]/g, "");
-  if (cleaned === "") return null;
-  const parsed = Number(cleaned);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-}
 
 const DEFAULT_SEASON_CURVE = [
   { month: 4, percent: 0 },

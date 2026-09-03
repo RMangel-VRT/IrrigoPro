@@ -19,7 +19,28 @@ export interface GenerateBudgetMonthsResult {
   months: Array<{ month: number; amount: number; isManualOverride: boolean }>;
 }
 
-type BudgetDb = typeof defaultDb;
+export function projectBudgetMonths(input: {
+  annualGoal: number;
+  customerCurve?: SeasonCurveEntry[] | null;
+  companyCurve?: SeasonCurveEntry[] | null;
+  existing?: Array<{ month: number; amount: string | number; isManualOverride: boolean }>;
+}): GenerateBudgetMonthsResult["months"] {
+  if (!Number.isFinite(input.annualGoal) || input.annualGoal < 0) {
+    throw new Error("Annual budget goal must be a non-negative amount");
+  }
+  const curve = resolveEffectiveCurve(input.customerCurve, input.companyCurve);
+  validateCurve(curve);
+  const generated = distributeGoal(input.annualGoal, curve);
+  const existingByMonth = new Map((input.existing ?? []).map((row) => [row.month, row]));
+  return generated.map((row) => {
+    const current = existingByMonth.get(row.month);
+    return current?.isManualOverride
+      ? { month: row.month, amount: Number(current.amount), isManualOverride: true }
+      : { ...row, isManualOverride: false };
+  });
+}
+
+type BudgetDb = Pick<typeof defaultDb, "select" | "insert" | "update" | "delete">;
 
 export const DEFAULT_SEASON_CURVE: SeasonCurveEntry[] = [
   { month: 4, percent: 0 },
@@ -110,19 +131,11 @@ export async function generateBudgetMonths(
     ));
     return { year, inserted: 0, updated: 0, skipped: 0, months: [] };
   }
-  if (!Number.isFinite(goal) || goal < 0) throw new Error("Annual budget goal must be a non-negative amount");
-
   const [company] = await db
     .select({ budgetSeasonCurve: companies.budgetSeasonCurve })
     .from(companies)
     .where(eq(companies.id, customer.companyId))
     .limit(1);
-  const curve = resolveEffectiveCurve(
-    customer.budgetSeasonCurveOverride,
-    company?.budgetSeasonCurve,
-  );
-  validateCurve(curve);
-  const generated = distributeGoal(goal, curve);
   const existing = await db
     .select({
       month: customerBudgetMonths.month,
@@ -136,6 +149,12 @@ export async function generateBudgetMonths(
       eq(customerBudgetMonths.year, year),
     ));
   const byMonth = new Map(existing.map((row) => [row.month, row]));
+  const projected = projectBudgetMonths({
+    annualGoal: goal,
+    customerCurve: customer.budgetSeasonCurveOverride,
+    companyCurve: company?.budgetSeasonCurve,
+    existing,
+  });
   await db.delete(customerBudgetMonths).where(and(
     eq(customerBudgetMonths.companyId, customer.companyId),
     eq(customerBudgetMonths.customerId, customerId),
@@ -147,15 +166,11 @@ export async function generateBudgetMonths(
   let skipped = 0;
   const resultMonths: GenerateBudgetMonthsResult["months"] = [];
 
-  for (const row of generated) {
+  for (const row of projected) {
     const current = byMonth.get(row.month);
-    if (current?.isManualOverride) {
+    if (row.isManualOverride) {
       skipped++;
-      resultMonths.push({
-        month: row.month,
-        amount: Number(current.amount),
-        isManualOverride: true,
-      });
+      resultMonths.push(row);
       continue;
     }
     const amount = row.amount.toFixed(2);
@@ -179,7 +194,7 @@ export async function generateBudgetMonths(
         set: { amount, isManualOverride: false, updatedAt: new Date() },
       });
     current ? updated++ : inserted++;
-    resultMonths.push({ ...row, isManualOverride: false });
+    resultMonths.push(row);
   }
   return { year, inserted, updated, skipped, months: resultMonths };
 }

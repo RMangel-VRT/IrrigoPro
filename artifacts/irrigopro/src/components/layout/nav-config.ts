@@ -308,6 +308,7 @@ export const superAdminNav: NavConfig = {
       items: [
         { type: "leaf", label: "Controllers & Zones", path: "/admin/controllers", icon: Cpu },
         { type: "leaf", label: "Financial Pulse", path: "/financial-pulse", icon: Activity },
+        { type: "leaf", label: "Budget Goals", path: "/admin/budget-goals", icon: DollarSign },
         { type: "leaf", label: "Client Errors", path: "/admin/client-errors", icon: AlertTriangle },
         { type: "leaf", label: "QuickBooks", path: "/quickbooks", icon: Calculator },
       ],
@@ -400,6 +401,7 @@ export const companyAdminNav: NavConfig = {
         { type: "leaf", label: "Company Profile", path: "/company-profile", icon: Building2 },
         { type: "leaf", label: "QuickBooks", path: "/quickbooks", icon: Calculator },
         { type: "leaf", label: "Labor Rates", path: "/labor-rates", icon: DollarSign },
+        { type: "leaf", label: "Budget Goals", path: "/admin/budget-goals", icon: DollarSign },
         { type: "leaf", label: "Wet Check Issue Types", path: "/admin/issue-types", icon: Droplets },
       ],
     },

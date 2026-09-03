@@ -378,6 +378,7 @@ describe("no other role's nav structure moved (Task #1914)", () => {
       "  leaf /company-profile",
       "  leaf /quickbooks",
       "  leaf /labor-rates",
+      "  leaf /admin/budget-goals",
       "  leaf /admin/issue-types",
     ]);
   });
@@ -397,6 +398,7 @@ describe("no other role's nav structure moved (Task #1914)", () => {
       "group System",
       "  leaf /admin/controllers",
       "  leaf /financial-pulse",
+      "  leaf /admin/budget-goals",
       "  leaf /admin/client-errors",
       "  leaf /quickbooks",
       "group Data migrations",

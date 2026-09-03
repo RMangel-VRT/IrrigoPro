@@ -21,16 +21,29 @@ import {
   companies,
   customerBudgetMonths,
 } from "@workspace/db/schema";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { getRecentBudgetAlertEvents } from "../services/budget-alert-service";
 import {
   applyMonthOverride,
+  generateBudgetMonths,
+  projectBudgetMonths,
   resolveEffectiveCurve,
   resetMonthOverride,
 } from "../services/generate-budget-months";
+import { recordAuditEvent } from "./audit-log";
+import {
+  canonicalBudgetGoalRows,
+  classifyBudgetGoalRows,
+  issueBudgetGoalConfirmation,
+  parseBudgetGoalPaste,
+  verifyBudgetGoalConfirmation,
+  type ClassifiedBudgetGoalRow,
+} from "../lib/budget-goal-bulk";
+import { hasCapability, CAN_MANAGE_BULK_BUDGET_GOALS } from "@workspace/shared";
 
 export interface RegisterBudgetRoutesDeps {
   requireAuthentication: RequestHandler;
+  requireBulkBudgetGoalsAdmin?: RequestHandler;
 }
 
 // Slice 1 spec: only super_admin / company_admin / billing_manager can
@@ -52,10 +65,370 @@ function parseDecimal(raw: unknown): number | null {
 const FIRST_SEASON_MONTH = 4;
 const LAST_SEASON_MONTH = 10;
 
+type BulkBudgetRequest = {
+  year: number;
+  companyId: number | null;
+  text: string;
+};
+
+function parseBulkBudgetRequest(body: any): BulkBudgetRequest | { error: { status: number; message: string } } {
+  const year = Number(body?.year);
+  if (!Number.isInteger(year) || year < 2000 || year > 2200) {
+    return { error: { status: 400, message: "Choose a valid budget year." } };
+  }
+  if (typeof body?.text !== "string" || body.text.trim() === "") {
+    return { error: { status: 400, message: "Paste at least one customer and annual goal row." } };
+  }
+  if (body.text.length > 100_000) {
+    return { error: { status: 413, message: "The pasted budget list is too large." } };
+  }
+  const companyId = body?.companyId == null || body.companyId === ""
+    ? null
+    : Number(body.companyId);
+  if (companyId != null && (!Number.isInteger(companyId) || companyId <= 0)) {
+    return { error: { status: 400, message: "Choose a valid company." } };
+  }
+  return { year, companyId, text: body.text };
+}
+
+async function resolveBulkBudgetCompany(
+  req: any,
+  requestedCompanyId: number | null,
+): Promise<{ companyId: number } | { status: number; message: string }> {
+  const role = req.authenticatedUserRole as string | undefined;
+  const callerCompanyId = req.authenticatedUserCompanyId as number | null | undefined;
+  if (!hasCapability(role, CAN_MANAGE_BULK_BUDGET_GOALS)) {
+    return { status: 403, message: "Forbidden" };
+  }
+  const companyId = role === "super_admin" ? requestedCompanyId : callerCompanyId ?? null;
+  if (companyId == null) {
+    return { status: 403, message: "A company context is required." };
+  }
+  if (role !== "super_admin" && requestedCompanyId != null && requestedCompanyId !== companyId) {
+    return { status: 404, message: "Company not found" };
+  }
+  const company = await storage.getCompany(companyId);
+  if (!company) return { status: 404, message: "Company not found" };
+  return { companyId };
+}
+
+async function addSeasonProjection(
+  rows: ClassifiedBudgetGoalRow[],
+  companyId: number,
+  year: number,
+): Promise<Array<ClassifiedBudgetGoalRow & {
+  beforeGoal: number | null;
+  goal: number | null;
+  months: Array<{ month: number; amount: number; isManualOverride: boolean }>;
+  preservedManualOverrides: number[];
+}>> {
+  const [company] = await db
+    .select({ budgetSeasonCurve: companies.budgetSeasonCurve })
+    .from(companies)
+    .where(eq(companies.id, companyId))
+    .limit(1);
+  const projected: Array<ClassifiedBudgetGoalRow & {
+    beforeGoal: number | null;
+    goal: number | null;
+    months: Array<{ month: number; amount: number; isManualOverride: boolean }>;
+    preservedManualOverrides: number[];
+  }> = [];
+  for (const row of rows) {
+    const customer = row.customerId == null
+      ? null
+      : (await storage.getCustomer(row.customerId));
+    const beforeGoal = customer?.annualBudgetGoal == null
+      ? null
+      : parseDecimal(customer.annualBudgetGoal);
+    let months: Array<{ month: number; amount: number; isManualOverride: boolean }> = [];
+    const preservedManualOverrides: number[] = [];
+    if (customer && row.goal != null && (row.status === "matched" || row.status === "unchanged")) {
+      const existing = await db
+        .select({
+          month: customerBudgetMonths.month,
+          amount: customerBudgetMonths.amount,
+          isManualOverride: customerBudgetMonths.isManualOverride,
+        })
+        .from(customerBudgetMonths)
+        .where(and(
+          eq(customerBudgetMonths.companyId, companyId),
+          eq(customerBudgetMonths.customerId, customer.id),
+          eq(customerBudgetMonths.year, year),
+        ));
+      months = projectBudgetMonths({
+        annualGoal: row.goal,
+        customerCurve: customer.budgetSeasonCurveOverride,
+        companyCurve: company?.budgetSeasonCurve,
+        existing,
+      });
+      preservedManualOverrides.push(...months.filter((entry) => entry.isManualOverride).map((entry) => entry.month));
+    }
+    projected.push({
+      ...row,
+      beforeGoal,
+      months,
+      preservedManualOverrides,
+    });
+  }
+  return projected;
+}
+
+function bulkRowsResponse(
+  rows: Array<ClassifiedBudgetGoalRow & {
+    beforeGoal: number | null;
+    months: Array<{ month: number; amount: number; isManualOverride: boolean }>;
+    preservedManualOverrides: number[];
+  }>,
+) {
+  return rows.map((row) => ({
+    rowNumber: row.rowNumber,
+    customerName: row.customerName,
+    goalText: row.goalText,
+    status: row.status,
+    customerId: row.customerId,
+    matchedCustomerName: row.matchedCustomerName,
+    goal: row.goal,
+    beforeGoal: row.beforeGoal,
+    reason: row.reason,
+    months: row.months,
+    preservedManualOverrides: row.preservedManualOverrides,
+  }));
+}
+
+export async function applyBulkBudgetGoalRow(
+  args: {
+    req: any;
+    customerId: number;
+    customerName: string;
+    companyId: number;
+    year: number;
+    beforeGoal: string | number | null;
+    nextGoal: number;
+  },
+  deps: {
+    database?: typeof db;
+    generateMonths?: typeof generateBudgetMonths;
+    audit?: typeof recordAuditEvent;
+  } = {},
+) {
+  const database = deps.database ?? db;
+  const generateMonths = deps.generateMonths ?? generateBudgetMonths;
+  const audit = deps.audit ?? recordAuditEvent;
+  return database.transaction(async (tx) => {
+    const [customer] = await tx
+      .update(customersTable)
+      .set({ annualBudgetGoal: args.nextGoal.toFixed(2) })
+      .where(and(
+        eq(customersTable.id, args.customerId),
+        eq(customersTable.companyId, args.companyId),
+        sql`${customersTable.annualBudgetGoal} IS DISTINCT FROM ${args.nextGoal.toFixed(2)}`,
+      ))
+      .returning();
+    if (!customer) {
+      const [current] = await tx
+        .select({ annualBudgetGoal: customersTable.annualBudgetGoal })
+        .from(customersTable)
+        .where(and(
+          eq(customersTable.id, args.customerId),
+          eq(customersTable.companyId, args.companyId),
+        ))
+        .limit(1);
+      if (!current) throw new Error("Customer no longer exists in the selected company.");
+      const currentGoal = current.annualBudgetGoal == null ? null : Number(current.annualBudgetGoal);
+      if (currentGoal !== null && Math.round(currentGoal * 100) === Math.round(args.nextGoal * 100)) {
+        return { unchanged: true as const, months: [] };
+      }
+      throw new Error("Customer goal changed before this update could be applied.");
+    }
+    const generated = await generateMonths(customer.id, args.year, tx);
+    await audit(args.req, {
+      actorUserId: typeof args.req.authenticatedUserId === "number" ? args.req.authenticatedUserId : null,
+      actorLabel: args.req.authenticatedUserName ?? null,
+      actorRole: args.req.authenticatedUserRole ?? null,
+      actorCompanyId: args.req.authenticatedUserCompanyId ?? null,
+      actionType: "data",
+      action: "budget.annual_goal_bulk_updated",
+      severity: "info",
+      targetType: "customer",
+      targetId: String(customer.id),
+      summary: `Annual budget goal updated for ${args.customerName}`,
+      details: {
+        origin: "bulk_budget_goals",
+        targetCompanyId: args.companyId,
+        targetYear: args.year,
+        beforeGoal: args.beforeGoal,
+        afterGoal: args.nextGoal.toFixed(2),
+      },
+    }, { tx, strict: true });
+    return { ...generated, unchanged: false as const };
+  });
+}
+
 export function registerBudgetRoutes(
   app: Express,
-  { requireAuthentication }: RegisterBudgetRoutesDeps,
+  { requireAuthentication, requireBulkBudgetGoalsAdmin }: RegisterBudgetRoutesDeps,
 ): void {
+  const requireBulkBudgetAccess = requireBulkBudgetGoalsAdmin ?? requireAuthentication;
+
+  const previewBulkBudgetGoals = async (req: any, res: any) => {
+    try {
+      const parsed = parseBulkBudgetRequest(req.body);
+      if ("error" in parsed) {
+        res.status(parsed.error.status).json({ message: parsed.error.message });
+        return;
+      }
+      const resolved = await resolveBulkBudgetCompany(req, parsed.companyId);
+      if ("status" in resolved) {
+        res.status(resolved.status).json({ message: resolved.message });
+        return;
+      }
+      const pasteRows = parseBudgetGoalPaste(parsed.text);
+      if (pasteRows.length === 0) {
+        res.status(400).json({ message: "Paste at least one customer and annual goal row." });
+        return;
+      }
+      const customers = await storage.getCustomers(resolved.companyId);
+      const classified = classifyBudgetGoalRows(pasteRows, customers);
+      const rows = await addSeasonProjection(classified, resolved.companyId, parsed.year);
+      const confirmation = issueBudgetGoalConfirmation({
+        userId: req.authenticatedUserId,
+        companyId: resolved.companyId,
+        year: parsed.year,
+        canonicalRows: canonicalBudgetGoalRows(pasteRows),
+      }, new Date());
+      const counts = {
+        total: rows.length,
+        matched: rows.filter((row) => row.status === "matched").length,
+        unchanged: rows.filter((row) => row.status === "unchanged").length,
+        unmatched: rows.filter((row) => row.status === "unmatched").length,
+        ambiguous: rows.filter((row) => row.status === "ambiguous").length,
+        invalid: rows.filter((row) => row.status === "invalid").length,
+      };
+      res.json({
+        year: parsed.year,
+        companyId: resolved.companyId,
+        rows: bulkRowsResponse(rows),
+        counts,
+        confirmationToken: confirmation.token,
+        confirmationExpiresAt: confirmation.expiresAt.toISOString(),
+      });
+    } catch (error) {
+      console.error("Error previewing bulk budget goals:", error);
+      res.status(500).json({ message: "Failed to preview budget goals" });
+    }
+  };
+
+  const confirmBulkBudgetGoals = async (req: any, res: any) => {
+    try {
+      const parsed = parseBulkBudgetRequest(req.body);
+      if ("error" in parsed) {
+        res.status(parsed.error.status).json({ message: parsed.error.message });
+        return;
+      }
+      const resolved = await resolveBulkBudgetCompany(req, parsed.companyId);
+      if ("status" in resolved) {
+        res.status(resolved.status).json({ message: resolved.message });
+        return;
+      }
+      const pasteRows = parseBudgetGoalPaste(parsed.text);
+      const confirmed = verifyBudgetGoalConfirmation(
+        req.body?.confirmationToken,
+        {
+          userId: req.authenticatedUserId,
+          companyId: resolved.companyId,
+          year: parsed.year,
+          canonicalRows: canonicalBudgetGoalRows(pasteRows),
+        },
+        new Date(),
+      );
+      if (!confirmed.ok) {
+        res.status(confirmed.status).json({ message: confirmed.message, reason: confirmed.reason });
+        return;
+      }
+      const customers = await storage.getCustomers(resolved.companyId);
+      const rows = classifyBudgetGoalRows(pasteRows, customers);
+      const results: Array<Record<string, unknown>> = [];
+      for (const row of rows) {
+        if (row.status !== "matched" || row.customerId == null || row.goal == null) {
+          results.push({
+            rowNumber: row.rowNumber,
+            customerName: row.customerName,
+            customerId: row.customerId,
+            outcome: "skipped",
+            status: row.status,
+            reason: row.reason ?? `Row was ${row.status}.`,
+          });
+          continue;
+        }
+        const nextGoal = row.goal;
+        const beforeGoal = customers.find((candidate) => candidate.id === row.customerId)?.annualBudgetGoal ?? null;
+        try {
+          const updated = await applyBulkBudgetGoalRow({
+            req,
+            customerId: row.customerId,
+            customerName: row.matchedCustomerName ?? row.customerName,
+            companyId: resolved.companyId,
+            year: parsed.year,
+            beforeGoal,
+            nextGoal,
+          });
+          if (updated.unchanged) {
+            results.push({
+              rowNumber: row.rowNumber,
+              customerName: row.customerName,
+              customerId: row.customerId,
+              outcome: "skipped",
+              status: "unchanged",
+              beforeGoal,
+              afterGoal: nextGoal,
+              reason: "The annual goal was already updated; no further change was needed.",
+              months: [],
+            });
+            continue;
+          }
+          results.push({
+            rowNumber: row.rowNumber,
+            customerName: row.customerName,
+            customerId: row.customerId,
+            outcome: "changed",
+            status: row.status,
+            beforeGoal,
+            afterGoal: nextGoal,
+            reason: "Annual goal and generated seasonal amounts updated.",
+            months: updated.months,
+          });
+        } catch (error) {
+          console.error(`Bulk budget goal failed for customer ${row.customerId}:`, error);
+          results.push({
+            rowNumber: row.rowNumber,
+            customerName: row.customerName,
+            customerId: row.customerId,
+            outcome: "failed",
+            status: row.status,
+            reason: error instanceof Error ? error.message : "The customer could not be updated.",
+          });
+        }
+      }
+      res.json({
+        year: parsed.year,
+        companyId: resolved.companyId,
+        results,
+        summary: {
+          total: results.length,
+          changed: results.filter((row) => row.outcome === "changed").length,
+          skipped: results.filter((row) => row.outcome === "skipped").length,
+          failed: results.filter((row) => row.outcome === "failed").length,
+        },
+      });
+    } catch (error) {
+      console.error("Error applying bulk budget goals:", error);
+      res.status(500).json({ message: "Failed to apply budget goals" });
+    }
+  };
+
+  app.post("/api/admin/budget-goals/preview", requireAuthentication, requireBulkBudgetAccess, previewBulkBudgetGoals);
+  app.post("/api/admin/budget-goals/confirm", requireAuthentication, requireBulkBudgetAccess, confirmBulkBudgetGoals);
+
   app.get(
     "/api/companies/:id/budget-season-curve",
     requireAuthentication,

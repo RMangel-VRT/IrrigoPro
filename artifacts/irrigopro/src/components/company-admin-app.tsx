@@ -17,6 +17,7 @@ import CustomerSiteMapsPage from "@/pages/customer-site-maps-page";
 import CustomerProfile from "@/pages/customer-profile";
 import CustomerBilling from "@/pages/customer-billing";
 const IrrigationProfilePage = lazy(() => import("@/pages/customers/IrrigationProfile"));
+const AdminBudgetGoalsPage = lazy(() => import("@/pages/admin-budget-goals"));
 import ManagerWorkspace from "@/pages/manager-workspace";
 
 function RedirectToBillingWorkspace() {
@@ -180,6 +181,7 @@ export default function CompanyAdminApp({ user }: CompanyAdminAppProps) {
           <Route path="/parts-settings" component={PartsSettings} />
           <Route path="/labor-rates" component={LaborRates} />
           <Route path="/admin/customers" component={AdminCustomers} />
+          <Route path="/admin/budget-goals" component={AdminBudgetGoalsPage} />
           <Route path="/admin/controllers" component={AdminControllers} />
           <Route path="/customers" component={Customers} />
           <Route path="/customers/:id/profile" component={CustomerProfile} />

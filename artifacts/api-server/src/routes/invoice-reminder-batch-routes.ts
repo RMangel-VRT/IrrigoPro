@@ -25,7 +25,7 @@
  */
 
 import type { Express, RequestHandler } from "express";
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createSingleUseConfirmation } from "../lib/single-use-confirmation";
 import {
   createReminderCore,
   isReminderTemplateChoice,
@@ -58,12 +58,16 @@ export const REMINDER_CONFIRMATION_TTL_MS = 15 * 60 * 1000;
  * outstanding confirmations. That failure mode is "read the list again", not
  * "send without reading it", so it fails in the safe direction.
  */
-const CONFIRMATION_KEY = createHmac(
-  "sha256",
-  process.env.SESSION_SECRET || randomBytes(32),
-)
-  .update("invoice-reminder-batch-confirmation-v1")
-  .digest();
+const confirmation = createSingleUseConfirmation({
+  scope: "invoice-reminder-batch-confirmation-v1",
+  ttlMs: REMINDER_CONFIRMATION_TTL_MS,
+  messages: {
+    required: "Review the list of who will be emailed before sending. No reminders were sent.",
+    mismatch: "This selection no longer matches the list that was confirmed. Review it again — no reminders were sent.",
+    expired: "The confirmation list has expired. Review it again — no reminders were sent.",
+    used: "That batch has already been sent. Review the list again — no reminders were sent.",
+  },
+});
 
 /**
  * Everything the confirmation is a statement about. All of it is signed, so a
@@ -82,35 +86,11 @@ function claimsFingerprint(c: ConfirmationClaims): string {
   return `${String(c.userId ?? "")}|${String(c.companyId ?? "global")}|${ids}|${c.templateKey}`;
 }
 
-function sign(exp: number, nonce: string, claims: ConfirmationClaims): string {
-  return createHmac("sha256", CONFIRMATION_KEY)
-    .update(`${exp}.${nonce}.${claimsFingerprint(claims)}`)
-    .digest("base64url");
-}
-
-/**
- * Nonces already spent. A confirmation authorises ONE run: without this, a
- * token replayed inside its window would let the same twenty customers be
- * mailed twice off a single reading of the list.
- */
-const spentConfirmations = new Map<string, number>();
-
-function forgetExpired(nowMs: number): void {
-  for (const [nonce, exp] of spentConfirmations) {
-    if (exp <= nowMs) spentConfirmations.delete(nonce);
-  }
-}
-
 export function issueConfirmationToken(
   claims: ConfirmationClaims,
   now: Date,
 ): { token: string; expiresAt: Date } {
-  const exp = now.getTime() + REMINDER_CONFIRMATION_TTL_MS;
-  const nonce = randomBytes(12).toString("base64url");
-  return {
-    token: `${exp}.${nonce}.${sign(exp, nonce, claims)}`,
-    expiresAt: new Date(exp),
-  };
+  return confirmation.issue(claimsFingerprint(claims), now);
 }
 
 type ConfirmationCheck =
@@ -126,60 +106,7 @@ export function verifyConfirmationToken(
   claims: ConfirmationClaims,
   now: Date,
 ): ConfirmationCheck {
-  if (typeof token !== "string" || token.length === 0) {
-    return {
-      ok: false,
-      status: 400,
-      reason: "confirmation_required",
-      message:
-        "Review the list of who will be emailed before sending. No reminders were sent.",
-    };
-  }
-  // A single reason for every way a token can fail to match, so the response
-  // cannot be used to probe what a valid selection would have been.
-  const mismatch: ConfirmationCheck = {
-    ok: false,
-    status: 409,
-    reason: "confirmation_mismatch",
-    message:
-      "This selection no longer matches the list that was confirmed. Review it again — no reminders were sent.",
-  };
-
-  const parts = token.split(".");
-  if (parts.length !== 3) return mismatch;
-  const [expRaw, nonce, signature] = parts;
-  const exp = Number(expRaw);
-  if (!Number.isFinite(exp) || !nonce || !signature) return mismatch;
-
-  const expected = sign(exp, nonce, claims);
-  const a = Buffer.from(signature);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return mismatch;
-
-  const nowMs = now.getTime();
-  forgetExpired(nowMs);
-  if (exp <= nowMs) {
-    return {
-      ok: false,
-      status: 409,
-      reason: "confirmation_expired",
-      message:
-        "The confirmation list has expired. Review it again — no reminders were sent.",
-    };
-  }
-  if (spentConfirmations.has(nonce)) {
-    return {
-      ok: false,
-      status: 409,
-      reason: "confirmation_used",
-      message:
-        "That batch has already been sent. Review the list again — no reminders were sent.",
-    };
-  }
-  // Spent at verification, not at completion: a run that dies halfway must not
-  // leave a token that re-mails the invoices it already got through.
-  spentConfirmations.set(nonce, exp);
-  return { ok: true };
+  return confirmation.verify(token, claimsFingerprint(claims), now);
 }
 
 export interface RegisterInvoiceReminderBatchRoutesDeps extends ReminderCoreDeps {

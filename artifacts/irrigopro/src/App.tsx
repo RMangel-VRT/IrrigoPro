@@ -78,6 +78,7 @@ const CombinedReviewPage = lazyPage(() => import("@/pages/wet-checks/CombinedRev
 const SiteMapsPage = lazyPage(() => import("@/pages/site-maps"));
 const AdminMigrationsPage = lazyPage(() => import("@/pages/admin/migrations"));
 const AdminWcLaborBackfillPage = lazyPage(() => import("@/pages/admin-wc-labor-backfill"));
+const AdminBudgetGoalsPage = lazyPage(() => import("@/pages/admin-budget-goals"));
 const WetCheckReconciliationPage = lazyPage(() => import("@/pages/wet-check-reconciliation"));
 const CustomerSiteMapsPage = lazyPage(() => import("@/pages/customer-site-maps-page"));
 const IrrigationProfilePage = lazyPage(() => import("@/pages/customers/IrrigationProfile"));
@@ -505,6 +506,7 @@ function Router() {
                   <Route path="/super-admin/loose-photos" component={SuperAdminLoosePhotosPage} />
                   <Route path="/admin/migrations" component={AdminMigrationsPage} />
                   <Route path="/admin/wc-labor-backfill" component={AdminWcLaborBackfillPage} />
+                   <Route path="/admin/budget-goals" component={AdminBudgetGoalsPage} />
                   <Route path="/admin/wet-check-reconciliation" component={WetCheckReconciliationPage} />
                   <Route path="/reports/missing-location-data" component={MissingLocationDataReportPage} />
                   <Route path="/quickbooks" component={QuickBooksPage} />

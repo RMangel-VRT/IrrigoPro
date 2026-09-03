@@ -27,6 +27,7 @@ import {
   CAN_MANAGE_QUICKBOOKS,
   CAN_MANAGE_FIELD_WORK_TYPES,
   CAN_READ_LOCATION_REPORT,
+  CAN_MANAGE_BULK_BUDGET_GOALS,
 } from "@workspace/shared";
 
 // ── header auth (dev only) ───────────────────────────────────────────────────
@@ -195,6 +196,17 @@ export const requireLocationReportRead: Guard = (req, res, next) => {
   if (!hasCapability(req.authenticatedUserRole, CAN_READ_LOCATION_REPORT)) {
     res.status(403).json({
       message: "Access denied. You do not have permission to read this report.",
+    });
+    return;
+  }
+  next();
+};
+
+/** Preview or apply annual budget goals in bulk. */
+export const requireBulkBudgetGoalsAdmin: Guard = (req, res, next) => {
+  if (!hasCapability(req.authenticatedUserRole, CAN_MANAGE_BULK_BUDGET_GOALS)) {
+    res.status(403).json({
+      message: "Access denied. Bulk budget goals are restricted to administrators.",
     });
     return;
   }

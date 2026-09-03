@@ -1001,6 +1001,7 @@ import {
   requireReminderHistoryRead,
   requireArNotesAccess,
   requireQuickBooksAccess,
+  requireBulkBudgetGoalsAdmin,
 } from "./role-guards";
 import { db } from "../db";
 import { 
@@ -7413,7 +7414,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     applyBillingNotesVisibility,
   });
   // Task #687 — Financial Pulse Slice 1: per-customer budget usage.
-  registerBudgetRoutes(app, { requireAuthentication });
+  registerBudgetRoutes(app, { requireAuthentication, requireBulkBudgetGoalsAdmin });
   registerFinancialPulseRoutes(app, { requireAuthentication });
   // Task #1425 — merge duplicate monthly invoices for the same customer.
   registerInvoiceMergeRoutes(app, { requireAuthentication, requireInvoiceWrite });

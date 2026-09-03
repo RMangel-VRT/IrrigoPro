@@ -1,0 +1,62 @@
+# AMENDMENT to #2002 — Bulk Paste Budget Goals
+
+Three additions. The ticket is otherwise good, and its confirmation interlock is stronger than what it was written from.
+
+---
+
+## 1. The confirmation token already exists. Extract it; do not write a second one.
+
+`artifacts/api-server/src/routes/invoice-reminder-batch-routes.ts` already implements exactly the interlock #2002 describes, and implements it well:
+
+- `issueConfirmationToken` (:104) and `verifyConfirmationToken` (:124), both already exported
+- token format `exp.nonce.hmac`, signed with a key derived from `SESSION_SECRET` (:61)
+- `REMINDER_CONFIRMATION_TTL_MS` = 15 minutes (:52), sized so a human can read a list and think
+- `spentConfirmations` (:96), a spent-nonce map, so a token authorises exactly one run
+- ordering enforced by the server rather than the dialog — the file's header comment says so explicitly
+
+**What blocks direct reuse:** `ConfirmationClaims` (:73) is reminder-shaped — `invoiceIds` and `templateKey` — and `claimsFingerprint` (:80) hardcodes that shape.
+
+**Do this instead of copying the pattern into `budget-routes.ts`:** extract the generic half into a shared module — the token format, `sign`, the TTL, the spent-nonce map, `issueConfirmationToken` and `verifyConfirmationToken` — taking a **caller-supplied fingerprint string** rather than a typed claims object. The reminder route keeps its own `ConfirmationClaims` and `claimsFingerprint` and passes the resulting string in. The bulk-paste route passes its own: actor, company, year, and the canonical sorted row set.
+
+Afterwards there is **one** confirmation implementation with two callers, and the reminder route's behaviour is unchanged. Two copies of an HMAC interlock is the kind of duplication that only shows up as a bug the day one of them is fixed and the other is not.
+
+**Known limitation, now shared:** `spentConfirmations` is an in-memory `Map`, so replay protection is per-process and does not survive a restart. That is acceptable here and should not be over-engineered — the bulk write is already idempotent, since unchanged rows are skipped, so a replayed confirmation writes nothing. Note it in the shared module's comment so the next caller knows what it is getting.
+
+**Add to step 5:** extract rather than reimplement, and add a grep proof that exactly one confirmation-token implementation exists.
+
+---
+
+## 2. Step 1 must delete the original, not just add a copy.
+
+The ticket says to move the parser into the shared package and switch the form to import it. Make the deletion explicit: `parseBudgetGoalInput` is currently **defined and exported** at `artifacts/irrigopro/src/components/customer-form.tsx:30`. After the move, that definition is gone from the component and the file imports it.
+
+**Add to the Done list:** grep proof that `parseBudgetGoalInput` is defined in exactly one place in the repo.
+
+This is a move, not a rewrite. `customer-form-budget-preview.test.tsx` must pass **unchanged** afterwards — that is what proves the form's behaviour did not shift.
+
+---
+
+## 3. The ticket has no Definition of Done.
+
+Rule 7: a commit message is a claim, not evidence. #2002 has a behavioural "Done looks like" but no proof checklist, and every other ticket in this family carries one. Add:
+
+- [ ] `file:line` for the moved parser and its import, the new capability, the extracted confirmation module and both its callers, the matcher, the preview endpoint, the write path, and the audit call.
+- [ ] Grep proof: one `parseBudgetGoalInput`, one confirmation-token implementation, no second month-generation or distribution path.
+- [ ] Screenshot of the preview with matched, unchanged, unmatched, ambiguous and invalid rows visible together, and one customer flagged for preserved manual overrides.
+- [ ] Screenshot of the result summary after a real paste.
+- [ ] Captured response proving a customer name that exists only in another company comes back unmatched, and that nothing about that record is revealed.
+- [ ] Captured response for a replayed confirmation token and for one whose row set was edited after preview.
+- [ ] `customer-form-budget-preview.test.tsx` passing unchanged, and `bookkeeper-role-matrix.test.ts` passing unchanged.
+- [ ] Test output for idempotency, override preservation, audit atomicity, partial success, and the full role and nav matrix.
+- [ ] Deployed; commit message matches the diff.
+
+---
+
+## Note on priority
+
+Task #1995 is blocked waiting on real budget data, and this ticket is what unblocks it: fifty goals in one paste instead of fifty visits to the customer profile. It is September, and the season ends in October.
+
+## Relevant files to add
+
+- `artifacts/api-server/src/routes/invoice-reminder-batch-routes.ts` (`REMINDER_CONFIRMATION_TTL_MS` :52, `CONFIRMATION_KEY` :61, `ConfirmationClaims` :73, `claimsFingerprint` :80, `sign` :85, `spentConfirmations` :96, `issueConfirmationToken` :104, `verifyConfirmationToken` :124)
+- The new shared confirmation module the extraction creates

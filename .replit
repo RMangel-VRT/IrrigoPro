@@ -172,6 +172,18 @@ args = "seasonal-budget-financial-pulse"
 task = "workflow.run"
 args = "seasonal-budget-ui"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "bulk-budget-goals-backend"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "bulk-budget-goals-frontend"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "bulk-budget-goals-types"
+
 [[workflows.workflow]]
 name = "auth-middleware-coverage"
 author = "agent"
@@ -597,6 +609,39 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/irrigopro exec vitest run src/components/customer-form-budget-preview.test.tsx"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "bulk-budget-goals-backend"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/shared exec node --import tsx --test --test-reporter=spec src/budget-goal.test.ts && pnpm --filter @workspace/api-server exec node --import tsx --test --test-reporter=spec src/lib/budget-goal-bulk.test.ts src/routes/budget-goal-bulk-apply.test.ts src/routes/budget-goal-role-guard.test.ts src/seasonal-budget.test.ts src/routes/auth-middleware-coverage.test.ts"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "bulk-budget-goals-frontend"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/irrigopro exec vitest run src/pages/admin-budget-goals.test.tsx src/components/layout/nav-config.test.ts src/components/customer-form-budget-preview.test.tsx"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "bulk-budget-goals-types"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/shared typecheck && pnpm --filter @workspace/api-server typecheck && pnpm --filter @workspace/irrigopro typecheck"
 
 [workflows.workflow.metadata]
 isValidation = true
